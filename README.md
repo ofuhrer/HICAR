@@ -1,3 +1,79 @@
+## HICAR ➡️ SCHNAPS
+
+Since July 2026, HICAR development has shifted to the [SCHNAPS]() model. 
+SCHNAPS is the successor to HICAR, running on GPUs, being easier to build and setup runs, and featuring improved snow-atmosphere coupling.
+Also, the name is better.
+
+You can find SCHNAPS now hosted on CodeBerg here: [https://codeberg.org/SCHNAPS-Model/SCHNAPS](https://codeberg.org/SCHNAPS-Model/SCHNAPS).
+The GitHub repo is now archived and will not be updated.
+
+### Model Users (No code changes)
+
+To migrate a local clone of the model, simply:
+
+```bash
+git remote set-url origin https://codeberg.org/SCHNAPS-Model/SCHNAPS.git
+git fetch origin
+```
+
+If you don't have working changes in your clone, you may just consider cloning everything fresh.
+
+### Model Developers (Possible code changes)
+
+#### Starting from a new fork
+
+1. Create a [Codeberg account](https://codeberg.org/user/sign_up) and fork the new
+   repository at https://codeberg.org/SCHNAPS-Model/SCHNAPS.
+
+2. Point your local clone: `origin` at your new Codeberg fork, `upstream` at the project:
+
+```bash
+   git remote set-url origin   https://codeberg.org/YOUR-USERNAME/SCHNAPS.git
+   git remote set-url upstream https://codeberg.org/SCHNAPS-Model/SCHNAPS.git
+   git fetch --all
+```
+
+#### Migrating your local clone's changes
+
+Assuming you are on some branch, `my_branch`:
+
+```bash
+v1_commit=d4305d4d12
+
+# 0. **If you have changes in the working tree:** Preserve the dirty tree as a WIP commit + a backup branch
+git add -A # or a less aggressive, thoughtful add...
+git commit -m "WIP: local uncommitted changes"
+WIP=$(git rev-parse HEAD); git branch wip_backup
+git reset --hard HEAD~1
+
+# 1. Point remotes at Codeberg and fetch upstream
+git remote set-url origin   https://codeberg.org/YOUR-USERNAME/SCHNAPS.git
+git remote remove upstream 2>/dev/null
+git remote add upstream https://codeberg.org/SCHNAPS-Model/SCHNAPS.git
+git fetch upstream
+
+# 2. Merge SCHNAPS v1.0.0 onto your branch.
+git merge "$v1_commit"
+git commit            # conclude the merge once conflicts are resolved
+
+#3. Collapse to a clean base
+git reset --soft "$v1_commit"
+git commit -m "my_branch: work ported onto SCHNAPS main"
+
+# 4. Verify your changes did not add old hicar naming to anything, then commit (skip the commit if nothing changed).
+git grep -i hicar || echo "clean: no 'hicar' left in tracked content"
+git ls-files | grep -i hicar || echo "clean: no 'hicar' left in tracked paths"
+git commit -am "Port my_branch additions to SCHNAPS naming" || echo "nothing to rename"
+
+# 5. **If you had changes in the working tree:** Restore the originally-uncommitted changes as UNSTAGED, rename-aware
+git cherry-pick -n "$WIP"     # uses WIP's parent as base → isolates only the dirty diff
+#    If that dirty diff referenced HICAR names, re-run step 4a before continuing.
+git reset                     # unstage, so it matches the original dirty shape
+
+# 6. Publish to your fork when happy
+git push -u origin my_branch
+```
+
 # The High-resolution Intermediate Complexity Atmospheric Research Model (HICAR)
 
 <!-- The four merge-gate lanes that sign main's HEAD: hicar-full-test, valgrind, gpu-check, snow-parity -->
