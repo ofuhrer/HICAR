@@ -1,6 +1,6 @@
 ## HICAR ➡️ SCHNAPS
 
-Since July 2026, HICAR development has shifted to the [SCHNAPS]() model. 
+Since July 2026, HICAR development has shifted to the [SCHNAPS](https://codeberg.org/SCHNAPS-Model/SCHNAPS) model. 
 SCHNAPS is the successor to HICAR, running on GPUs, being easier to build and setup runs, and featuring improved snow-atmosphere coupling.
 Also, the name is better.
 
