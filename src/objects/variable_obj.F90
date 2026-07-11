@@ -21,7 +21,7 @@ contains
 
 
         this%id = var_idx
-        call this%set_from_metadata(var_idx)
+        call set_from_metadata(this, var_idx)
 
         this%one_d   = grid%is1d
         this%two_d   = grid%is2d
