@@ -58,6 +58,7 @@ set(FETCHCONTENT_BASE_DIR "${CMAKE_BINARY_DIR}/external")
 ####### Set up the user variables #######
 set(MODE "release" CACHE STRING "Set compilation flags, useful for debugging")
 set(FC "" CACHE STRING "Set the fortran compiler to use (can be auto-detected for most cases)")
+set(GPU_ARCH "ccnative" CACHE STRING "NVHPC GPU architecture target for OpenACC builds, e.g. ccnative or cc80")
 
 if (NOT DEFINED FFTW_DIR OR FFTW_DIR STREQUAL "")
 	set(FFTW_DIR $ENV{FFTW_DIR} CACHE PATH "Path to FFTW installation")
@@ -192,26 +193,32 @@ list(APPEND CMAKE_MESSAGE_INDENT "  ")
 
 
 # enable_language(Fortran) above resolved CMAKE_Fortran_COMPILER (the FC we forced, or
-# CMake's auto-detection). Classify by executable basename — a directory component
-# containing e.g. "gfortran" can't misclassify.
+# CMake's auto-detection). Prefer CMake's compiler ID so MPI wrappers such as
+# mpifort are classified by their underlying compiler.
 message(STATUS "Using Fortran compiler: ${CMAKE_Fortran_COMPILER}")
 get_filename_component(FC_NAME "${CMAKE_Fortran_COMPILER}" NAME)
-if (FC_NAME MATCHES "gfortran")
+if (CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
+	set(COMPILER "gnu")
+elseif (CMAKE_Fortran_COMPILER_ID MATCHES "NVHPC")
+	set(COMPILER "nvfortran")
+elseif (FC_NAME MATCHES "gfortran")
 	set(COMPILER "gnu")
 elseif (FC_NAME MATCHES "mpif90")
 	set(COMPILER "gnu")
-elseif (FC_NAME MATCHES "mpifort")
-	set(COMPILER "gnu")
 elseif (FC_NAME MATCHES "nvfortran")
 	set(COMPILER "nvfortran")
+elseif (FC_NAME MATCHES "mpifort")
+	message(FATAL_ERROR "Could not classify MPI wrapper '${CMAKE_Fortran_COMPILER}' from CMAKE_Fortran_COMPILER_ID='${CMAKE_Fortran_COMPILER_ID}'")
+else()
+	message(FATAL_ERROR "Unknown Fortran compiler (FC) specified")
+endif()
+
+if (COMPILER STREQUAL "nvfortran")
 	# Auto-enable OpenACC for NVFortran if not explicitly set
 	if (NOT OPENACC_SET_BY_USER)
 		set(OPENACC ON CACHE BOOL "Enable OpenACC support for GPU acceleration" FORCE)
 		message(STATUS "Auto-enabling OpenACC support for NVFortran compiler")
 	endif()
-
-else()
-	message(FATAL_ERROR "Unknown Fortran compiler (FC) specified")
 endif()
 unset(FC_NAME)
 
@@ -244,7 +251,7 @@ if(MODE STREQUAL "debug")
 		set(HICAR_Fortran_FLAGS -O0 -g -fopenmp -fbounds-check -fcheck=all -Wall -fbacktrace -finit-real=nan -finit-integer=-99999999 -finit-logical=true -finit-derived -ffree-line-length-none -Wconversion)
 	elseif (COMPILER STREQUAL "nvfortran")
 		if(OPENACC)
-			set(HICAR_Fortran_FLAGS -O0 -g -traceback -Mbounds -Minfo=accel -Mpreprocess -march=native -acc=gpu -gpu=mem:separate,ccnative)
+			set(HICAR_Fortran_FLAGS -O0 -g -traceback -Mbounds -Minfo=accel -Mpreprocess -march=native -acc=gpu -gpu=mem:separate,${GPU_ARCH})
 		else()
 			set(HICAR_Fortran_FLAGS -O0 -g -traceback -mp -Mbounds -Mpreprocess -march=native)
 		endif()
@@ -267,7 +274,7 @@ elseif(MODE STREQUAL "release")
 		set(HICAR_Fortran_FLAGS -O3 -fopenmp ${_gnu_opt_tail})
 	elseif (COMPILER STREQUAL "nvfortran")
 		if(OPENACC)
-			set(HICAR_Fortran_FLAGS -O3 -Minfo=accel -march=native -acc=gpu -gpu=mem:separate,ccnative)
+			set(HICAR_Fortran_FLAGS -O3 -Minfo=accel -march=native -acc=gpu -gpu=mem:separate,${GPU_ARCH})
 		else()
 			set(HICAR_Fortran_FLAGS -O3 -mp -march=native)
 		endif()
