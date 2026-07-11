@@ -15,7 +15,7 @@ program test_driver
     use test_geo, only : collect_geo_suite
     use test_time, only : collect_time_suite
     use test_utilities, only : collect_utilities_suite
-    use mpi_f08
+    use mpi
 #ifdef _OPENACC
     use openacc
 #endif
@@ -24,26 +24,27 @@ program test_driver
     use output_metadata, only: initialize_var_constants
     use string, only: to_lower
     implicit none
-    integer :: stat, global_stat, is, ierr, my_index, null_unit
+    integer :: stat, global_stat, is, ierr, my_index
     character(len=:), allocatable :: suite_name, test_name, first_arg
     type(testsuite_type), allocatable :: testsuites(:)
     character(len=*), parameter :: fmt = '("#", *(1x, a))'
-    logical :: init_flag, verbose
+    logical :: init_flag, verbose, redirected
     logical :: no_test_run = .True.
-    character(len=9) :: file
+    character(len=64) :: stdout_file, stderr_file
     integer :: dev, devNum, local_rank, comm_size
 #ifdef _OPENACC
-    type(MPI_Comm) :: local_comm
+    integer :: local_comm
     integer(acc_device_kind) :: devtype
 #endif
 
     stat = 0
+    redirected = .False.
 
     !Initialize MPI if needed
     init_flag = .False.
-    call MPI_initialized(init_flag)
+    call MPI_initialized(init_flag, ierr)
     if (.not.(init_flag)) then
-        call MPI_INIT()
+        call MPI_INIT(ierr)
         init_flag = .True.
     endif
 #ifdef _OPENACC
@@ -51,9 +52,9 @@ program test_driver
 ! ****** Set the Accelerator device number based on local rank
 !
      call MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, &
-          MPI_INFO_NULL, local_comm)
-     call MPI_Comm_rank(local_comm, local_rank)
-     call MPI_Comm_size(local_comm, comm_size)
+          MPI_INFO_NULL, local_comm, ierr)
+     call MPI_Comm_rank(local_comm, local_rank, ierr)
+     call MPI_Comm_size(local_comm, comm_size, ierr)
 
      devtype = acc_get_device_type()
      devNum = acc_get_num_devices(devtype)
@@ -110,14 +111,15 @@ program test_driver
         ! Check if the first argument is a test suite name
         if (my_index /= 1) then
             ! Redirect stdout and stderr to /dev/null for non-root processes
-            file = '.tmp_dupplicate_test_output'
-            open(newunit=null_unit, file=file, status='replace')
+            write(stdout_file, '(A,I0,A)') '.tmp_hicar_test_stdout_', my_index, '.log'
+            write(stderr_file, '(A,I0,A)') '.tmp_hicar_test_stderr_', my_index, '.log'
             ! Redirect standard output
             close(output_unit)
-            open(output_unit, file=file, status='replace')
+            open(output_unit, file=trim(stdout_file), status='replace')
             ! Redirect error output
             close(error_unit)
-            open(error_unit, file=file, status='replace')
+            open(error_unit, file=trim(stderr_file), status='replace')
+            redirected = .True.
         ! else
         !     STD_OUT_PE = .True.
         endif
@@ -155,15 +157,19 @@ program test_driver
         end do
     end if
 
-    call MPI_Allreduce(stat, global_stat, 1, MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD)
+    call MPI_Allreduce(stat, global_stat, 1, MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD, ierr)
 
     if (global_stat > 0) then
-        call MPI_Comm_size(MPI_COMM_WORLD, comm_size)
+        call MPI_Comm_size(MPI_COMM_WORLD, comm_size, ierr)
 
         if (my_index == 1) write(error_unit, '(i0, 1x, a)') (global_stat/comm_size), "test(s) failed!"
         call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
     end if
 
-    call MPI_Finalize()
+    call MPI_Finalize(ierr)
+    if (redirected) then
+        close(output_unit, status='delete')
+        close(error_unit, status='delete')
+    endif
   
   end program test_driver

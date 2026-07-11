@@ -440,9 +440,10 @@ contains
     ! For the 2D variant, pass k_s = k_e = 1 (nk = 1). The k-term then collapses
     ! to zero and the formula reduces to the 2D (v, i, j) layout.
     subroutine build_indexed_type_from_cells(cells, n_vars, i_origin, j_origin, ni, k_s, k_e, mpi_type)
+        integer :: ierr
         type(nest_cell_list_t), intent(in)  :: cells
         integer,                intent(in)  :: n_vars, i_origin, j_origin, ni, k_s, k_e
-        type(MPI_Datatype),     intent(out) :: mpi_type
+        integer,     intent(out) :: mpi_type
 
         integer :: nk, counter, c_start, c_end, cc, k, j_cur, run_start, run_end
         integer, allocatable :: block_lengths(:), displacements(:)
@@ -451,7 +452,7 @@ contains
 
         if (cells%n * nk == 0) then
             mpi_type = MPI_REAL
-            call MPI_Type_commit(mpi_type)
+            call MPI_Type_commit(mpi_type, ierr)
             return
         endif
 
@@ -496,8 +497,8 @@ contains
             c_start = c_end + 1
         enddo
 
-        call MPI_Type_Indexed(counter, block_lengths(1:counter), displacements(1:counter), MPI_REAL, mpi_type)
-        call MPI_Type_commit(mpi_type)
+        call MPI_Type_Indexed(counter, block_lengths(1:counter), displacements(1:counter), MPI_REAL, mpi_type, ierr)
+        call MPI_Type_commit(mpi_type, ierr)
     end subroutine build_indexed_type_from_cells
 
     ! Release the cached (i,j) cell lists for a given child after all three
@@ -531,7 +532,7 @@ contains
         class(ioserver_t), intent(inout) :: this
         type(ioserver_t),  intent(in)    :: child_ioserver
         integer,           intent(in)    :: child_indx
-        type(MPI_Datatype),intent(out)   :: send_nest_types(:), buffer_nest_types(:)
+        integer,intent(out)   :: send_nest_types(:), buffer_nest_types(:)
 
         integer :: n, ni_send, ni_buff
 
@@ -559,7 +560,7 @@ contains
         class(ioserver_t), intent(inout) :: this
         type(ioserver_t),  intent(in)    :: child_ioserver
         integer,           intent(in)    :: child_indx
-        type(MPI_Datatype),intent(out)   :: send_nest_types(:), buffer_nest_types(:)
+        integer,intent(out)   :: send_nest_types(:), buffer_nest_types(:)
 
         integer :: n, ni_send, ni_buff
 
@@ -586,7 +587,7 @@ contains
         class(ioserver_t), intent(inout) :: this
         type(ioserver_t),  intent(in)    :: child_ioserver
         integer,           intent(in)    :: child_indx
-        type(MPI_Datatype),intent(out)   :: send_nest_types(:), buffer_nest_types(:)
+        integer,intent(out)   :: send_nest_types(:), buffer_nest_types(:)
 
         integer :: n, ni_send, ni_buff
 
@@ -678,13 +679,13 @@ contains
         ! Get size of an MPI_REAL
         call MPI_Type_size(MPI_REAL, real_size, ierr)
         do n = 1, ioserver%n_servers
-            call MPI_Type_get_extent(ioserver%send_nest_types(child_indx,n), lowerbound, extent)
+            call MPI_Type_get_extent(ioserver%send_nest_types(child_indx,n), lowerbound, extent, ierr)
             if (extent > real_size) then
                 send_msg_size_alltoall(n) = 1
             else
                 send_msg_size_alltoall(n) = 0
             endif
-            call MPI_Type_get_extent(ioserver%buffer_nest_types(child_indx,n), lowerbound, extent)
+            call MPI_Type_get_extent(ioserver%buffer_nest_types(child_indx,n), lowerbound, extent, ierr)
             if (extent > real_size) then
                 buff_msg_size_alltoall(n) = 1
             else
@@ -693,7 +694,7 @@ contains
         enddo
 
         call MPI_Alltoallw(gather_buffer_test(1, ioserver%i_s_w, ioserver%k_s_w, ioserver%j_s_w),  send_msg_size_alltoall, disp_alltoall, ioserver%send_nest_types(child_indx,:), &
-                          forcing_buffer_test(1, child_ioserver%i_s_r, child_ioserver%k_s_r, child_ioserver%j_s_r),  buff_msg_size_alltoall, disp_alltoall, ioserver%buffer_nest_types(child_indx,:), ioserver%IO_Comms)
+                          forcing_buffer_test(1, child_ioserver%i_s_r, child_ioserver%k_s_r, child_ioserver%j_s_r),  buff_msg_size_alltoall, disp_alltoall, ioserver%buffer_nest_types(child_indx,:), ioserver%IO_Comms, ierr)
 
         ! check that the whole of the forcing buffer has been filled correctly
         do j = child_ioserver%j_s_r, child_ioserver%j_e_r+1
@@ -917,7 +918,7 @@ contains
         integer, allocatable, dimension(:) :: cnts, disps
 
         !get number of clients on this communicator
-        call MPI_Comm_size(this%client_comms, comm_size)
+        call MPI_Comm_size(this%client_comms, comm_size, ierr)
         ! don't forget about oursevles
         this%n_children = comm_size - 1
 
@@ -951,22 +952,22 @@ contains
 
         ! The PE of the parent communicator is the last PE in the communicator, i.e. n_children
 
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%iswc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%iewc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%kswc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%kewc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%jswc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%jewc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%isrec, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%ierec, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%jsrec, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%jerec, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%isrc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%ierc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%ksrc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%kerc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%jsrc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
-        call MPI_Gatherv(n, 0, MPI_INTEGER, this%jerc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%iswc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%iewc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%kswc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%kewc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%jswc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%jewc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%isrec, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%ierec, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%jsrec, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%jerec, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%isrc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%ierc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%ksrc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%kerc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%jsrc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
+        call MPI_Gatherv(n, 0, MPI_INTEGER, this%jerc, cnts, disps, MPI_INTEGER, this%n_children, this%client_comms, ierr)
 
         this%ide = 0
         this%kde = 0
@@ -1013,7 +1014,7 @@ contains
         integer :: n, n_3d, n_2d, x_stag, y_stag, oi
         logical :: should_write_restart
         INTEGER(KIND=MPI_ADDRESS_KIND) :: disp
-        type(MPI_Request) :: reqs(2 * this%n_children)
+        integer :: reqs(2 * this%n_children)
 
         msg_size = 1
         disp = 0
@@ -1196,7 +1197,7 @@ contains
     module subroutine gather_forcing_2d(this)
         class(ioserver_t), intent(inout) :: this
         integer :: i, ierr
-        type(MPI_Request), allocatable :: reqs(:)
+        integer, allocatable :: reqs(:)
 
         if (this%n_f_2d <= 0) return
 
@@ -1219,7 +1220,7 @@ contains
     module subroutine gather_forcing_3d_init(this)
         class(ioserver_t), intent(inout) :: this
         integer :: i, ierr
-        type(MPI_Request), allocatable :: reqs(:)
+        integer, allocatable :: reqs(:)
 
         if (this%n_f_3d_init <= 0) return
 
@@ -1273,13 +1274,13 @@ contains
         ! Get size of an MPI_REAL
         call MPI_Type_size(MPI_REAL, real_size, ierr)
         do n = 1, this%n_servers
-            call MPI_Type_get_extent(this%send_nest_types(child_indx,n), lowerbound, extent)
+            call MPI_Type_get_extent(this%send_nest_types(child_indx,n), lowerbound, extent, ierr)
             if (extent > real_size) then
                 send_msg_size_alltoall(n) = 1
             else
                 send_msg_size_alltoall(n) = 0
             endif
-            call MPI_Type_get_extent(this%buffer_nest_types(child_indx,n), lowerbound, extent)
+            call MPI_Type_get_extent(this%buffer_nest_types(child_indx,n), lowerbound, extent, ierr)
             if (extent > real_size) then
                 buff_msg_size_alltoall(n) = 1
             else
@@ -1288,7 +1289,7 @@ contains
         enddo
 
         call MPI_Alltoallw(this%gather_buffer(1, this%i_s_w, this%k_s_w, this%j_s_w),  send_msg_size_alltoall, disp_alltoall, this%send_nest_types(child_indx,:), &
-                        child_ioserver%forcing_buffer(1, child_ioserver%i_s_r, child_ioserver%k_s_r, child_ioserver%j_s_r), buff_msg_size_alltoall, disp_alltoall, this%buffer_nest_types(child_indx,:), this%IO_Comms)
+                        child_ioserver%forcing_buffer(1, child_ioserver%i_s_r, child_ioserver%k_s_r, child_ioserver%j_s_r), buff_msg_size_alltoall, disp_alltoall, this%buffer_nest_types(child_indx,:), this%IO_Comms, ierr)
 
         ! This call will scatter the forcing fields to the ioclients of the nest child
         call child_ioserver%scatter_forcing()
@@ -1316,7 +1317,7 @@ contains
         integer :: family_nz, ierr, real_size
         integer, allocatable :: send_2d_sizes(:), buff_2d_sizes(:), disp_2d(:)
         integer, allocatable :: send_3d_sizes(:), buff_3d_sizes(:), disp_3d(:)
-        type(MPI_Request) :: req
+        integer :: req
         INTEGER(KIND=MPI_ADDRESS_KIND) :: lowerbound, extent
 
         if (this%nest_init_send_done) return
@@ -1412,14 +1413,14 @@ contains
                     allocate(send_2d_sizes(this%n_servers), buff_2d_sizes(this%n_servers), disp_2d(this%n_servers))
                     disp_2d = 0
                     do ci = 1, this%n_servers
-                        call MPI_Type_get_extent(this%send_nest_types_2d(n,ci), lowerbound, extent)
+                        call MPI_Type_get_extent(this%send_nest_types_2d(n,ci), lowerbound, extent, ierr)
                         send_2d_sizes(ci) = merge(1, 0, extent > real_size)
-                        call MPI_Type_get_extent(this%buffer_nest_types_2d(n,ci), lowerbound, extent)
+                        call MPI_Type_get_extent(this%buffer_nest_types_2d(n,ci), lowerbound, extent, ierr)
                         buff_2d_sizes(ci) = merge(1, 0, extent > real_size)
                     enddo
 
                     call MPI_Alltoallw(this%gather_buffer_2d(1, this%i_s_w, this%j_s_w), send_2d_sizes, disp_2d, this%send_nest_types_2d(n,:), &
-                        child_ioserver%forcing_buffer_2d(1, child_ioserver%i_s_r, child_ioserver%j_s_r), buff_2d_sizes, disp_2d, this%buffer_nest_types_2d(n,:), this%IO_Comms)
+                        child_ioserver%forcing_buffer_2d(1, child_ioserver%i_s_r, child_ioserver%j_s_r), buff_2d_sizes, disp_2d, this%buffer_nest_types_2d(n,:), this%IO_Comms, ierr)
                     deallocate(send_2d_sizes, buff_2d_sizes, disp_2d)
 
                     ! Fire-and-forget Isend of 2D data to each child ioclient.
@@ -1468,14 +1469,14 @@ contains
                     allocate(send_3d_sizes(this%n_servers), buff_3d_sizes(this%n_servers), disp_3d(this%n_servers))
                     disp_3d = 0
                     do ci = 1, this%n_servers
-                        call MPI_Type_get_extent(this%send_nest_types_3d_init(n,ci), lowerbound, extent)
+                        call MPI_Type_get_extent(this%send_nest_types_3d_init(n,ci), lowerbound, extent, ierr)
                         send_3d_sizes(ci) = merge(1, 0, extent > real_size)
-                        call MPI_Type_get_extent(this%buffer_nest_types_3d_init(n,ci), lowerbound, extent)
+                        call MPI_Type_get_extent(this%buffer_nest_types_3d_init(n,ci), lowerbound, extent, ierr)
                         buff_3d_sizes(ci) = merge(1, 0, extent > real_size)
                     enddo
 
                     call MPI_Alltoallw(this%gather_buffer_3d_init(1, this%i_s_w, 1, this%j_s_w), send_3d_sizes, disp_3d, this%send_nest_types_3d_init(n,:), &
-                        child_ioserver%forcing_buffer_3d_init(1, child_ioserver%i_s_r, 1, child_ioserver%j_s_r), buff_3d_sizes, disp_3d, this%buffer_nest_types_3d_init(n,:), this%IO_Comms)
+                        child_ioserver%forcing_buffer_3d_init(1, child_ioserver%i_s_r, 1, child_ioserver%j_s_r), buff_3d_sizes, disp_3d, this%buffer_nest_types_3d_init(n,:), this%IO_Comms, ierr)
                     deallocate(send_3d_sizes, buff_3d_sizes, disp_3d)
 
                     ! Fire-and-forget Isend of 3D init data to each child
@@ -1515,7 +1516,7 @@ contains
         class(ioserver_t), intent(inout) :: this
 
         integer :: i, ierr
-        type(MPI_Request) :: reqs(this%n_children)
+        integer :: reqs(this%n_children)
 
         ! Pack each child's slice into its send buffer and post one Isend
         ! per child on kIO_TAG_READ.  Children post matching Irecv in
@@ -1543,7 +1544,7 @@ contains
         integer :: ncid, file_var_id, dimid_3d(4), nz, err, varid, start_3d(4), cnt_3d(4), start_2d(3), cnt_2d(3)
         integer :: nx_c, ny_c, nz_c, ierr
 
-        type(MPI_Info) :: IO_Comms_info
+        integer :: IO_Comms_info
         real, allocatable :: data3d(:,:,:,:), restart_data_3d(:,:,:,:), restart_data_2d(:,:,:)
         type(meta_data_t)  :: var_meta
         character(len=kMAX_NAME_LENGTH) :: name
@@ -1552,7 +1553,7 @@ contains
 
         integer :: restart_step                         ! time step relative to the start of the restart file
         type(Time_type) :: time_at_step   ! restart date as a modified julian day
-        type(MPI_Request), allocatable :: reqs(:)
+        integer, allocatable :: reqs(:)
         type(rst_pack_t), allocatable :: packs(:)
 
         allocate(restart_data_3d(this%n_w_3d,this%i_s_re:this%i_e_re+1,this%k_s_w:this%k_e_w,this%j_s_re:this%j_e_re+1))
@@ -1585,10 +1586,10 @@ contains
             write(*,*) " ------------------ "
         endif
 
-        call MPI_Comm_get_info(this%IO_Comms, IO_Comms_info)
+        call MPI_Comm_get_info(this%IO_Comms, IO_Comms_info, ierr)
 
         call check_ncdf(nf90_open(restart_in_file, IOR(nf90_nowrite,NF90_NETCDF4), ncid, &
-                comm = this%IO_Comms%MPI_VAL, info = IO_Comms_info%MPI_VAL), " Opening file "//trim(restart_in_file))
+                comm = this%IO_Comms, info = IO_Comms_info), " Opening file "//trim(restart_in_file))
 
         ! Validate that the restart file config matches the current config
         call compare_restart_config(ncid, options)

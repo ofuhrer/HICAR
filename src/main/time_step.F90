@@ -12,7 +12,7 @@
 !! ----------------------------------------------------------------------------
 submodule(time_step) time_step_implementation
     use iso_fortran_env, only : output_unit
-    use mpi_f08, only: MPI_Allreduce, MPI_REAL, MPI_MIN
+    use mpi, only: MPI_REAL, MPI_MIN
     use string,                     only : as_string
     use microphysics,               only : mp
     use advection,                  only : advect
@@ -234,7 +234,7 @@ contains
                         err_msg="error computing dt for winds at the future input timestep")
 
         !Minimum dt is min(present_dt_seconds, future_dt_seconds). Then reduce this accross all compute processes
-        call MPI_Allreduce(min(present_dt_seconds, future_dt_seconds), seconds_out, 1, MPI_REAL, MPI_MIN, domain%compute_comms)
+        call MPI_Allreduce(min(present_dt_seconds, future_dt_seconds), seconds_out, 1, MPI_REAL, MPI_MIN, domain%compute_comms, ierr)
         
         if (min(present_dt_seconds, future_dt_seconds)==seconds_out) then
 

@@ -13,7 +13,8 @@ module adv_std
     use adv_fluxcorr,      only: WRF_flux_corr
     use timer_interface,   only: timer_t
     use vertical_interpolation, only: find_match, weights   ! Zaengl Variant-B constant-z LUT
-    use mpi_f08,           only: MPI_Allreduce, MPI_IN_PLACE, MPI_SUM, MPI_REAL, MPI_MIN, MPI_MAX, MPI_DOUBLE_PRECISION
+    use mpi_utils_module,  only: allreduce_double_sum_in_place
+    use mpi,           only: MPI_IN_PLACE, MPI_REAL, MPI_MIN, MPI_MAX
     implicit none
     private
 
@@ -1288,7 +1289,7 @@ contains
     subroutine adv_std_init_theta_ref(domain)
         implicit none
         type(domain_t), intent(in) :: domain
-        integer :: zv, thv, i, j, k, nz, nbins, b, nc, m
+        integer :: zv, thv, i, j, k, nz, nbins, b, nc, m, ierr
         ! th_sum/z_sum/bcnt accumulate in DOUBLE precision so the per-bin mean is
         ! decomposition-invariant: single-precision summation of the same cells in
         ! a different partition order (GPU atomics + MPI_SUM grouping) drifts by
@@ -1336,8 +1337,8 @@ contains
                 enddo
             enddo
         enddo
-        call MPI_Allreduce(MPI_IN_PLACE, zmin, 1, MPI_REAL, MPI_MIN, domain%compute_comms)
-        call MPI_Allreduce(MPI_IN_PLACE, zmax, 1, MPI_REAL, MPI_MAX, domain%compute_comms)
+        call MPI_Allreduce(MPI_IN_PLACE, zmin, 1, MPI_REAL, MPI_MIN, domain%compute_comms, ierr)
+        call MPI_Allreduce(MPI_IN_PLACE, zmax, 1, MPI_REAL, MPI_MAX, domain%compute_comms, ierr)
 
         dzbin = (zmax - zmin) / real(nbins)
         if (dzbin <= 0.0) dzbin = 1.0   ! defensive (degenerate single-height)
@@ -1367,9 +1368,9 @@ contains
         enddo
         !$acc exit data copyout(th_sum, z_sum, bcnt)
 
-        call MPI_Allreduce(MPI_IN_PLACE, th_sum, nbins, MPI_DOUBLE_PRECISION, MPI_SUM, domain%compute_comms)
-        call MPI_Allreduce(MPI_IN_PLACE, z_sum,  nbins, MPI_DOUBLE_PRECISION, MPI_SUM, domain%compute_comms)
-        call MPI_Allreduce(MPI_IN_PLACE, bcnt,   nbins, MPI_DOUBLE_PRECISION, MPI_SUM, domain%compute_comms)
+        call allreduce_double_sum_in_place(th_sum, nbins, domain%compute_comms)
+        call allreduce_double_sum_in_place(z_sum,  nbins, domain%compute_comms)
+        call allreduce_double_sum_in_place(bcnt,   nbins, domain%compute_comms)
 
         ! ---- compact NON-EMPTY bins into a monotone (zb_c, th_c) table.
         ! Bin mean height z_sum/bcnt (not the geometric bin centre) so each

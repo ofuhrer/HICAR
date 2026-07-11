@@ -14,7 +14,7 @@
 module test_snow_drift
 
     use variable_interface,  only: variable_t
-    use mpi_f08
+    use mpi
     use icar_constants
     use testdrive,           only: new_unittest, unittest_type, error_type, check, test_failed, get_argument
     use string,              only: to_lower

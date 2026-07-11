@@ -2852,7 +2852,7 @@ contains
         type(options_t), intent(in)     :: options
 
         real, allocatable :: temporary_data(:,:)
-        integer :: nx_global, ny_global, nz_global, nsmooth, adv_order, my_index
+        integer :: nx_global, ny_global, nz_global, nsmooth, adv_order, my_index, ierr
         integer :: max_halo_nz
 
         nsmooth = max(1, int(options%wind%smooth_wind_distance / options%domain%dx))
@@ -2879,7 +2879,7 @@ contains
         if (this%compute_comms == MPI_COMM_NULL) then
             my_index = 1
         else
-            call MPI_Comm_rank(this%compute_comms, my_index)
+            call MPI_Comm_rank(this%compute_comms, my_index, ierr)
             ! MPI returns rank, which is 0-indexed
             my_index = my_index + 1
         endif

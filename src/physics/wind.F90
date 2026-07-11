@@ -1509,7 +1509,7 @@ contains
             do j = jms, jme
                 do k=kms, kme
                     do i = ims, ime
-                        winddir(i,k,j) = ATAN(-u_m(i,k,j),-v_m(i,k,j))*rad2deg
+                        winddir(i,k,j) = ATAN2(-u_m(i,k,j),-v_m(i,k,j))*rad2deg
                         if(winddir(i,k,j) <= 0.0) winddir(i,k,j) = winddir(i,k,j)+360
                         if(winddir(i,k,j) == 360.0) winddir(i,k,j) = 0.0
                         dir_indices(i,k,j) = max(min(int(winddir(i,k,j)/5)+1,ubound_terrain),1)                 

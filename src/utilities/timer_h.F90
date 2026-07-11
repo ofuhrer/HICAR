@@ -9,7 +9,7 @@
 !! ------------------------
 module timer_interface
 
-    use mpi_f08
+    use mpi
 
     implicit none
     private
@@ -108,7 +108,7 @@ interface
     module function timer_mean(this,comms) result(mean_t)
         implicit none
         class(timer_t), intent(inout) :: this
-        type(MPI_Comm), intent(in) :: comms
+        integer, intent(in) :: comms
         real :: mean_t
     end function timer_mean
     !> -----------------------------------
@@ -120,7 +120,7 @@ interface
     module function timer_min(this,comms) result(min_t)
         implicit none
         class(timer_t), intent(inout) :: this
-        type(MPI_Comm), intent(in) :: comms
+        integer, intent(in) :: comms
         real :: min_t
     end function timer_min
     !> -----------------------------------
@@ -132,7 +132,7 @@ interface
     module function timer_max(this,comms) result(max_t)
         implicit none
         class(timer_t), intent(inout) :: this
-        type(MPI_Comm), intent(in) :: comms
+        integer, intent(in) :: comms
         real :: max_t
     end function timer_max
 end interface

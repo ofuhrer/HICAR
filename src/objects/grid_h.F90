@@ -2,7 +2,7 @@ module grid_interface
 
     use icar_constants 
     use mod_wrf_constants, only : epsilon
-    use mpi_f08
+    use mpi
     implicit none
 
     private
@@ -33,14 +33,14 @@ module grid_interface
         integer ::  ids,ide, jds,jde, kds,kde, & ! for the entire model domain    (d)
                     its,ite, jts,jte, kts,kte    ! for the data tile to process   (t)
 
-        type(MPI_Datatype) :: NS_halo
-        type(MPI_Datatype) :: NS_win_halo
+        integer :: NS_halo
+        integer :: NS_win_halo
 
-        type(MPI_Datatype) :: EW_halo
-        type(MPI_Datatype) :: EW_win_halo
+        integer :: EW_halo
+        integer :: EW_win_halo
 
-        type(MPI_Datatype) :: corner_halo
-        type(MPI_Datatype) :: corner_win_halo
+        integer :: corner_halo
+        integer :: corner_win_halo
     contains
         procedure :: get_dims
         procedure :: domain_decomposition
@@ -66,7 +66,7 @@ interface
         class(grid_t),   intent(inout) :: this
         integer,         intent(in)    :: nx, ny, nz
         integer, optional, intent(in)  :: n_4d, image
-        type(MPI_Comm), optional, intent(in)    :: comms
+        integer, optional, intent(in)    :: comms
         integer, optional, intent(in)    :: global_nz, adv_order, nx_extra, ny_extra
   
     end subroutine

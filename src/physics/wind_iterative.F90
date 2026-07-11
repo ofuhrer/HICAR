@@ -23,7 +23,7 @@ module wind_iterative
     use icar_constants,    only : STD_OUT_PE, kVARS, kITERATIVE_WINDS
     use options_interface, only : options_t
     use iso_fortran_env
-    use mpi_f08
+    use mpi
     use openacc
     use string,        only : str
     use debug_module,  only : domain_check_winds
@@ -127,7 +127,7 @@ module wind_iterative
     real(c_double), allocatable, target, dimension(:,:) :: north_send, north_recv    ! shape (i_s-1:i_e+1, k_s-1:k_e+1)
     real(c_double), allocatable, target, dimension(:,:) :: south_send, south_recv    ! shape (i_s-1:i_e+1, k_s-1:k_e+1)
 
-    type(MPI_Comm) :: solver_comm
+    integer :: solver_comm
     integer :: solver_rank = -1
     integer :: east_neighbor = -1, west_neighbor = -1, north_neighbor = -1, south_neighbor = -1
 
@@ -148,7 +148,7 @@ module wind_iterative
         integer :: hs, n_rows, n_rows_global
         real    :: dx
         integer :: solver_rank, east_neighbor, west_neighbor, north_neighbor, south_neighbor
-        type(MPI_Comm) :: solver_comm
+        integer :: solver_comm
         ! Flags
         logical :: structure_uploaded = .false.   ! default-init: read at restore_from_cache
         logical :: operator_probed = .false.
@@ -232,7 +232,7 @@ contains
             call MPI_Comm_rank(domain%compute_comms, my_rank_in_comm, ierr)
             device_num = acc_get_device_num(acc_device_nvidia)
             nccl_rc = nccl_comm_init(nccl_comm, nprocs, my_rank_in_comm, &
-                                      domain%compute_comms%MPI_VAL, device_num)
+                                      domain%compute_comms, device_num)
             if (nccl_rc /= 0 .and. STD_OUT_PE) then
                 print*, "WARNING: nccl_comm_init failed in wind_iterative, rc=", nccl_rc
             endif
@@ -1554,7 +1554,7 @@ contains
         real(c_double), dimension(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1), intent(inout) :: v
         type(domain_t), intent(in) :: domain
         integer :: ierr, i, j, k, nreq
-        type(MPI_Request) :: reqs(8)
+        integer :: reqs(8)
         integer :: nz_w, nx_w, ny_w
         integer, parameter :: tag_ew = 200, tag_we = 201, tag_ns = 202, tag_sn = 203
 
@@ -2081,7 +2081,7 @@ contains
         real, dimension(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1), intent(inout) :: lambda_3d
         type(domain_t), intent(in) :: domain
         integer :: ierr, my_rank
-        type(MPI_Status) :: mpi_stat
+        integer :: mpi_stat(MPI_STATUS_SIZE)
         integer :: nz, nx, ny
         integer :: east_rank, west_rank, north_rank, south_rank
         integer, parameter :: tag_ew = 100, tag_we = 101, tag_ns = 102, tag_sn = 103

@@ -163,10 +163,11 @@ contains
     !!
     !!------------------------------------------------------------
     module subroutine read_next_step(this, buffer, par_comms)
+        integer :: ierr
         class(reader_t), intent(inout) :: this
         real, allocatable, intent(inout) :: buffer(:,:,:,:)
-        type(MPI_Comm), intent(in)              :: par_comms
-        type(MPI_Info) :: par_comm_info
+        integer, intent(in)              :: par_comms
+        integer :: par_comm_info
 
         real, allocatable :: data4d(:,:,:,:), data3d(:,:,:), data2d(:,:), data1d(:)
         type(meta_data_t)  :: var
@@ -190,9 +191,9 @@ contains
                 call check_ncdf( nf90_open(trim(this%file_list(this%curfile)), IOR(NF90_NOWRITE,NF90_NETCDF4), this%ncfile_id), " Opening file "//trim(this%file_list(this%curfile)))
             else
                 par_comm_info = MPI_INFO_NULL
-                call MPI_Comm_get_info(par_comms, par_comm_info)
+                call MPI_Comm_get_info(par_comms, par_comm_info, ierr)
                 call check_ncdf( nf90_open(trim(this%file_list(this%curfile)), IOR(NF90_NOWRITE,NF90_NETCDF4), this%ncfile_id, &
-                        comm = par_comms%MPI_VAL, info = par_comm_info%MPI_VAL), " Opening file "//trim(this%file_list(this%curfile)))
+                        comm = par_comms, info = par_comm_info), " Opening file "//trim(this%file_list(this%curfile)))
             endif
         endif
         

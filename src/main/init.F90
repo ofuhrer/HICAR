@@ -31,7 +31,7 @@ submodule(initialization) initialization_implementation
     use icar_constants
     use ioserver_interface,         only : ioserver_t
     use iso_fortran_env,            only : output_unit
-    use mpi_f08
+    use mpi
 #ifdef _OPENACC
     use openacc
 #endif
@@ -52,12 +52,12 @@ contains
         integer :: n, k, name_len, color, IOcolor, ierr, num_PE
         integer :: num_threads, found, PE_RANK_GLOBAL, NUM_SERVERS, NUM_COMPUTE, NUM_IO_PER_NODE, NUM_PROC_PER_NODE
         character(len=MPI_MAX_PROCESSOR_NAME) :: ENV_IO_PER_NODE
-        type(MPI_Comm) :: globalComm, shared_comm, mainComms, IOComms
-        type(MPI_Info) :: host_only_info
+        integer :: globalComm, shared_comm, mainComms, IOComms
+        integer :: host_only_info
 
 #ifdef _OPENACC
         integer :: dev, local_rank, comm_size, NUM_GPU_PER_NODE
-        type(MPI_Comm) :: local_comm
+        integer :: local_comm
         integer(acc_device_kind) :: devtype
 #endif
 
@@ -79,13 +79,13 @@ contains
             read(ENV_IO_PER_NODE,*) NUM_IO_PER_NODE
         endif
 
-        call MPI_Comm_Size(MPI_COMM_WORLD,num_PE)
-        call MPI_Comm_Rank(MPI_COMM_WORLD,PE_RANK_GLOBAL)
+        call MPI_Comm_Size(MPI_COMM_WORLD,num_PE, ierr)
+        call MPI_Comm_Rank(MPI_COMM_WORLD,PE_RANK_GLOBAL, ierr)
 
         !Discover the number of processors per node
         CALL MPI_Comm_dup( MPI_COMM_WORLD, globalComm, ierr )
         call MPI_Comm_split_type(globalComm, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL, shared_comm, ierr)
-        call MPI_Comm_Size(shared_comm,NUM_PROC_PER_NODE)
+        call MPI_Comm_Size(shared_comm,NUM_PROC_PER_NODE, ierr)
         call MPI_Comm_free(shared_comm, ierr)
         ! call MPI_Comm_free(globalComm, ierr)
 
@@ -211,9 +211,9 @@ contains
     ! ****** Set the Accelerator device number based on local rank
     !
     call MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, 0, &
-        MPI_INFO_NULL, local_comm)
-    call MPI_Comm_rank(local_comm, local_rank)
-    call MPI_Comm_size(local_comm, comm_size)
+        MPI_INFO_NULL, local_comm, ierr)
+    call MPI_Comm_rank(local_comm, local_rank, ierr)
+    call MPI_Comm_size(local_comm, comm_size, ierr)
     
     if (color == kCOMPUTE_TEAM) then
         call acc_set_device_type(acc_device_nvidia)

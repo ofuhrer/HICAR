@@ -5,7 +5,7 @@
 module test_advect
           
     use variable_interface,      only: variable_t
-    use mpi_f08
+    use mpi
     use icar_constants
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
     use domain_interface, only: domain_t
@@ -506,7 +506,7 @@ module test_advect
                         domain%ims, domain%ime, domain%kms, domain%kme, domain%jms, domain%jme, &
                         domain%its, domain%ite, domain%jts, domain%jte, &
                         options%time%cfl_reduction_factor, domain%max_mapfac)
-        call MPI_Allreduce(MPI_IN_PLACE, dt_cfl, 1, MPI_REAL, MPI_MIN, domain%compute_comms)
+        call MPI_Allreduce(MPI_IN_PLACE, dt_cfl, 1, MPI_REAL, MPI_MIN, domain%compute_comms, ierr)
 
         t_period   = 2.0*pi/omega
         total_time = real(n_rev)*t_period
@@ -529,11 +529,11 @@ module test_advect
             peakN  = maxval(th(g%its:g%ite,:,g%jts:g%jte)) - base
         end associate
 
-        call MPI_Allreduce(lmax,   gmax,   1, MPI_REAL, MPI_MAX, domain%compute_comms)
-        call MPI_Allreduce(lsumsq, gsumsq, 1, MPI_REAL, MPI_SUM, domain%compute_comms)
-        call MPI_Allreduce(lcnt,   gcnt,   1, MPI_REAL, MPI_SUM, domain%compute_comms)
-        call MPI_Allreduce(peak0,  gpeak0, 1, MPI_REAL, MPI_MAX, domain%compute_comms)
-        call MPI_Allreduce(peakN,  gpeakN, 1, MPI_REAL, MPI_MAX, domain%compute_comms)
+        call MPI_Allreduce(lmax,   gmax,   1, MPI_REAL, MPI_MAX, domain%compute_comms, ierr)
+        call MPI_Allreduce(lsumsq, gsumsq, 1, MPI_REAL, MPI_SUM, domain%compute_comms, ierr)
+        call MPI_Allreduce(lcnt,   gcnt,   1, MPI_REAL, MPI_SUM, domain%compute_comms, ierr)
+        call MPI_Allreduce(peak0,  gpeak0, 1, MPI_REAL, MPI_MAX, domain%compute_comms, ierr)
+        call MPI_Allreduce(peakN,  gpeakN, 1, MPI_REAL, MPI_MAX, domain%compute_comms, ierr)
         grms = sqrt(gsumsq/gcnt)
 
         if (my_rank == 0) then

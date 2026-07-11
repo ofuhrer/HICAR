@@ -8,7 +8,7 @@ module halo_interface
     use iso_c_binding, only: c_ptr, c_null_ptr
 #endif
 
-    use mpi_f08
+    use mpi
     implicit none
 
     private
@@ -20,38 +20,38 @@ module halo_interface
 
         type(grid_t)      :: grid
 
-        type(MPI_Win)     :: north_in_win
-        type(MPI_Win)     :: south_in_win
-        type(MPI_Win)     :: east_in_win
-        type(MPI_Win)     :: west_in_win
-        type(MPI_Win)     :: northwest_in_win
-        type(MPI_Win)     :: southwest_in_win
-        type(MPI_Win)     :: northeast_in_win
-        type(MPI_Win)     :: southeast_in_win
+        integer     :: north_in_win
+        integer     :: south_in_win
+        integer     :: east_in_win
+        integer     :: west_in_win
+        integer     :: northwest_in_win
+        integer     :: southwest_in_win
+        integer     :: northeast_in_win
+        integer     :: southeast_in_win
 
-        type(MPI_win)     :: north_3d_win
-        type(MPI_win)     :: south_3d_win
-        type(MPI_win)     :: east_3d_win
-        type(MPI_win)     :: west_3d_win
-        type(MPI_win)     :: northwest_3d_win
-        type(MPI_win)     :: southwest_3d_win
-        type(MPI_win)     :: northeast_3d_win
-        type(MPI_win)     :: southeast_3d_win
+        integer     :: north_3d_win
+        integer     :: south_3d_win
+        integer     :: east_3d_win
+        integer     :: west_3d_win
+        integer     :: northwest_3d_win
+        integer     :: southwest_3d_win
+        integer     :: northeast_3d_win
+        integer     :: southeast_3d_win
         
-        type(MPI_win)     :: north_2d_win
-        type(MPI_win)     :: south_2d_win
-        type(MPI_win)     :: east_2d_win
-        type(MPI_win)     :: west_2d_win
+        integer     :: north_2d_win
+        integer     :: south_2d_win
+        integer     :: east_2d_win
+        integer     :: west_2d_win
 
-        type(MPI_Datatype) :: NS_3d_win_halo_type
-        type(MPI_Datatype) :: EW_3d_win_halo_type
-        type(MPI_Datatype) :: corner_3d_win_halo_type
+        integer :: NS_3d_win_halo_type
+        integer :: EW_3d_win_halo_type
+        integer :: corner_3d_win_halo_type
 
-        type(MPI_Datatype) :: NS_2d_win_halo_type
-        type(MPI_Datatype) :: EW_2d_win_halo_type
+        integer :: NS_2d_win_halo_type
+        integer :: EW_2d_win_halo_type
 
-        type(MPI_Group)    :: north_neighbor_grp, south_neighbor_grp, east_neighbor_grp, west_neighbor_grp
-        type(MPI_Group)    :: northwest_neighbor_grp, southwest_neighbor_grp, northeast_neighbor_grp, southeast_neighbor_grp
+        integer    :: north_neighbor_grp, south_neighbor_grp, east_neighbor_grp, west_neighbor_grp
+        integer    :: northwest_neighbor_grp, southwest_neighbor_grp, northeast_neighbor_grp, southeast_neighbor_grp
 
         real, contiguous, pointer :: south_batch_in_3d(:,:,:,:) => null()
         real, contiguous, pointer :: north_batch_in_3d(:,:,:,:) => null()
@@ -189,7 +189,7 @@ interface
         class(halo_t), intent(inout) :: this
         type(index_type), intent(in) :: exch_vars(:)
         type(grid_t), intent(in) :: grid
-        type(MPI_comm), intent(inout) :: comms
+        integer, intent(inout) :: comms
     end subroutine init_halo
 
     module subroutine finalize(this)

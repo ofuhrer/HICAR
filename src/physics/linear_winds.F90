@@ -36,7 +36,7 @@
 module linear_theory_winds
     use, intrinsic :: iso_c_binding
     use iso_fortran_env, only: output_unit
-    use mpi_f08
+    use mpi
     use fft,                        only: fftw_execute_dft,                    &
                                           fftw_plan_dft_2d, fftw_destroy_plan, &
                                           FFTW_FORWARD, FFTW_MEASURE,          &
@@ -644,14 +644,14 @@ contains
         type(grid_t), intent(inout), allocatable :: u_grids(:), v_grids(:)
         real,         intent(in)    :: terrain(:,:)
         integer,      intent(in)    :: nz, halo_size
-        type(MPI_Comm), intent(in) :: comms
+        integer, intent(in) :: comms
         
-        integer :: nx, ny, i, NUM_COMPUTE
+        integer :: nx, ny, i, NUM_COMPUTE, ierr
 
         if (allocated(u_grids)) deallocate(u_grids)
         if (allocated(v_grids)) deallocate(v_grids)
 
-        call MPI_Comm_Size(comms,NUM_COMPUTE)
+        call MPI_Comm_Size(comms,NUM_COMPUTE,ierr)
 
         allocate(u_grids(NUM_COMPUTE))
         allocate(v_grids(NUM_COMPUTE))
@@ -671,13 +671,13 @@ contains
         real,           intent(in)  :: wind(:,:)
         type(grid_t),   intent(in)  :: grids(:)
         !real,           intent(inout):: LUT(:,:,:,:,:,:)
-        type(MPI_Win),  intent(in)  :: LUT_win
+        integer,  intent(in)  :: LUT_win
         integer,        intent(in)  :: i, j, k, z, LUT_nx, LUT_nz, LUT_ny
 
-        integer :: img, msg_size, wind_nx, wind_ny, NUM_COMPUTE
+        integer :: img, msg_size, wind_nx, wind_ny, NUM_COMPUTE, ierr
         INTEGER(KIND=MPI_ADDRESS_KIND) :: disp
-        type(MPI_Datatype) :: LUT_type, send_type
-        type(MPI_Group) :: win_group
+        integer :: LUT_type, send_type
+        integer :: win_group
 
         msg_size = 1
         disp = 0
@@ -686,8 +686,8 @@ contains
         wind_ny = size(wind,2)
 
         !get group using MPI window
-        call MPI_Win_get_group(LUT_win, win_group)
-        call MPI_Group_size(win_group, NUM_COMPUTE)
+        call MPI_Win_get_group(LUT_win, win_group, ierr)
+        call MPI_Group_size(win_group, NUM_COMPUTE, ierr)
 
         do img = 1, NUM_COMPUTE
             associate(ims => grids(img)%ims, &
@@ -700,21 +700,21 @@ contains
 
             ! Create subarray types describing source and destination memory layouts
             call MPI_Type_create_subarray(6, [n_spd_values, n_dir_values, n_nsq_values, LUT_nx, LUT_nz, LUT_ny], [1, 1, 1, nx, 1, ny], &
-                [(k-1),(i-1),(j-1),0,(z-1),0], MPI_ORDER_FORTRAN, MPI_REAL, LUT_type)
+                [(k-1),(i-1),(j-1),0,(z-1),0], MPI_ORDER_FORTRAN, MPI_REAL, LUT_type, ierr)
 
             call MPI_Type_create_subarray(2, [wind_nx, wind_ny], [nx, ny], &
-                [0,0], MPI_ORDER_FORTRAN, MPI_REAL, send_type)
+                [0,0], MPI_ORDER_FORTRAN, MPI_REAL, send_type, ierr)
 
-            call MPI_Type_commit(send_type)
-            call MPI_Type_commit(LUT_type)
+            call MPI_Type_commit(send_type, ierr)
+            call MPI_Type_commit(LUT_type, ierr)
 
             ! Passive target: lock target rank, put, unlock — no collective barrier needed
-            call MPI_Win_lock(MPI_LOCK_SHARED, img-1, 0, LUT_win)
-            call MPI_Put(wind(ims,jms), msg_size, send_type, (img-1), disp, msg_size, LUT_type, LUT_win)
-            call MPI_Win_unlock(img-1, LUT_win)
+            call MPI_Win_lock(MPI_LOCK_SHARED, img-1, 0, LUT_win, ierr)
+            call MPI_Put(wind(ims,jms), msg_size, send_type, (img-1), disp, msg_size, LUT_type, LUT_win, ierr)
+            call MPI_Win_unlock(img-1, LUT_win, ierr)
 
-            call MPI_Type_free(send_type)
-            call MPI_Type_free(LUT_type)
+            call MPI_Type_free(send_type, ierr)
+            call MPI_Type_free(LUT_type, ierr)
 
             !$omp end critical
 
@@ -735,7 +735,7 @@ contains
 
         ! local variables used to calculate the LUT
         real :: u,v, layer_height, layer_height_bottom, layer_height_top
-        integer :: nx,ny,nz, nxu,nyv, i,j,k,z,ik, n, error
+        integer :: nx,ny,nz, nxu,nyv, i,j,k,z,ik, n, error, ierr
         integer :: fftnx, fftny
         integer, dimension(3,2) :: LUT_dims
         integer :: loops_completed ! this is just used to measure progress in the LUT creation
@@ -748,7 +748,7 @@ contains
 
         type(c_ptr) :: tmp_ptr
         integer(KIND=MPI_ADDRESS_KIND) :: win_size
-        type(MPI_Win) :: U_LUT_win, V_LUT_win
+        integer :: U_LUT_win, V_LUT_win
         real, pointer, dimension(:,:,:,:,:,:) :: U_LUT_p, V_LUT_p
         real, allocatable :: start_z_arr(:), end_z_arr(:), step_size_arr(:)
         real, allocatable :: int_z_top(:,:,:), int_z_bot(:,:,:)
@@ -757,8 +757,8 @@ contains
         type(grid_t), allocatable :: u_grids(:), v_grids(:)
 
         ! append total number of images and the current image number to the LUT filename
-        call MPI_Comm_Size(MPI_COMM_WORLD,NUM_COMPUTE)
-        call MPI_Comm_rank(domain%compute_comms, my_index)
+        call MPI_Comm_Size(MPI_COMM_WORLD,NUM_COMPUTE,ierr)
+        call MPI_Comm_rank(domain%compute_comms, my_index,ierr)
         ! MPI returns rank, which is 0-indexed
         my_index = my_index + 1
 
@@ -845,10 +845,10 @@ contains
 
             ! Create MPI windows for one-sided communication of LUT entries across ranks
             win_size = n_spd_values*n_dir_values*n_nsq_values*nxu*nz*ny
-            call MPI_WIN_ALLOCATE(win_size*kREAL, kREAL, MPI_INFO_NULL, domain%compute_comms, tmp_ptr, U_LUT_win)
+            call MPI_WIN_ALLOCATE(win_size*kREAL, kREAL, MPI_INFO_NULL, domain%compute_comms, tmp_ptr, U_LUT_win, ierr)
             call C_F_POINTER(tmp_ptr, U_LUT_p, [n_spd_values, n_dir_values, n_nsq_values, nxu, nz, ny])
             win_size = n_spd_values*n_dir_values*n_nsq_values*nx*nz*nyv
-            call MPI_WIN_ALLOCATE(win_size*kREAL, kREAL, MPI_INFO_NULL, domain%compute_comms, tmp_ptr, V_LUT_win)
+            call MPI_WIN_ALLOCATE(win_size*kREAL, kREAL, MPI_INFO_NULL, domain%compute_comms, tmp_ptr, V_LUT_win, ierr)
             call C_F_POINTER(tmp_ptr, V_LUT_p, [n_spd_values, n_dir_values, n_nsq_values, nx, nz, nyv])
             U_LUT_p = 1.0
             V_LUT_p = 1.0
@@ -1013,13 +1013,13 @@ contains
             deallocate(z_above_terrain_bot, z_above_terrain_top)
 
             ! Ensure all ranks have completed their puts before reading from the windows
-            call MPI_Barrier(domain%compute_comms)
-            call MPI_Win_sync(U_LUT_win)
-            call MPI_Win_sync(V_LUT_win)
+            call MPI_Barrier(domain%compute_comms, ierr)
+            call MPI_Win_sync(U_LUT_win, ierr)
+            call MPI_Win_sync(V_LUT_win, ierr)
             hi_u_LUT = U_LUT_p(:,:,:,:,:,:)
             hi_v_LUT = V_LUT_p(:,:,:,:,:,:)
-            call MPI_Win_free(U_LUT_win)
-            call MPI_Win_free(V_LUT_win)
+            call MPI_Win_free(U_LUT_win, ierr)
+            call MPI_Win_free(V_LUT_win, ierr)
 
             ! memory needs to be freed so this structure can be used again when removing linear winds
             call destroy_linear_theory_data(lt_data_m)

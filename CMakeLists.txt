@@ -238,8 +238,12 @@ message(STATUS "Setting up compiler flags...")
 # Define compiler flags based on MODE and COMPILER
 # These will be used consistently throughout the project
 # Define as a list (semicolon-separated) for proper handling in CMake
+# The legacy `use mpi` binding exposes choice buffers without type-safe generic
+# interfaces. GNU 10+ otherwise rejects valid MPI calls that use different
+# buffer types in the same source file (for example REAL and INTEGER RMA puts).
+set(_gnu_legacy_mpi_flag -fallow-argument-mismatch)
 # Optimization flag tail shared by the gnu release + profile builds.
-set(_gnu_opt_tail -ffast-math -ffree-line-length-none -ftree-vectorize -fimplicit-none -funroll-loops -march=native -fno-protect-parens)
+set(_gnu_opt_tail ${_gnu_legacy_mpi_flag} -ffast-math -ffree-line-length-none -ftree-vectorize -fimplicit-none -funroll-loops -march=native -fno-protect-parens)
 if(MODE STREQUAL "debug")
 	set(CMAKE_BUILD_TYPE Debug)
 
@@ -248,7 +252,7 @@ if(MODE STREQUAL "debug")
 		# (and usually fatal in tests) rather than passing by luck on one platform
 		# and failing on another. -finit-real=nan alone misses logicals/integers:
 		# an uninitialised `restart` logical caused a CI-only control_flow failure.
-		set(HICAR_Fortran_FLAGS -O0 -g -fopenmp -fbounds-check -fcheck=all -Wall -fbacktrace -finit-real=nan -finit-integer=-99999999 -finit-logical=true -finit-derived -ffree-line-length-none -Wconversion)
+        set(HICAR_Fortran_FLAGS -O0 -g -fopenmp -fbounds-check -fcheck=all -Wall -fbacktrace -finit-real=nan -finit-integer=-99999999 -finit-logical=true -finit-derived -ffree-line-length-none -Wconversion ${_gnu_legacy_mpi_flag})
 	elseif (COMPILER STREQUAL "nvfortran")
 		if(OPENACC)
 			set(HICAR_Fortran_FLAGS -O0 -g -traceback -Mbounds -Minfo=accel -Mpreprocess -march=native -acc=gpu -gpu=mem:separate,${GPU_ARCH})
@@ -260,7 +264,7 @@ elseif(MODE STREQUAL "debugslow")
 	set(CMAKE_BUILD_TYPE Debug)
 
 	if (COMPILER STREQUAL "gnu")
-		set(HICAR_Fortran_FLAGS -g -ffree-line-length-none -Wconversion)
+        set(HICAR_Fortran_FLAGS -g -ffree-line-length-none -Wconversion ${_gnu_legacy_mpi_flag})
 	endif()
 elseif(MODE STREQUAL "profile")
 	set(CMAKE_BUILD_TYPE Profile)
@@ -691,7 +695,9 @@ if (OpenACC_Fortran_FOUND AND OPENACC)
 			find_package(CUDAToolkit REQUIRED)
 		endif()
 		target_include_directories(hicar_lib PRIVATE ${NCCL_INCLUDE_DIR})
-		target_link_libraries(hicar_lib PUBLIC ${NCCL_LIBRARY} CUDA::cudart)
+		# nccl_wrapper.c converts the integer Fortran handle with MPI_Comm_f2c,
+		# so it also needs the C MPI headers and link interface.
+		target_link_libraries(hicar_lib PUBLIC ${NCCL_LIBRARY} CUDA::cudart MPI::MPI_C)
 		target_sources(hicar_lib PRIVATE
 			${PROJECT_SOURCE_DIR}/src/utilities/nccl_wrapper.c
 			${PROJECT_SOURCE_DIR}/src/utilities/nccl_interface.F90)

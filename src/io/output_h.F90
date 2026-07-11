@@ -12,7 +12,7 @@
 !!
 !!----------------------------------------------------------
 module output_interface
-  use mpi_f08
+  use mpi
   use netcdf
   use icar_constants
   use variable_interface,       only : variable_t
@@ -115,7 +115,7 @@ module output_interface
         implicit none
         class(output_t),  intent(inout)  :: this
         type(options_t),  intent(in)     :: options
-        type(MPI_Comm),   intent(in)     :: par_comms
+        integer,   intent(in)     :: par_comms
         integer,          intent(in)     :: out_var_indices(:)
       end subroutine
 
@@ -164,7 +164,7 @@ module output_interface
           implicit none
           class(output_t),  intent(inout) :: this
           type(Time_type),  intent(in)    :: time
-          type(MPI_Comm),   intent(in)    :: par_comms
+          integer,   intent(in)    :: par_comms
           integer,          intent(in)    :: out_var_indices(:)
       end subroutine
       
@@ -176,7 +176,7 @@ module output_interface
         implicit none
         class(output_t),  intent(inout) :: this
         type(Time_type),  intent(in)    :: time
-        type(MPI_Comm),   intent(in)    :: par_comms
+        integer,   intent(in)    :: par_comms
         integer,          intent(in)    :: rst_var_indices(:)
         real,             intent(in), optional :: dt_seconds
     end subroutine

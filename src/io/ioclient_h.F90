@@ -11,7 +11,7 @@
 !!
 !!----------------------------------------------------------
 module ioclient_interface
-  use mpi_f08
+  use mpi
   use icar_constants
   use variable_interface, only : variable_t
   use boundary_interface, only : boundary_t
@@ -48,7 +48,7 @@ module ioclient_interface
       ! have to keep reallocating variables whenever something is added or removed
       integer, public :: n_input_variables, n_output_variables
       
-      type(MPI_Comm), public :: parent_comms
+      integer, public :: parent_comms
 
       type(variable_t), public, allocatable :: variables(:)
       ! time variable , publicis stored outside of the variable list... probably need to think about that some
@@ -77,17 +77,17 @@ module ioclient_interface
       real, dimension(:,:,:,:), pointer :: forcing_buffer_3d_init => null()
 
       ! MPI vector types for output-only send.
-      type(MPI_Datatype) :: send_type_3d_out
-      type(MPI_Datatype) :: send_type_2d_out
+      integer :: send_type_3d_out
+      integer :: send_type_2d_out
 
       ! Outstanding Irecv on read_buffer (kIO_TAG_READ). Posted early in
       ! init_ioclient so the server-side Isend from parent scatter_forcing
       ! during our wake does not race ahead of our reaching receive().
-      type(MPI_Request) :: read_req
+      integer :: read_req
 
       ! Outstanding Irecvs for restart read (only if options%restart%restart).
       ! Allocated + posted in init_ioclient, waited on in receive_rst.
-      type(MPI_Request) :: rst_req_3d, rst_req_2d
+      integer :: rst_req_3d, rst_req_2d
       real, allocatable :: rst_scratch_3d(:,:,:,:)
       real, allocatable :: rst_scratch_2d(:,:,:)
       logical :: rst_posted = .false.

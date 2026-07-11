@@ -153,7 +153,7 @@ contains
     module function timer_mean(this,comms) result(mean_t)
         implicit none
         class(timer_t), intent(inout) :: this
-        type(MPI_Comm), intent(in) :: comms
+        integer, intent(in) :: comms
 
         real :: mean_t, t_sum
         integer :: ierr, NUM_COMPUTE
@@ -162,7 +162,7 @@ contains
 
         t_sum = this%get_time()
         call MPI_Allreduce(MPI_IN_PLACE,t_sum,1,MPI_REAL,MPI_SUM,comms,ierr)
-        call MPI_Comm_Size(comms,NUM_COMPUTE)
+        call MPI_Comm_Size(comms,NUM_COMPUTE,ierr)
         mean_t = t_sum/NUM_COMPUTE
     
     end function
@@ -170,7 +170,7 @@ contains
     module function timer_max(this,comms) result(max_t)
         implicit none
         class(timer_t), intent(inout) :: this
-        type(MPI_Comm), intent(in) :: comms
+        integer, intent(in) :: comms
 
         real :: max_t
         integer :: ierr
@@ -185,7 +185,7 @@ contains
     module function timer_min(this,comms) result(min_t)
         implicit none
         class(timer_t), intent(inout) :: this
-        type(MPI_Comm), intent(in) :: comms
+        integer, intent(in) :: comms
 
         real :: min_t
         integer :: ierr

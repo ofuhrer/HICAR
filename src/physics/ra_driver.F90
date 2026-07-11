@@ -33,7 +33,8 @@ module radiation
     use icar_constants, only : kVARS, kRA_BASIC, kRA_SIMPLE, kRA_RRTMG, kRA_RRTMGP, STD_OUT_PE, kMP_THOMP_AER, kMAX_NESTS
     use mod_wrf_constants, only : cp, R_d, gravity, DEGRAD, DPD, piconst, STBOLT
     use mod_atm_utilities, only : cal_cldfra3, calc_solar_elevation, calc_solar_date
-    use mpi_f08
+    use mpi
+    use mpi_utils_module, only: allreduce_integer_min_in_place
 #ifdef USE_NCCL
     use, intrinsic :: iso_c_binding, only: c_loc, c_int
     use nccl_interface, only: nccl_send_float, nccl_recv_float, &
@@ -145,6 +146,7 @@ module radiation
 contains
 
     subroutine radiation_init(domain,options, context_chng)
+        integer :: ierr
         type(domain_t), intent(inout) :: domain
         type(options_t),intent(in) :: options
         logical, optional, intent(in) :: context_chng
@@ -277,7 +279,7 @@ contains
             !$acc update host(domain%vars_3d(domain%var_indx(kVARS%pressure_interface)%v)%data_3d)
             ! This will capture the highest pressure level of all nests in this simulation
             p_top = min(p_top, minval(domain%vars_3d(domain%var_indx(kVARS%pressure_interface)%v)%data_3d(domain%ims:domain%ime,domain%kme+1,domain%jms:domain%jme)))
-            call MPI_Allreduce(MPI_IN_PLACE, p_top, 1, MPI_REAL, MPI_MIN, domain%compute_comms)
+            call MPI_Allreduce(MPI_IN_PLACE, p_top, 1, MPI_REAL, MPI_MIN, domain%compute_comms, ierr)
 
             call rrtmg_lwinit(                           &
                 p_top=p_top,     allowed_to_read=.not.(rrtmg_init) ,                &
@@ -431,8 +433,8 @@ contains
         integer :: pn, ps, pe, pw          ! marching pack-pointers for the four relay streams
         integer :: send_len, recv_width, max_recv_len, buf_size, ierr
         integer :: i, j, ins, ine, jns, jne
-        type(MPI_Status) :: stat
-        type(MPI_Request) :: send_req
+        integer :: stat(MPI_STATUS_SIZE)
+        integer :: send_req
 
         tile_w_i = ite - its + 1
         tile_w_j = jte - jts + 1
@@ -441,7 +443,7 @@ contains
         ! `width` below. Without this, paired neighbours with different tile
         ! shapes compute mismatched send_len/max_recv_len and MPI truncates.
         if (min_tile_w < 1) min_tile_w = huge(min_tile_w)
-        call MPI_Allreduce(MPI_IN_PLACE, min_tile_w, 1, MPI_INT, MPI_MIN, domain%compute_comms, ierr)
+        call allreduce_integer_min_in_place(min_tile_w, domain%compute_comms)
         if (min_tile_w == huge(min_tile_w)) return
 
         n_phases = ceiling(real(R_cells) / real(min_tile_w))
@@ -846,6 +848,7 @@ contains
 
     subroutine rad(domain, options, dt, halo, subset)
         implicit none
+        integer :: ierr
 
         type(domain_t), intent(inout) :: domain
         type(options_t),intent(in)    :: options
@@ -1335,7 +1338,7 @@ contains
                     ! which is what RRTMG_LWINIT does. Pass allowed_to_read=.False.
                     ! to avoid re-reading look up tables (already done in init).
                     p_top = minval(domain%vars_3d(domain%var_indx(kVARS%pressure_interface)%v)%data_3d(:,domain%kme+1,:))
-                    call MPI_Allreduce(MPI_IN_PLACE, p_top, 1, MPI_REAL, MPI_MIN, domain%compute_comms)
+                    call MPI_Allreduce(MPI_IN_PLACE, p_top, 1, MPI_REAL, MPI_MIN, domain%compute_comms, ierr)
                     CALL RRTMG_LWINIT(p_top, &
                                     allowed_to_read=.FALSE.,         &
                                     ids=ids, ide=ide, jds=jds, jde=jde, kds=kds, kde=kde, &
@@ -1841,7 +1844,7 @@ contains
             if (run_full_radiation .and. options%rad%terrain_refl_radius > 0) then
 
                 !$acc wait(1) ! ensure the async coszen_max reduction is resident on the host
-                call MPI_Allreduce(coszen_max, coszen_max_g, 1, MPI_REAL, MPI_MAX, domain%compute_comms)
+                call MPI_Allreduce(coszen_max, coszen_max_g, 1, MPI_REAL, MPI_MAX, domain%compute_comms, ierr)
                 sun_up_global = (coszen_max_g > 0.0)
 
                 allocate(nbr_buffer(domain%ihs:domain%ihe, domain%jhs:domain%jhe))

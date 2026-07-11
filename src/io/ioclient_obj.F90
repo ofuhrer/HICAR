@@ -138,7 +138,7 @@ contains
 
         ! Record the server's rank in parent_comms — used as destination /
         ! source for all two-sided MPI calls with the IO server.
-        call MPI_Comm_Size(this%parent_comms, comm_size)
+        call MPI_Comm_Size(this%parent_comms, comm_size, ierr)
         this%server = comm_size - 1
 
         ! Pre-post the first main-forcing Irecv so the server's Isend from
@@ -177,41 +177,41 @@ contains
         integer :: ierr, PE_parent_comm
 
         ! The PE of the parent communicator is the last PE in the communicator
-        call MPI_Comm_Size(this%parent_comms,PE_parent_comm)
+        call MPI_Comm_Size(this%parent_comms,PE_parent_comm, ierr)
         PE_parent_comm = PE_parent_comm - 1
 
         call MPI_Gatherv(this%i_s_w, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%i_e_w, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%k_s_w, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%k_e_w, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%j_s_w, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%j_e_w, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%i_s_re, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%i_e_re, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%j_s_re, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%j_e_re, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%i_s_r, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%i_e_r, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%k_s_r, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%k_e_r, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%j_s_r, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
         call MPI_Gatherv(this%j_e_r, 1, MPI_INTEGER, 0, [0], [0], &
-            MPI_INTEGER, PE_parent_comm, this%parent_comms)
+            MPI_INTEGER, PE_parent_comm, this%parent_comms, ierr)
 
         call MPI_Allreduce(MPI_IN_PLACE,this%ide,1,MPI_INT,MPI_MAX,this%parent_comms,ierr)
         call MPI_Allreduce(MPI_IN_PLACE,this%kde,1,MPI_INT,MPI_MAX,this%parent_comms,ierr)
@@ -341,7 +341,7 @@ contains
         
         type(variable_t) :: var
         type(meta_data_t) :: tmp_var
-        type(MPI_Request) :: reqs(2)
+        integer :: reqs(2)
         integer :: i, n_3d, n_2d, nx, ny, nz_v, i_s_w, i_e_w, j_s_w, j_e_w, idx
         logical :: should_do_restart
         integer :: ii, jj, kk
@@ -413,9 +413,9 @@ contains
         ! Pass 2: restart-only variables (only on restart steps or first push)
         if (should_do_restart) then
             ! Send dt to ioserver for restart file (rank 0 only; all compute ranks have same dt)
-            call MPI_Comm_Rank(this%parent_comms, my_rank)
+            call MPI_Comm_Rank(this%parent_comms, my_rank, ierr)
             if (my_rank == 0) then
-                call MPI_Comm_Size(this%parent_comms, comm_size)
+                call MPI_Comm_Size(this%parent_comms, comm_size, ierr)
                 call MPI_Send(domain%dt, 1, MPI_REAL, comm_size-1, kIO_TAG_DT_RESTART, this%parent_comms, ierr)
             endif
 
@@ -509,7 +509,7 @@ contains
         type(options_t),     intent(in)    :: options
 
         type(meta_data_t) :: tmp_var
-        type(MPI_Request) :: req
+        integer :: req
         integer :: i, n_3d, nx, ny, i_s_w, i_e_w, j_s_w, j_e_w, var_indx, idx
         logical :: var_val_check
         character(len=kMAX_NAME_LENGTH) :: err_msg
@@ -786,7 +786,7 @@ contains
         type(boundary_t),  intent(in)    :: forcing
 
         integer :: n_init_2d, n_init_3d, parent_rank, nx_r, ny_r, ierr
-        type(MPI_Status) :: status
+        integer :: status(MPI_STATUS_SIZE)
         real, allocatable :: recv_2d(:,:,:)
 
         ! Skip the parent->child init transfer entirely when the flag is
@@ -1073,7 +1073,7 @@ contains
         integer :: ims, ime, jms, jme
         real :: localw, local_center
         real, allocatable :: recv_3d(:,:,:,:)
-        type(MPI_Status)  :: status, probe_status
+        integer :: status(MPI_STATUS_SIZE), probe_status(MPI_STATUS_SIZE)
         type(meta_data_t) :: meta
 
         nx_r = this%i_e_r - this%i_s_r + 2

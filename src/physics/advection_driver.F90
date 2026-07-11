@@ -18,7 +18,7 @@ module advection
     use variable_interface,       only : variable_t
     use timer_interface,          only : timer_t
     use data_structures,          only : index_type
-    use mpi_f08,                  only : MPI_Allreduce, MPI_IN_PLACE, MPI_REAL, MPI_MIN, MPI_MAX
+    use mpi,                  only : MPI_IN_PLACE, MPI_REAL, MPI_MIN, MPI_MAX
 
     implicit none
     private
@@ -157,7 +157,7 @@ contains
         real, intent(in) :: dt
         type(timer_t), intent(inout) :: flux_time, flux_corr_time, sum_time, adv_wind_time
 
-        integer :: RK3_step, n, n_adv, flux_corr, flux_corr_n, q_id, theta_bound_radius, kd, ku
+        integer :: RK3_step, n, n_adv, flux_corr, flux_corr_n, q_id, theta_bound_radius, kd, ku, ierr
         logical :: apply_cz_diff_n
         real :: t_fac, theta_min, theta_max
         real, allocatable :: temp_all(:,:,:,:), theta_ref_stage(:,:,:)
@@ -190,8 +190,8 @@ contains
             theta_max_k(k) = theta_max
         enddo
         end associate
-        call MPI_Allreduce(MPI_IN_PLACE, theta_min_k, kme-kms+1, MPI_REAL, MPI_MIN, domain%compute_comms)
-        call MPI_Allreduce(MPI_IN_PLACE, theta_max_k, kme-kms+1, MPI_REAL, MPI_MAX, domain%compute_comms)
+        call MPI_Allreduce(MPI_IN_PLACE, theta_min_k, kme-kms+1, MPI_REAL, MPI_MIN, domain%compute_comms, ierr)
+        call MPI_Allreduce(MPI_IN_PLACE, theta_max_k, kme-kms+1, MPI_REAL, MPI_MAX, domain%compute_comms, ierr)
         theta_bound_radius = max(1, (options%adv%v_order + 1) / 2)
         do k = kms, kme
             kd = max(kms, k - theta_bound_radius)

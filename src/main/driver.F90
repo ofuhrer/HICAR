@@ -18,7 +18,7 @@
 !!-----------------------------------------
 program icar
     use iso_fortran_env, only: output_unit
-    use mpi_f08, only: MPI_initialized, MPI_INIT, MPI_Comm_Rank, MPI_COMM_WORLD, MPI_Finalize
+    use mpi, only: MPI_initialized, MPI_INIT, MPI_Comm_Rank, MPI_COMM_WORLD, MPI_Finalize
     use options_interface,  only : options_t
     use flow_object_interface, only : comp_arr_t
     use boundary_interface, only : boundary_t
@@ -39,7 +39,7 @@ program icar
     type(comp_arr_t)  :: components(kMAX_NESTS)
     type(ioclient_t), allocatable  :: ioclient(:)
     
-    integer :: i, n_nests, PE_RANK_GLOBAL
+    integer :: i, n_nests, PE_RANK_GLOBAL, ierr
     real :: t_val, t_val2, t_val3
     logical :: init_flag
     character(len=kMAX_FILE_LENGTH) :: namelist_file
@@ -49,13 +49,13 @@ program icar
 
     !Initialize MPI if needed
     init_flag = .False.
-    call MPI_initialized(init_flag)
+    call MPI_initialized(init_flag, ierr)
     if (.not.(init_flag)) then
-        call MPI_INIT()
+        call MPI_INIT(ierr)
         init_flag = .True.
     endif
 
-    call MPI_Comm_Rank(MPI_COMM_WORLD,PE_RANK_GLOBAL)
+    call MPI_Comm_Rank(MPI_COMM_WORLD,PE_RANK_GLOBAL, ierr)
     STD_OUT_PE = (PE_RANK_GLOBAL==0)
 
     !-----------------------------------------
@@ -97,7 +97,7 @@ program icar
 
     call component_program_end(components(1:n_nests), options)
 
-    CALL MPI_Finalize()
+    CALL MPI_Finalize(ierr)
 #ifdef _OPENACC
     call acc_shutdown(acc_device_nvidia)
 #endif
@@ -227,4 +227,3 @@ contains
     end subroutine
 
 end program
-

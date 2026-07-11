@@ -63,7 +63,7 @@ contains
         implicit none
         class(output_t),  intent(inout)  :: this
         type(options_t),  intent(in)     :: options
-        type(MPI_Comm),   intent(in)     :: par_comms
+        integer,   intent(in)     :: par_comms
         integer,          intent(in)     :: out_var_indices(:)
         
         integer                       :: error
@@ -239,7 +239,7 @@ contains
     module subroutine save_out_file(this, time, par_comms, out_var_indices)
         class(output_t),  intent(inout) :: this
         type(Time_type),  intent(in)  :: time
-        type(MPI_Comm),   intent(in)     :: par_comms
+        integer,   intent(in)     :: par_comms
         integer,          intent(in)  :: out_var_indices(:)
 
         !Check if we should change the file
@@ -283,7 +283,7 @@ contains
     module subroutine save_rst_file(this, time, par_comms, rst_var_indices, dt_seconds)
         class(output_t),  intent(inout) :: this
         type(Time_type),  intent(in)  :: time
-        type(MPI_Comm),   intent(in)     :: par_comms
+        integer,   intent(in)     :: par_comms
         integer,          intent(in)  :: rst_var_indices(:)
         real,             intent(in), optional :: dt_seconds
 
@@ -438,31 +438,32 @@ contains
     end subroutine block_hunter
     
     subroutine open_file(this, filename, time, par_comms, var_indx_list)
+        integer :: ierr
         class(output_t),                 intent(inout) :: this
         character(len=kMAX_FILE_LENGTH), intent(in)    :: filename
 
         type(Time_type),                 intent(in)    :: time
-        type(MPI_Comm),                  intent(in)    :: par_comms
+        integer,                  intent(in)    :: par_comms
         integer,                         intent(in)    :: var_indx_list(:)
-        type(MPI_Info) :: par_comm_info
+        integer :: par_comm_info
         integer :: err
         logical :: is_file_parallel
         
         ! open file
-        call MPI_Comm_get_info(par_comms, par_comm_info)
+        call MPI_Comm_get_info(par_comms, par_comm_info, ierr)
 
         is_file_parallel = .True.!can_file_parallel(filename)
 
         if (is_file_parallel) then
             err = nf90_open(filename, IOR(NF90_WRITE,NF90_NETCDF4), this%active_nc_id, &
-                    comm = par_comms%MPI_VAL, info = par_comm_info%MPI_VAL)
+                    comm = par_comms, info = par_comm_info)
         else
             err = nf90_open(filename, IOR(NF90_WRITE,NF90_NETCDF4), this%active_nc_id)
         endif
         if (err /= NF90_NOERR) then
             if (is_file_parallel) then
                 call check_ncdf( nf90_create(filename, IOR(NF90_CLOBBER,NF90_NETCDF4), this%active_nc_id, &
-                    comm = par_comms%MPI_VAL, info = par_comm_info%MPI_VAL), "Opening:"//trim(filename))
+                    comm = par_comms, info = par_comm_info), "Opening:"//trim(filename))
             else
                 call check_ncdf( nf90_create(filename, IOR(NF90_CLOBBER,NF90_NETCDF4), this%active_nc_id), "Opening:"//trim(filename))
             endif

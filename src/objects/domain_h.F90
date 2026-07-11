@@ -1,6 +1,6 @@
 module domain_interface
   use, intrinsic :: iso_c_binding, only : C_DOUBLE_COMPLEX
-  use mpi_f08
+  use mpi
   use options_interface,        only : options_t
   use boundary_interface,       only : boundary_t
   use grid_interface,           only : grid_t
@@ -63,7 +63,7 @@ module domain_interface
     type(index_type) :: var_indx(kMAX_STORAGE_VARS), forcing_var_indx(kMAX_STORAGE_VARS)
     
     ! MPI communicator object for doing parallel communications among domain objects
-    type(MPI_Comm), public :: compute_comms
+    integer, public :: compute_comms
 
     ! timers used to track the time spent doing various operations
     type(timer_t) :: initialization_timer, total_timer, input_timer, &

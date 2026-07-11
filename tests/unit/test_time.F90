@@ -24,6 +24,10 @@ module test_time
     public :: collect_time_suite
 
     real(real64), parameter :: MAX_RT_ERROR = 1e-5_real64  ! days (~0.86 s)
+    ! NVHPC reports real128=-1 when the target does not provide a quad kind.
+    ! Retain the higher-precision reference where available and otherwise use
+    ! real64 alongside the exact int64 reference below.
+    integer, parameter :: reference_real_kind = max(real64, real128)
 
 contains
 
@@ -138,7 +142,7 @@ contains
 
         type(time_type) :: t_obj
         type(time_delta_t) :: dt
-        real(real128) :: t128
+        real(reference_real_kind) :: t128
         integer(int64) :: i, i64
         integer(int64), parameter :: n = 1000000_int64
 
@@ -150,10 +154,10 @@ contains
 
         do i = 1, n
             call t_obj%set(t_obj%mjd() + dt%days())
-            t128 = t128 + 3600.0_real128
+            t128 = t128 + 3600.0_reference_real_kind
             i64 = i64 + 3600_int64
 
-            if (abs(t128 - t_obj%seconds()) > 1.0_real128) then
+            if (abs(t128 - t_obj%seconds()) > 1.0_reference_real_kind) then
                 call check(error, .false., &
                     "time accumulation drifted > 1 s from the real128 reference")
                 return

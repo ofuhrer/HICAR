@@ -6,7 +6,7 @@
 module test_halo_exch
 
     use variable_interface,      only: variable_t
-    use mpi_f08
+    use mpi
     use grid_interface, only: grid_t
     use halo_interface, only: halo_t
     use icar_constants
@@ -44,7 +44,7 @@ module test_halo_exch
 
         integer :: my_index, ierr
         type(grid_t) :: grid, grid_2d, snow_grid
-        type(MPI_Comm) :: comms
+        integer :: comms
 
         call MPI_Comm_Rank(MPI_COMM_WORLD,my_index,ierr)
         my_index = my_index + 1
@@ -69,7 +69,7 @@ module test_halo_exch
 
         integer :: my_index, ierr
         type(grid_t) :: grid, snow_grid
-        type(MPI_Comm) :: comms
+        integer :: comms
 
         call MPI_Comm_Rank(MPI_COMM_WORLD,my_index,ierr)
         my_index = my_index + 1
@@ -97,7 +97,7 @@ module test_halo_exch
 
         integer :: my_index, ierr
         type(grid_t) :: grid
-        type(MPI_Comm) :: comms
+        integer :: comms
 
         call MPI_Comm_Rank(MPI_COMM_WORLD,my_index,ierr)
         my_index = my_index + 1
@@ -120,7 +120,7 @@ module test_halo_exch
 
         integer :: my_index, ierr
         type(grid_t) :: grid
-        type(MPI_Comm) :: comms
+        integer :: comms
 
         call MPI_Comm_Rank(MPI_COMM_WORLD,my_index,ierr)
         my_index = my_index + 1
@@ -143,7 +143,7 @@ module test_halo_exch
 
         integer :: my_index, ierr
         type(grid_t) :: grid
-        type(MPI_Comm) :: comms
+        integer :: comms
 
         call MPI_Comm_Rank(MPI_COMM_WORLD,my_index,ierr)
         my_index = my_index + 1
@@ -173,7 +173,7 @@ module test_halo_exch
         type(variable_t) :: var, var_data(1), exch_var
         integer :: my_index
         integer :: ierr
-        type(MPI_Comm) :: comms
+        integer :: comms
         type(grid_t) :: grid_3d
         logical :: batch, corners, interior, dqdt
         logical :: north, south, east, west

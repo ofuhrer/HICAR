@@ -5,7 +5,7 @@
 !! ----------------------------------------------------------------------------
 submodule(flow_events) flow_events_implementation
     use iso_fortran_env, only: output_unit
-    use mpi_f08
+    use mpi
     use domain_interface,   only : domain_t
     use time_object,        only : Time_type
     use icar_constants!,             only : kITERATIVE_WINDS, kWIND_LINEAR
@@ -89,7 +89,7 @@ subroutine wake_component(comp_arr, options, boundary, ioclient)
 
             if (options%restart%restart) then
                 call comp%read_restart_file(options)
-                call MPI_Comm_Size(comp%client_comms, comm_size)
+                call MPI_Comm_Size(comp%client_comms, comm_size, ierr)
                 call MPI_Bcast(comp%restart_dt, 1, MPI_REAL, comm_size-1, comp%client_comms, ierr)
             else
                 call component_write(comp,ioclient)
@@ -139,6 +139,7 @@ end subroutine wake_component
 
 subroutine update_component_nest(comp_arr,options,ioclient)
     implicit none
+    integer :: ierr
     type(comp_arr_t), intent(inout) :: comp_arr(:)
     type(options_t), intent(in) :: options
     type(ioclient_t), intent(inout) :: ioclient
@@ -203,11 +204,11 @@ subroutine update_component_nest(comp_arr,options,ioclient)
         class default
             ! if ioclient is null, then we are acting as an ioserver
             if (.not.(ioclient%parent_comms==MPI_COMM_NULL)) then
-                call MPI_Barrier(MPI_COMM_WORLD)
+                call MPI_Barrier(MPI_COMM_WORLD, ierr)
             else
                 ! now loop over all child nests
                 write(*,*) "Server Barr 3 -- gather on nest ", options%nest_indx
-                call MPI_Barrier(MPI_COMM_WORLD)
+                call MPI_Barrier(MPI_COMM_WORLD, ierr)
 
                 do n = 1, size(options%general%child_nests)
                     !Test if we can update the child nest
@@ -217,7 +218,7 @@ subroutine update_component_nest(comp_arr,options,ioclient)
                     if ( (comp%sim_time >= sim_time_safety_under .and. .not.(child_nest%ended)) )then
                             ! This call will distribute the model state of the forcing fields to the child nest
                         write(*,*) "Server Barr 4 -- scatter to nest ", child_nest%nest_indx
-                        call MPI_Barrier(MPI_COMM_WORLD)
+                        call MPI_Barrier(MPI_COMM_WORLD, ierr)
                     endif
                 enddo
             endif
@@ -228,6 +229,7 @@ end subroutine update_component_nest
 
 subroutine component_write(component, ioclient)
     implicit none
+    integer :: ierr
     class(flow_obj_t), intent(inout) :: component
     type(ioclient_t), intent(inout) :: ioclient
 
@@ -253,7 +255,7 @@ subroutine component_write(component, ioclient)
             if (STD_OUT_PE_IO) flush(output_unit)
         class default
             call component%increment_output_time()
-            call MPI_Barrier(MPI_COMM_WORLD)
+            call MPI_Barrier(MPI_COMM_WORLD, ierr)
 
     end select
 
@@ -261,6 +263,7 @@ end subroutine component_write
 
 subroutine component_read(component, options, boundary, ioclient)
     implicit none
+    integer :: ierr
     class(flow_obj_t), intent(inout) :: component
     type(options_t), intent(inout) :: options
     type(boundary_t), intent(inout) :: boundary
@@ -311,7 +314,7 @@ subroutine component_read(component, options, boundary, ioclient)
 
         class default
             if (.not.(ioclient%parent_comms==MPI_COMM_NULL)) then
-                call MPI_Barrier(MPI_COMM_WORLD)
+                call MPI_Barrier(MPI_COMM_WORLD, ierr)
             else
                 ! if ioclient comms is null, then we are acting as an ioserver
                 if (options%general%parent_nest == 0) then
@@ -319,7 +322,7 @@ subroutine component_read(component, options, boundary, ioclient)
                     call end_time_safety_under%set(component%end_time%mjd() - component%input_dt%days() - component%small_time_delta%days())
 
                     if ( component%dead_or_asleep() .or. (component%sim_time < end_time_safety_under) ) then
-                        call MPI_Barrier(MPI_COMM_WORLD)
+                        call MPI_Barrier(MPI_COMM_WORLD, ierr)
                     endif
                 endif
             endif
@@ -434,6 +437,7 @@ end subroutine component_end_of_nest_loop
 
 module subroutine component_program_end(component, options)
     implicit none
+    integer :: ierr
     type(comp_arr_t), intent(inout) :: component(:)
     type(options_t), intent(in) :: options(:)
 
@@ -456,7 +460,7 @@ module subroutine component_program_end(component, options)
     !
     !-----------------------------------------
     if (STD_OUT_PE) then
-        call MPI_Comm_Size(MPI_COMM_WORLD,i)
+        call MPI_Comm_Size(MPI_COMM_WORLD,i, ierr)
 
 
         write(*,'(/ A)') "------------------------------------------------------"

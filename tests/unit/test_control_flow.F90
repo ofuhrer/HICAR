@@ -5,7 +5,7 @@
 ! between the two processes, seeing if we can get them to stall.
 module test_control_flow
 
-    use mpi_f08
+    use mpi
     use options_interface, only: options_t
     use flow_object_interface, only: flow_obj_t, comp_arr_t
     use ioclient_interface, only: ioclient_t
@@ -190,7 +190,7 @@ module test_control_flow
         type(options_t), allocatable :: options(:)
         type(boundary_t), allocatable :: boundary(:)
         type(ioclient_t), allocatable :: ioclient(:)
-        type(MPI_Comm) :: io_team, exec_team
+        integer :: io_team, exec_team
 
         n_nests = size(in_options)
 

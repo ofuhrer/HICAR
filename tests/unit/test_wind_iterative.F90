@@ -17,7 +17,7 @@
 
 module test_wind_iterative
 
-    use mpi_f08
+    use mpi
     use icar_constants
     use testdrive,          only : new_unittest, unittest_type, error_type, test_failed
     use domain_interface,   only : domain_t

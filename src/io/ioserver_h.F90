@@ -11,7 +11,7 @@
 !!
 !!----------------------------------------------------------
 module ioserver_interface
-  use mpi_f08
+  use mpi
   use netcdf
   use icar_constants
   use reader_interface,   only : reader_t
@@ -69,7 +69,7 @@ module ioserver_interface
         ! Note n_variables may be smaller then size(variables) so that it doesn't
         ! have to keep reallocating variables whenever something is added or removed
         integer, public :: n_input_variables, n_output_variables, n_servers, n_children, n_child_ioservers
-        type(MPI_Comm), public :: client_comms, IO_comms
+        integer, public :: client_comms, IO_comms
         logical, public :: files_to_read
         logical         :: first_write = .true.
         logical, allocatable :: nest_types_initialized(:)
@@ -95,7 +95,7 @@ module ioserver_interface
         ! finds a matching receive already in flight and can skip the
         ! rendezvous handshake. gather_posted is the bootstrap flag: false
         ! until the first call posts the initial Irecvs.
-        type(MPI_Request), allocatable :: gather_reqs(:)
+        integer, allocatable :: gather_reqs(:)
         logical :: gather_posted = .false.
 
 
@@ -112,15 +112,15 @@ module ioserver_interface
         ! MPI datatypes describing nest-transfer access patterns. The
         ! restart RMA datatypes (rst_types_*, child_rst_types_*) have been
         ! retired alongside the move from MPI-RMA to two-sided Isend/Irecv.
-        type(MPI_Datatype), allocatable, dimension(:,:) :: send_nest_types, buffer_nest_types
-        type(MPI_Datatype), allocatable, dimension(:,:) :: send_nest_types_2d, buffer_nest_types_2d
-        type(MPI_Datatype), allocatable, dimension(:,:) :: send_nest_types_3d_init, buffer_nest_types_3d_init
+        integer, allocatable, dimension(:,:) :: send_nest_types, buffer_nest_types
+        integer, allocatable, dimension(:,:) :: send_nest_types_2d, buffer_nest_types_2d
+        integer, allocatable, dimension(:,:) :: send_nest_types_3d_init, buffer_nest_types_3d_init
         ! MPI vector types matching the output-only Isends from the client.
         ! Used in write_file when this%restart_counter does not trip the
         ! restart gate, so the matching Irecv consumes only the leading-dim
         ! slice (1:n_out_*) of write_buffer_* with stride n_w_*.
-        type(MPI_Datatype) :: recv_type_3d_out
-        type(MPI_Datatype) :: recv_type_2d_out
+        integer :: recv_type_3d_out
+        integer :: recv_type_2d_out
 
         logical, allocatable :: nest_types_2d_initialized(:), nest_types_3d_init_initialized(:)
 
@@ -233,21 +233,21 @@ module ioserver_interface
             class(ioserver_t), intent(inout) :: this
             type(ioserver_t), intent(in)    :: child_ioserver
             integer,            intent(in)  :: child_indx
-            type(MPI_Datatype), intent(out) :: send_nest_types(:), buffer_nest_types(:)
+            integer, intent(out) :: send_nest_types(:), buffer_nest_types(:)
         end subroutine
 
         module subroutine setup_nest_types_2d(this, child_ioserver, child_indx, send_nest_types, buffer_nest_types)
             class(ioserver_t), intent(inout) :: this
             type(ioserver_t), intent(in)    :: child_ioserver
             integer,            intent(in)  :: child_indx
-            type(MPI_Datatype), intent(out) :: send_nest_types(:), buffer_nest_types(:)
+            integer, intent(out) :: send_nest_types(:), buffer_nest_types(:)
         end subroutine
 
         module subroutine setup_nest_types_3d_init(this, child_ioserver, child_indx, send_nest_types, buffer_nest_types)
             class(ioserver_t), intent(inout) :: this
             type(ioserver_t), intent(in)    :: child_ioserver
             integer,            intent(in)  :: child_indx
-            type(MPI_Datatype), intent(out) :: send_nest_types(:), buffer_nest_types(:)
+            integer, intent(out) :: send_nest_types(:), buffer_nest_types(:)
         end subroutine
 
         ! One-time init transfer for a parent nest: resolve the per-family
