@@ -21,6 +21,7 @@ program icar
     use mpi, only: MPI_initialized, MPI_INIT, MPI_Comm_Rank, MPI_COMM_WORLD, MPI_Finalize
     use options_interface,  only : options_t
     use flow_object_interface, only : comp_arr_t
+    use domain_interface, only : domain_t
     use boundary_interface, only : boundary_t
     use ioclient_interface, only : ioclient_t
 
@@ -41,7 +42,7 @@ program icar
     
     integer :: i, n_nests, PE_RANK_GLOBAL, ierr
     real :: t_val, t_val2, t_val3
-    logical :: init_flag
+    logical :: init_flag, is_compute_rank
     character(len=kMAX_FILE_LENGTH) :: namelist_file
 
     ! Read command line options to determine what kind of run this is
@@ -78,6 +79,12 @@ program icar
     !Determine split of processes which will become I/O servers and which will be compute tasks
     !Also sets constants for the program to keep track of this splitting
     call split_processes(components, ioclient, n_nests, options(1))
+    select type (component => components(1)%comp)
+        type is (domain_t)
+            is_compute_rank = .true.
+        class default
+            is_compute_rank = .false.
+    end select
     if (STD_OUT_PE) write(*,'(/ A)') "--------------------------------------------------------------"
     if (STD_OUT_PE) write(*,'(A)')   "Finished processor assignment, beginning domain initialization"
     if (STD_OUT_PE) write(*,'(A)')   "--------------------------------------------------------------"
@@ -99,7 +106,9 @@ program icar
 
     CALL MPI_Finalize(ierr)
 #ifdef _OPENACC
-    call acc_shutdown(acc_device_nvidia)
+    ! I/O ranks never initialize OpenACC; avoid entering its runtime during
+    ! teardown, which can create an unnecessary CUDA context on those ranks.
+    if (is_compute_rank) call acc_shutdown(acc_device_nvidia)
 #endif
 
 contains
