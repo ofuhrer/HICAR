@@ -101,6 +101,17 @@ add_custom_target(test_cli
     VERBATIM
 )
 
+# Terminal forcing coverage: a run may end on its final available forcing
+# timestamp, but must still reject genuinely incomplete interpolation coverage.
+add_custom_target(test_terminal_forcing
+    COMMAND ${PROJECT_SOURCE_DIR}/tests/scripts/test_terminal_forcing.sh
+            ${PROJECT_SOURCE_DIR} $<TARGET_FILE:HICAR>
+    DEPENDS HICAR download_test_data
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/tests/Test_Cases
+    COMMENT "Running terminal forcing coverage regression"
+    VERBATIM
+)
+
 # HICAR_debug target: build debug executable for reproducibility testing.
 # If already in debug mode, just depend on the main HICAR target.
 # Otherwise, spawn a separate debug sub-build that installs HICAR_debug to bin/.

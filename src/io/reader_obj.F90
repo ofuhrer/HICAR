@@ -437,7 +437,12 @@ contains
     
     
     !>------------------------------------------------------------
-    !! Update the curstep and curfile (increments curstep and curfile if necessary)
+    !! Advance to the next forcing record after a successful read.
+    !!
+    !! The record just read is sufficient to finish a model run when its
+    !! timestamp reaches the requested end time.  Do not advance past that
+    !! terminal interpolation endpoint: doing so would incorrectly require an
+    !! additional forcing record after end_time.
     !!
     !!------------------------------------------------------------
     subroutine update_forcing_step(this)
@@ -448,6 +453,14 @@ contains
         type(Time_type), allocatable :: times_in_file(:)
         type(Time_type) :: time_tmp
 
+        ! input_time is the timestamp of the record just read.  A model end
+        ! between forcing times still needs the first record at or after the
+        ! end for interpolation, but an exact endpoint must not require one
+        ! more record beyond it.
+        if (this%input_time >= this%model_end_time) then
+            this%eof = .True.
+            return
+        endif
 
         this%curstep = this%curstep + 1 ! this may be all we have to do most of the time
         ! check that we haven't stepped passed the end of the current file
