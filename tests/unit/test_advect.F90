@@ -10,7 +10,8 @@ module test_advect
     use testdrive, only : new_unittest, unittest_type, error_type, check, test_failed
     use domain_interface, only: domain_t
     use options_interface, only: options_t
-    use advection, only: adv_init, advect, adv_var_request
+    use advection, only: adv_init, advect, adv_var_request, adv_bound_theta_perturbation
+    use adv_std, only: adv_theta_ref
     use timer_interface, only: timer_t
     use io_routines,     only : check_file_exists
     use time_step, only: compute_dt
@@ -39,6 +40,7 @@ module test_advect
             new_unittest("adv_h1_v1", test_adv_h1_v1), &
             new_unittest("adv_h3_v3", test_adv_h3_v3), &
             new_unittest("adv_h5_v5", test_adv_h5_v5), &
+            new_unittest("theta_split_limiter", test_theta_split_limiter), &
             new_unittest("adv_cone_rot", test_adv_cone_rot)  &
             ]
     
@@ -100,6 +102,126 @@ module test_advect
         call advect_cone_rotation(h_order=5,v_order=5,error=error)
 
     end subroutine test_adv_cone_rot
+
+    subroutine test_theta_split_limiter(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        type(domain_t) :: domain
+        type(options_t) :: options
+        integer :: thv, ig, jg
+        real :: theta_min, theta_max, low_full, high_full
+        real, allocatable :: theta_min_k(:), theta_max_k(:)
+
+        STD_OUT_PE = .False.
+        theta_min = 300.0
+        theta_max = 320.0
+
+        call options%init()
+        options%domain%init_conditions_file = '../tests/Test_Cases/domains/flat_plane_250m.nc'
+        options%domain%hgt_hi = 'topo'
+        options%domain%lat_hi = 'lat'
+        options%domain%lon_hi = 'lon'
+        if (trim(options%domain%init_conditions_file) /= '') then
+            call check_file_exists(trim(options%domain%init_conditions_file), message='The test domain file does not exist. Ensure that the HICAR_test repo was installed and the domain file ../tests/Test_Cases/domains/flat_plane_250m.nc exists.')
+        endif
+
+        options%domain%dx = 250.0
+        options%domain%nz = 6
+        options%domain%sleve = .True.
+        options%physics%advection = kADV_STD
+        options%time%RK3 = .True.
+        options%adv%h_order = 3
+        options%adv%v_order = 3
+        options%adv%flux_corr = 1
+        options%adv%advect_density = .False.
+
+        domain%compute_comms = MPI_COMM_WORLD
+        call adv_var_request(options)
+        call domain%init(options,1)
+        call adv_init(domain,options)
+
+        thv = domain%var_indx(kVARS%potential_temperature)%v
+        ig = domain%grid%its
+        jg = domain%grid%jts
+
+        associate(th => domain%vars_3d(thv)%data_3d)
+            allocate(theta_min_k(lbound(th,2):ubound(th,2)))
+            allocate(theta_max_k(lbound(th,2):ubound(th,2)))
+            theta_min_k = theta_min
+            theta_max_k = theta_max
+
+            th = 310.0 - adv_theta_ref
+            th(ig,lbound(th,2),jg) = 250.0 - adv_theta_ref(ig,lbound(th,2),jg)
+            th(ig,ubound(th,2),jg) = 370.0 - adv_theta_ref(ig,ubound(th,2),jg)
+
+            call adv_bound_theta_perturbation(th, adv_theta_ref, theta_min_k, theta_max_k)
+
+            low_full = th(ig,lbound(th,2),jg) + adv_theta_ref(ig,lbound(th,2),jg)
+            high_full = th(ig,ubound(th,2),jg) + adv_theta_ref(ig,ubound(th,2),jg)
+
+            call check(error, abs(low_full - theta_min) < 1.0e-5, &
+                "theta split limiter clamps low reconstructed theta")
+            if (allocated(error)) then
+                deallocate(theta_min_k, theta_max_k)
+                call domain%release()
+                return
+            endif
+
+            call check(error, abs(high_full - theta_max) < 1.0e-5, &
+                "theta split limiter clamps high reconstructed theta")
+            if (allocated(error)) then
+                deallocate(theta_min_k, theta_max_k)
+                call domain%release()
+                return
+            endif
+
+            call check(error, all(th(domain%grid%its:domain%grid%ite,:,domain%grid%jts:domain%grid%jte) + &
+                                  adv_theta_ref(domain%grid%its:domain%grid%ite,:,domain%grid%jts:domain%grid%jte) >= theta_min - 1.0e-5) .and. &
+                              all(th(domain%grid%its:domain%grid%ite,:,domain%grid%jts:domain%grid%jte) + &
+                                  adv_theta_ref(domain%grid%its:domain%grid%ite,:,domain%grid%jts:domain%grid%jte) <= theta_max + 1.0e-5), &
+                "theta split limiter bounds all interior reconstructed theta")
+            if (allocated(error)) then
+                deallocate(theta_min_k, theta_max_k)
+                call domain%release()
+                return
+            endif
+
+            theta_min_k = theta_min
+            theta_max_k = theta_max
+            theta_min_k(ubound(th,2)) = 340.0
+            theta_max_k(ubound(th,2)) = 360.0
+            th = 310.0 - adv_theta_ref
+            th(ig,ubound(th,2),jg) = 320.0 - adv_theta_ref(ig,ubound(th,2),jg)
+
+            call adv_bound_theta_perturbation(th, adv_theta_ref, theta_min_k, theta_max_k)
+
+            high_full = th(ig,ubound(th,2),jg) + adv_theta_ref(ig,ubound(th,2),jg)
+            call check(error, abs(high_full - 340.0) < 1.0e-5, &
+                "theta split limiter applies level-specific lower bound")
+            if (allocated(error)) then
+                deallocate(theta_min_k, theta_max_k)
+                call domain%release()
+                return
+            endif
+
+            theta_min_k = theta_min
+            theta_max_k = theta_max
+            theta_min_k(ubound(th,2)) = 340.0
+            theta_max_k(ubound(th,2)) = 360.0
+            th = 310.0 - adv_theta_ref
+            th(ig,ubound(th,2),jg) = 370.0 - adv_theta_ref(ig,ubound(th,2),jg)
+
+            call adv_bound_theta_perturbation(th, adv_theta_ref, theta_min_k, theta_max_k)
+
+            high_full = th(ig,ubound(th,2),jg) + adv_theta_ref(ig,ubound(th,2),jg)
+            call check(error, abs(high_full - 360.0) < 1.0e-5, &
+                "theta split limiter applies level-specific upper bound")
+        end associate
+        deallocate(theta_min_k, theta_max_k)
+
+        call domain%release()
+
+    end subroutine test_theta_split_limiter
 
     subroutine advect_standard(h_order,v_order,error)
         integer, intent(in) :: h_order,v_order

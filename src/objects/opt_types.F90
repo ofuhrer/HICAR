@@ -360,12 +360,14 @@ module options_types
         logical :: z_is_geopotential    ! if true the z variable is interpreted as geopotential height
         logical :: time_varying_z       ! read in a new z coordinate every time step and interpolate accordingly
         logical :: relax_filters       ! should use smoothly varying relaxation filters to nudge forcing at the boundaries
+        logical :: wait_for_ready_file  ! wait for <forcing file>.ready before consuming forcing input
 
         real :: t_offset                ! offset to temperature because WRF outputs potential temperature-300
         real :: p_multiplier            ! multiplier to apply to pressure forcing data. Useful if pressure is in hPa instead of Pa.
         logical :: limit_rh                ! impose a limit on relative humidity in the forcing data to be <=1
 
         real :: inputinterval           ! time between forcing steps [s]
+        integer :: ready_file_timeout   ! maximum wait for ready file marker [s]
 
         ! variable names from init/BC/wind/... files
         character (len=kMAX_NAME_LENGTH) :: latvar="",lonvar="",uvar="",ulat="",ulon="",vvar="",vlat="",vlon="",wvar="", &
@@ -396,6 +398,8 @@ module options_types
 
         ! file names
         character (len=kMAX_FILE_LENGTH) :: init_conditions_file                                        
+        logical :: wait_for_ready_file  ! wait for <init_conditions_file>.ready before consuming static input
+        integer :: ready_file_timeout   ! maximum wait for ready file marker [s]
 
         
         ! various real parameters/options

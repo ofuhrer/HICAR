@@ -20,7 +20,7 @@ submodule(reader_interface) reader_implementation
   use string,             only : as_string
   use time_io,            only : read_times, find_timestep_in_filelist, var_has_time_dim
   use array_utilities,    only : interpolate_in_z
-  use io_routines,        only : io_getdims, io_var_reversed, can_file_parallel
+  use io_routines,        only : io_getdims, io_var_reversed, can_file_parallel, wait_for_file_ready
   implicit none
 
 contains
@@ -47,6 +47,8 @@ contains
         this%file_list = options%forcing%boundary_files
         this%time_var  = options%forcing%time_var
         this%lat_var  = options%forcing%latvar
+        this%wait_for_ready_file = options%forcing%wait_for_ready_file
+        this%ready_file_timeout = options%forcing%ready_file_timeout
 
         this%model_end_time = options%general%end_time
         this%input_dt   = options%forcing%input_dt
@@ -59,49 +61,53 @@ contains
             call set_curfile_curstep(this, options%general%start_time, this%file_list, this%time_var, options%restart%restart)
         endif
 
-        ! Validate that the forcing files cover the requested simulation
-        ! end_time. Without this check, the reader silently hits EOF during
-        ! the run and the two-sided IO plumbing deadlocks (compute's
-        ! pre-posted Irecv on read_buffer never finds a matching Isend once
-        ! scatter_forcing is skipped).
-        last_file = this%file_list(size(this%file_list))
-        call read_times(last_file, this%time_var, last_file_times)
+        if (.not.this%wait_for_ready_file) then
+            ! Validate that the forcing files cover the requested simulation
+            ! end_time. Without this check, the reader silently hits EOF during
+            ! the run and the two-sided IO plumbing deadlocks (compute's
+            ! pre-posted Irecv on read_buffer never finds a matching Isend once
+            ! scatter_forcing is skipped).
+            last_file = this%file_list(size(this%file_list))
+            call read_times(last_file, this%time_var, last_file_times)
 
-        if (size(last_file_times) == 0) then
-            call MPI_Comm_Rank(MPI_COMM_WORLD, my_rank, ierr)
-            call MPI_Comm_Size(MPI_COMM_WORLD, comm_size, ierr)
-            if (my_rank == comm_size-1) then
-                write(*,*) ""
-                write(*,*) "================================================================"
-                write(*,*) "ERROR: forcing file contains no timestamps."
-                write(*,*) "================================================================"
-                write(*,*) "  File : ", trim(last_file)
-                write(*,*) "================================================================"
-                flush(output_unit)
+            if (size(last_file_times) == 0) then
+                call MPI_Comm_Rank(MPI_COMM_WORLD, my_rank, ierr)
+                call MPI_Comm_Size(MPI_COMM_WORLD, comm_size, ierr)
+                if (my_rank == comm_size-1) then
+                    write(*,*) ""
+                    write(*,*) "================================================================"
+                    write(*,*) "ERROR: forcing file contains no timestamps."
+                    write(*,*) "================================================================"
+                    write(*,*) "  File : ", trim(last_file)
+                    write(*,*) "================================================================"
+                    flush(output_unit)
+                endif
+                call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
             endif
-            call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
-        endif
 
-        last_forcing_time = last_file_times(size(last_file_times))
+            last_forcing_time = last_file_times(size(last_file_times))
 
-        if (last_forcing_time < options%general%end_time) then
-            call MPI_Comm_Rank(MPI_COMM_WORLD, my_rank, ierr)
-            call MPI_Comm_Size(MPI_COMM_WORLD, comm_size, ierr)
+            if (last_forcing_time < options%general%end_time) then
+                call MPI_Comm_Rank(MPI_COMM_WORLD, my_rank, ierr)
+                call MPI_Comm_Size(MPI_COMM_WORLD, comm_size, ierr)
 
-            if (my_rank == comm_size-1) then
-                write(*,*) ""
-                write(*,*) "================================================================"
-                write(*,*) "ERROR: forcing data does not cover the requested simulation end."
-                write(*,*) "================================================================"
-                write(*,*) "  Simulation end time    : ", trim(as_string(options%general%end_time))
-                write(*,*) "  Last forcing timestamp : ", trim(as_string(last_forcing_time))
-                write(*,*) "  Last forcing file      : ", trim(last_file)
-                write(*,*) ""
-                write(*,*) "Either shorten the namelist end_time or extend the forcing file list."
-                write(*,*) "================================================================"
-                flush(output_unit)
+                if (my_rank == comm_size-1) then
+                    write(*,*) ""
+                    write(*,*) "================================================================"
+                    write(*,*) "ERROR: forcing data does not cover the requested simulation end."
+                    write(*,*) "================================================================"
+                    write(*,*) "  Simulation end time    : ", trim(as_string(options%general%end_time))
+                    write(*,*) "  Last forcing timestamp : ", trim(as_string(last_forcing_time))
+                    write(*,*) "  Last forcing file      : ", trim(last_file)
+                    write(*,*) ""
+                    write(*,*) "Either shorten the namelist end_time or extend the forcing file list."
+                    write(*,*) "================================================================"
+                    flush(output_unit)
+                endif
+                call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
             endif
-            call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
+
+            deallocate(last_file_times)
         endif
 
         !Now setup dimensions of reader_object so we know what part of input file that we should read
@@ -179,6 +185,7 @@ contains
 
         is_file_parallel = .True.!can_file_parallel(this%file_list(this%curfile))
         if (this%ncfile_id < 0) then
+            call wait_for_file_ready(this%file_list(this%curfile), this%ready_file_timeout, this%wait_for_ready_file)
             if (.not.(is_file_parallel)) then
                 call check_ncdf( nf90_open(trim(this%file_list(this%curfile)), IOR(NF90_NOWRITE,NF90_NETCDF4), this%ncfile_id), " Opening file "//trim(this%file_list(this%curfile)))
             else
@@ -436,7 +443,7 @@ contains
         implicit none
         type(reader_t),   intent(inout) :: this
 
-        integer :: steps_in_file
+        integer :: steps_in_file, ierr, my_rank, comm_size
         type(Time_type), allocatable :: times_in_file(:)
         type(Time_type) :: time_tmp
 
@@ -460,7 +467,22 @@ contains
 
             ! if we have run out of input files, stop with an error message
             if (this%curfile > size(this%file_list)) then
-                this%eof = .True.
+                call MPI_Comm_Rank(MPI_COMM_WORLD, my_rank, ierr)
+                call MPI_Comm_Size(MPI_COMM_WORLD, comm_size, ierr)
+                if (my_rank == comm_size-1) then
+                    write(*,*) ""
+                    write(*,*) "================================================================"
+                    write(*,*) "ERROR: forcing file list ended before the simulation end time."
+                    write(*,*) "================================================================"
+                    write(*,*) "  Last listed forcing file : ", trim(this%file_list(size(this%file_list)))
+                    write(*,*) "  Current input time       : ", trim(as_string(this%input_time))
+                    write(*,*) "  Requested model end      : ", trim(as_string(this%model_end_time))
+                    write(*,*) ""
+                    write(*,*) "Extend forcing_file_list with the planned input files."
+                    write(*,*) "================================================================"
+                    flush(output_unit)
+                endif
+                call MPI_Abort(MPI_COMM_WORLD, 1, ierr)
             endif
 
         endif
@@ -468,6 +490,7 @@ contains
         ! Check if the next file to read is beyond the model end time.
         if (.not.(this%eof)) then
             !Get time step of the next input step
+            call wait_for_file_ready(this%file_list(this%curfile), this%ready_file_timeout, this%wait_for_ready_file)
             call read_times(this%file_list(this%curfile), this%time_var, times_in_file)
             
             call time_tmp%set(times_in_file(this%curstep)%mjd() - this%input_dt%days())
@@ -546,9 +569,11 @@ contains
         ! if this is a restart run, it is acceptable to find a non-exact first file time, 
         ! in which case we take the forward time (assuming restart was written between input steps)
         if (restart) then
-            this%curstep = find_timestep_in_filelist(file_list, time_var, time, filename, forward=.False., error=error)
+            this%curstep = find_timestep_in_filelist(file_list, time_var, time, filename, forward=.False., error=error, &
+                                                     wait_ready=this%wait_for_ready_file, ready_timeout=this%ready_file_timeout)
         else
-            this%curstep = find_timestep_in_filelist(file_list, time_var, time, filename, error=error)
+            this%curstep = find_timestep_in_filelist(file_list, time_var, time, filename, error=error, &
+                                                     wait_ready=this%wait_for_ready_file, ready_timeout=this%ready_file_timeout)
         endif
 
         if (error==1) then
@@ -559,6 +584,7 @@ contains
             if (trim(file_list(n))==trim(filename)) this%curfile = n
         enddo
 
+        call wait_for_file_ready(file_list(this%curfile), this%ready_file_timeout, this%wait_for_ready_file)
         call read_times(file_list(this%curfile), time_var, times_in_file)
         this%input_time = times_in_file(this%curstep)
 

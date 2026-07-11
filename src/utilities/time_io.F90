@@ -3,7 +3,7 @@ module time_io
     use time_object,        only : Time_type
     use time_delta_object,  only : time_delta_t
     use string,             only : get_integer, as_string
-    use io_routines,        only : io_read, io_read_attribute, io_dimension_is_present, check
+    use io_routines,        only : io_read, io_read_attribute, io_dimension_is_present, check, wait_for_file_ready
     use iso_fortran_env,    only: real64, real64
     use icar_constants,     only: kMAX_STRING_LENGTH, kMAX_NAME_LENGTH, STD_OUT_PE, kOUTPUT_FMT
     use netcdf
@@ -12,7 +12,7 @@ module time_io
 
 contains
 
-    function find_timestep_in_file(filename, time_var, time, time_at_step, precision, forward, error) result(step)
+    function find_timestep_in_file(filename, time_var, time, time_at_step, precision, forward, error, wait_ready, ready_timeout) result(step)
         implicit none
         character(len=*),  intent(in) :: filename
         character(len=*),  intent(in) :: time_var
@@ -21,18 +21,26 @@ contains
         type(time_delta_t),intent(in),    optional :: precision
         logical,           intent(in),    optional :: forward
         integer,           intent(inout), optional :: error
+        logical,           intent(in),    optional :: wait_ready
+        integer,           intent(in),    optional :: ready_timeout
         integer :: step
 
         type(Time_type), allocatable :: times_in_file(:)
         type(time_delta_t) :: max_dt
         integer :: i,n
-        logical :: found
+        logical :: found, wait_for_ready
+        integer :: timeout
 
         call max_dt%set(seconds=1.0)
         if (present(precision)) max_dt = precision
         if (present(error)) error=0
+        wait_for_ready = .false.
+        if (present(wait_ready)) wait_for_ready = wait_ready
+        timeout = 60
+        if (present(ready_timeout)) timeout = ready_timeout
 
         ! read the times for all timesteps in the specified file
+        call wait_for_file_ready(filename, timeout, wait_for_ready)
         call read_times(filename, time_var, times_in_file)
 
         step = -1
@@ -218,7 +226,7 @@ contains
 
     end function hour_from_units
 
-    function find_timestep_in_filelist(filelist, time_var, time, filename, forward, error) result(step)
+    function find_timestep_in_filelist(filelist, time_var, time, filename, forward, error, wait_ready, ready_timeout) result(step)
         implicit none
         character(len=*),  intent(in) :: filelist(:)
         character(len=*),  intent(in) :: time_var
@@ -226,19 +234,51 @@ contains
         character(len=*),  intent(inout), optional :: filename
         logical,           intent(in), optional :: forward
         integer,           intent(inout), optional :: error
+        logical,           intent(in), optional :: wait_ready
+        integer,           intent(in), optional :: ready_timeout
         integer :: step, err
 
         type(Time_type), allocatable :: times_in_file_up(:), times_in_file_down(:)
         type(time_delta_t) :: max_dt
         type(Time_type) :: tmp_time
         integer :: i, n_t_down, n_t_up, nup, ndown, nup_o, ndown_o, ierr
-        logical :: found, fileExists, limit_loop
+        logical :: found, fileExists, limit_loop, wait_for_ready
+        integer :: timeout
 
         call max_dt%set(seconds=1.0)
         if (present(error)) error=0
+        wait_for_ready = .false.
+        if (present(wait_ready)) wait_for_ready = wait_ready
+        timeout = 60
+        if (present(ready_timeout)) timeout = ready_timeout
         
         step = -1
         found = .False.
+
+        if (wait_for_ready) then
+            do i = 1, size(filelist)
+                if (present(forward)) then
+                    step = find_timestep_in_file(filelist(i), time_var, time, precision=max_dt, forward=forward, error=err, &
+                                                 wait_ready=.true., ready_timeout=timeout)
+                else
+                    step = find_timestep_in_file(filelist(i), time_var, time, precision=max_dt, error=err, &
+                                                 wait_ready=.true., ready_timeout=timeout)
+                endif
+                if (step > 0) then
+                    if (present(filename)) filename = filelist(i)
+                    return
+                endif
+            enddo
+
+            if (present(error)) then
+                error = 1
+                return
+            endif
+            write(*,*) "ERROR: Unable to find requested date in ready-file input list."
+            write(*,*) "First filename: ",trim(filelist(1))
+            write(*,*) "  time  : ",trim(as_string(time))
+            stop "Unable to find date in file"
+        endif
         
         nup = size(filelist)
         ndown=1
@@ -263,7 +303,9 @@ contains
         ndown_o = ndown
         nup_o = nup
 
+        call wait_for_file_ready(filelist(ndown), timeout, wait_for_ready)
         call read_times(filelist(ndown), time_var, times_in_file_down)
+        call wait_for_file_ready(filelist(nup), timeout, wait_for_ready)
         call read_times(filelist(nup), time_var, times_in_file_up)
 
         !Quick check that time is bounded by min and max existing files in list
@@ -287,9 +329,11 @@ contains
             ! read the times for all timesteps in the specified file
 
             if (present(forward)) then
-                step = find_timestep_in_file(filelist(ndown), time_var, time, precision=max_dt, forward=forward, error=err)
+                step = find_timestep_in_file(filelist(ndown), time_var, time, precision=max_dt, forward=forward, error=err, &
+                                             wait_ready=wait_for_ready, ready_timeout=timeout)
             else
-                step = find_timestep_in_file(filelist(ndown), time_var, time, precision=max_dt, error=err)
+                step = find_timestep_in_file(filelist(ndown), time_var, time, precision=max_dt, error=err, &
+                                             wait_ready=wait_for_ready, ready_timeout=timeout)
             endif
 
             if (step > 0) then
@@ -297,9 +341,11 @@ contains
                 filename = filelist(ndown)
             else
                 if (present(forward)) then
-                    step = find_timestep_in_file(filelist(nup), time_var, time, precision=max_dt, forward=forward, error=err)
+                    step = find_timestep_in_file(filelist(nup), time_var, time, precision=max_dt, forward=forward, error=err, &
+                                                 wait_ready=wait_for_ready, ready_timeout=timeout)
                 else
-                    step = find_timestep_in_file(filelist(nup), time_var, time, precision=max_dt, error=err)
+                    step = find_timestep_in_file(filelist(nup), time_var, time, precision=max_dt, error=err, &
+                                                 wait_ready=wait_for_ready, ready_timeout=timeout)
                 endif
 
                 if (step > 0) then
@@ -317,8 +363,14 @@ contains
                 ndown = ndown + nint((nup-ndown)/2.0)
 
                 ! read the times for all timesteps in the specified file
-                if (.not.(nup==nup_o)) call read_times(filelist(nup), time_var, times_in_file_up)
-                if (.not.(ndown==ndown_o)) call read_times(filelist(ndown), time_var, times_in_file_down)
+                if (.not.(nup==nup_o)) then
+                    call wait_for_file_ready(filelist(nup), timeout, wait_for_ready)
+                    call read_times(filelist(nup), time_var, times_in_file_up)
+                endif
+                if (.not.(ndown==ndown_o)) then
+                    call wait_for_file_ready(filelist(ndown), timeout, wait_for_ready)
+                    call read_times(filelist(ndown), time_var, times_in_file_down)
+                endif
 
                 ! See if we overshot (since we advance up)
                 if(times_in_file_down(1) > time .and. times_in_file_up(1) > time) then
@@ -357,7 +409,9 @@ contains
                 endif    
                 if (ndown==(nup-1)) then
 
+                    call wait_for_file_ready(filelist(nup), timeout, wait_for_ready)
                     call read_times(filelist(nup), time_var, times_in_file_up)
+                    call wait_for_file_ready(filelist(ndown), timeout, wait_for_ready)
                     call read_times(filelist(ndown), time_var, times_in_file_down)
 
                     tmp_time = times_in_file_down(size(times_in_file_down))

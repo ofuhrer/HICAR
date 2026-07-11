@@ -2,7 +2,7 @@ submodule(options_interface) options_implementation
 
     use icar_constants
     use mod_wrf_constants,          only : piconst
-    use io_routines,                only : io_newunit, check_variable_present, check_file_exists
+    use io_routines,                only : io_newunit, check_variable_present, check_file_exists, wait_for_file_ready
     use time_delta_object,          only : time_delta_t
     use time_object,                only : Time_type
     use string,                     only : str
@@ -709,8 +709,9 @@ contains
         logical :: compute_p, print_info, read_namelist, gennml
         logical, dimension(kMAX_NESTS) :: limit_rh, z_is_geopotential,&
                    time_varying_z, t_is_potential, qv_is_spec_humidity, &
-                   qv_is_relative_humidity, relax_filters
+                   qv_is_relative_humidity, relax_filters, wait_for_ready_file
         real, dimension(kMAX_NESTS)    :: t_offset, p_multiplier, inputinterval
+        integer, dimension(kMAX_NESTS) :: ready_file_timeout
         character(len=kMAX_FILE_LENGTH) :: forcing_file_list
         character(len=kMAX_FILE_LENGTH), allocatable :: boundary_files(:)
 
@@ -723,6 +724,7 @@ contains
 
         namelist /forcing/ forcing_file_list, inputinterval, t_offset, p_multiplier, limit_rh, z_is_geopotential, time_varying_z, &
                             t_is_potential, qv_is_relative_humidity, qv_is_spec_humidity, relax_filters, &
+                            wait_for_ready_file, ready_file_timeout, &
                             pvar,pbvar,phbvar,tvar,qvvar,qcvar,qivar,qrvar,qgvar,qsvar,qncvar,qnivar,qnrvar,qngvar,qnsvar,&
                             i2mvar, i3mvar, i2nvar, i3nvar, i1avar, i2avar, i3avar, i1cvar, i2cvar, i3cvar, &
                             qs_fmvar, ns_fmvar, &
@@ -754,6 +756,8 @@ contains
         call set_nml_var_default(qv_is_relative_humidity, 'qv_is_relative_humidity', print_info, gennml)
         call set_nml_var_default(qv_is_spec_humidity, 'qv_is_spec_humidity', print_info, gennml)
         call set_nml_var_default(relax_filters, 'relax_filters', print_info, gennml)
+        call set_nml_var_default(wait_for_ready_file, 'wait_for_ready_file', print_info, gennml)
+        call set_nml_var_default(ready_file_timeout, 'ready_file_timeout', print_info, gennml)
         call set_nml_var_default(latvar, 'latvar', print_info, gennml)
         call set_nml_var_default(lonvar, 'lonvar', print_info, gennml)
         call set_nml_var_default(hgtvar, 'hgtvar', print_info, gennml)
@@ -828,6 +832,8 @@ contains
         call set_nml_var(options%forcing%qv_is_relative_humidity, qv_is_relative_humidity(n_indx), 'qv_is_relative_humidity', qv_is_relative_humidity(1))
         call set_nml_var(options%forcing%qv_is_spec_humidity, qv_is_spec_humidity(n_indx), 'qv_is_spec_humidity', qv_is_spec_humidity(1))
         call set_nml_var(options%forcing%relax_filters, relax_filters(n_indx), 'relax_filters', relax_filters(1))
+        call set_nml_var(options%forcing%wait_for_ready_file, wait_for_ready_file(n_indx), 'wait_for_ready_file', wait_for_ready_file(1))
+        call set_nml_var(options%forcing%ready_file_timeout, ready_file_timeout(n_indx), 'ready_file_timeout', ready_file_timeout(1))
         call set_nml_var(options%forcing%inputinterval, inputinterval(n_indx), 'inputinterval', inputinterval(1))
 
         call options%forcing%input_dt%set(seconds=options%forcing%inputinterval)
@@ -867,7 +873,8 @@ contains
 
         call check_file_exists(forcing_file_list, message="Forcing file list does not exist.")
 
-        nfiles = read_forcing_file_names(forcing_file_list, boundary_files)
+        nfiles = read_forcing_file_names(forcing_file_list, boundary_files, &
+                                         options%forcing%wait_for_ready_file, options%forcing%ready_file_timeout)
 
         if (nfiles==0) then
             stop "No boundary conditions files specified."
@@ -876,6 +883,9 @@ contains
         allocate(options%forcing%boundary_files(nfiles))
         options%forcing%boundary_files(1:nfiles) = boundary_files(1:nfiles)
         deallocate(boundary_files)
+
+        call wait_for_file_ready(options%forcing%boundary_files(1), options%forcing%ready_file_timeout, &
+                                 options%forcing%wait_for_ready_file)
 
         ! time var must be set here, without the set_nml_var call, for dimension checking
         ! in later set_nml_var calls to function properly
@@ -1136,11 +1146,11 @@ contains
         logical :: read_namelist, print_info, gennml
 
         real, dimension(MAXLEVELS, kMAX_NESTS) :: dz_levels
-        logical, dimension(kMAX_NESTS) :: sleve, use_agl_height, use_map_factors
+        logical, dimension(kMAX_NESTS) :: sleve, use_agl_height, use_map_factors, wait_for_ready_file
 
         real, dimension(kMAX_NESTS) :: dx, flat_z_height, decay_rate_L_topo, decay_rate_S_topo, sleve_n, agl_cap, max_agl_height, height_lowest_level, model_top_height, stretch_fac
         real, dimension(kMAX_NESTS) :: init_surf_temp, init_sst
-        integer, dimension(kMAX_NESTS) :: nz, longitude_system, terrain_smooth_windowsize, terrain_smooth_cycles, auto_level
+        integer, dimension(kMAX_NESTS) :: nz, longitude_system, terrain_smooth_windowsize, terrain_smooth_cycles, auto_level, ready_file_timeout
 
         character(len=kMAX_FILE_LENGTH) :: init_conditions_file(kMAX_NESTS)
 
@@ -1156,7 +1166,7 @@ contains
                                         snowpack_rg_var, snowpack_rb_var, snowpack_dd_var, snowpack_sp_var, &
                                         snowpack_mk_var, snowpack_cdot_var, snowpack_snow_stress_var, snowpack_n3_var
 
-        namelist /domain/ dx, nz, longitude_system, init_conditions_file, &
+        namelist /domain/ dx, nz, longitude_system, init_conditions_file, wait_for_ready_file, ready_file_timeout, &
                             landvar,lakedepthvar, snowh_var, agl_cap, use_agl_height, use_map_factors, &
                             hgt_hi,lat_hi,lon_hi,ulat_hi,ulon_hi,vlat_hi,vlon_hi,           &
                             soiltype_var, cropcategory_var, soil_t_var,soil_vwc_var,swe_var,soil_deept_var,           &
@@ -1183,6 +1193,8 @@ contains
         if (present(gen_nml)) gennml = gen_nml
 
         call set_nml_var_default(init_conditions_file, 'init_conditions_file', print_info, gennml)
+        call set_nml_var_default(wait_for_ready_file, 'wait_for_ready_file', print_info, gennml)
+        call set_nml_var_default(ready_file_timeout, 'ready_file_timeout', print_info, gennml)
         call set_nml_var_default(dx, 'dx', print_info, gennml)
         call set_nml_var_default(longitude_system, 'longitude_system', print_info, gennml)
         call set_nml_var_default(nz, 'nz', print_info, gennml)
@@ -1275,6 +1287,7 @@ contains
             sleve(n_indx) = sleve(1)
             use_agl_height(n_indx) = use_agl_height(1)
             use_map_factors(n_indx) = use_map_factors(1)
+            wait_for_ready_file(n_indx) = wait_for_ready_file(1)
             ! Now read namelist again, -- if the value of the logical option is set in the namelist, it will be set to the user set value again
 
             open(io_newunit(name_unit), file=filename)
@@ -1301,6 +1314,8 @@ contains
         call set_nml_var(domain_options%use_agl_height, use_agl_height(n_indx), 'use_agl_height', use_agl_height(1))
         call set_nml_var(domain_options%use_map_factors, use_map_factors(n_indx), 'use_map_factors', use_map_factors(1))
         call set_nml_var(domain_options%agl_cap, agl_cap(n_indx), 'agl_cap', agl_cap(1))
+        call set_nml_var(domain_options%wait_for_ready_file, wait_for_ready_file(n_indx), 'wait_for_ready_file', wait_for_ready_file(1))
+        call set_nml_var(domain_options%ready_file_timeout, ready_file_timeout(n_indx), 'ready_file_timeout', ready_file_timeout(1))
 
         call set_nml_var(domain_options%auto_level, auto_level(n_indx), 'auto_level', auto_level(1))
         call set_nml_var(domain_options%height_lowest_level, height_lowest_level(n_indx), 'height_lowest_level', height_lowest_level(1))
@@ -1315,6 +1330,8 @@ contains
         
         if (trim(init_conditions_file(n_indx)) /= kCHAR_NO_VAL) then
             call set_nml_var(domain_options%init_conditions_file, init_conditions_file(n_indx), 'init_conditions_file', init_conditions_file(1))
+            call wait_for_file_ready(domain_options%init_conditions_file, domain_options%ready_file_timeout, &
+                                     domain_options%wait_for_ready_file)
         else if (read_namelist) then
             if (STD_OUT_PE) write(*,*) "  --------------------------------"
             if (STD_OUT_PE) write(*,*) "  Error: init_conditions_file for nest ",n_indx, " not set in namelist"
@@ -2575,15 +2592,24 @@ contains
     !!  @retval     nfiles          The number of files read.
     !!
     !! ----------------------------------------------------------------------------
-    function read_forcing_file_names(filename, forcing_files) result(nfiles)
+    function read_forcing_file_names(filename, forcing_files, wait_ready, ready_timeout) result(nfiles)
         implicit none
         character(len=*) :: filename
         character(len=kMAX_FILE_LENGTH), dimension(MAX_NUMBER_FILES) :: forcing_files
+        logical, intent(in), optional :: wait_ready
+        integer, intent(in), optional :: ready_timeout
         integer :: nfiles
         integer :: file_unit
         integer :: i, error
         logical :: first_file_exists, last_file_exists
         character(len=kMAX_FILE_LENGTH) :: temporary_file
+        logical :: wait_for_ready
+        integer :: timeout
+
+        wait_for_ready = .false.
+        if (present(wait_ready)) wait_for_ready = wait_ready
+        timeout = 60
+        if (present(ready_timeout)) timeout = ready_timeout
 
         open(unit=io_newunit(file_unit), file=filename)
         i=0
@@ -2609,12 +2635,16 @@ contains
             enddo
         endif
 
+        if (nfiles == 0) return
+
+        call wait_for_file_ready(forcing_files(1), timeout, wait_for_ready)
+
         ! Check that the options file actually exists
         INQUIRE(file=trim(forcing_files(1)), exist=first_file_exists)
         INQUIRE(file=trim(forcing_files(nfiles)), exist=last_file_exists)
 
         ! if options file does not exist, print an error and quit
-        if (.not.first_file_exists .or. .not.last_file_exists) then
+        if (.not.wait_for_ready .and. (.not.first_file_exists .or. .not.last_file_exists)) then
             if (.not.first_file_exists .and. STD_OUT_PE) write(*,*) "  The first forcing file does not exist = ", trim(forcing_files(1))
             if (.not.last_file_exists .and. STD_OUT_PE) write(*,*) "  The last forcing file does not exist = ", trim(forcing_files(nfiles))
 

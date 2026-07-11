@@ -55,7 +55,7 @@ module adv_std
     public :: adv_std_clean_wind_arrays
     public :: flux_x_fm, flux_y_fm, flux_z_fm
 
-    public :: adv_theta_ref, adv_std_apply_ref_vert
+    public :: adv_theta_ref
 
 contains
 
@@ -740,38 +740,6 @@ contains
         endif
 
     end subroutine adv_std_advect3d
-
-    !>------------------------------------------------------------
-    !! Fix 3: apply theta_bar's vertical transport after the
-    !! full RK3 loop AND the FCT flux corrector
-    !!------------------------------------------------------------
-    subroutine adv_std_apply_ref_vert(qprime, w_real, zheight, dt)
-        implicit none
-        real, dimension(ims:ime,kms:kme,jms:jme), intent(inout) :: qprime
-        real, dimension(ims:ime,kms:kme,jms:jme), intent(in)    :: w_real, zheight
-        real, intent(in) :: dt
-        integer :: i, j, k, ku, kd
-        real :: dthdz
-
-        ! Branchless interior + boundary: clamp k+1 / k-1 to [kms,kme]. At
-        ! k=kms (kd=kms, ku=kms+1) and k=kme (ku=kme, kd=kme-1) this collapses
-        ! to the one-sided form; interior remains centered.
-        !$acc parallel loop gang vector collapse(3) default(present) private(dthdz,ku,kd)
-        do j = jts, jte
-            do k = kms, kme
-                do i = its, ite
-                    ku = min(k+1, kme)
-                    kd = max(k-1, kms)
-                    dthdz = (adv_theta_ref(i,ku,j) - adv_theta_ref(i,kd,j)) &
-                          / (zheight(i,ku,j) - zheight(i,kd,j))
-                    qprime(i,k,j) = qprime(i,k,j) &
-                        - w_real(i,k,j) * dthdz * dt
-                enddo
-            enddo
-        enddo
-
-    end subroutine adv_std_apply_ref_vert
-
 
     subroutine sum_kernel(flux_x, flux_y, flux_z, qold, qfluxes, denom, dz, q_id)
         implicit none

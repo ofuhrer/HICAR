@@ -45,6 +45,8 @@ module reader_interface
       ! list of input files
       character (len=kMAX_FILE_LENGTH), allocatable :: file_list(:)
       character (len=kMAX_NAME_LENGTH)   :: time_var, lat_var
+      logical :: wait_for_ready_file
+      integer :: ready_file_timeout
 
       ! the netcdf ID for an open file
       integer :: ncfile_id

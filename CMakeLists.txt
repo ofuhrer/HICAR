@@ -353,8 +353,9 @@ FetchContent_Declare(
 FetchContent_Declare(
 	noah_mp
 	GIT_REPOSITORY    https://github.com/d-reynolds/noahmp.git
-	GIT_TAG           OpenACC
-	GIT_SHALLOW       TRUE
+	# Pin before the HICAR driver interface was renamed to SCHNAPS upstream.
+	GIT_TAG           8b9892a8a4137ad89eca803c1abf45969e5e686e
+	GIT_SHALLOW       FALSE
 )
 
 # Fetch specific folders from icar_supporting_files repo

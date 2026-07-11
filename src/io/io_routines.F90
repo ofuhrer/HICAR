@@ -69,6 +69,48 @@ contains
         inquire(file=filename,exist=file_exists)
     end function file_exists
 
+    subroutine wait_for_file_ready(filename, timeout_seconds, enabled)
+        implicit none
+        character(len=*), intent(in) :: filename
+        integer,          intent(in) :: timeout_seconds
+        logical,          intent(in) :: enabled
+
+        character(len=:), allocatable :: ready_file
+        integer :: count_start, count_now, count_rate, elapsed_seconds
+        logical :: ready, reported_wait
+
+        if (.not.enabled) return
+
+        ready_file = trim(filename)//'.ready'
+        reported_wait = .false.
+        call system_clock(count_start, count_rate)
+
+        do
+            inquire(file=ready_file, exist=ready)
+            if (ready) exit
+
+            call system_clock(count_now)
+            elapsed_seconds = int(real(count_now - count_start) / real(count_rate))
+            if (elapsed_seconds >= max(0, timeout_seconds)) then
+                if (STD_OUT_PE) then
+                    write(*,*) "ERROR: timed out waiting for ready file."
+                    write(*,*) "  Data file  : ", trim(filename)
+                    write(*,*) "  Ready file : ", trim(ready_file)
+                    write(*,*) "  Timeout [s]: ", timeout_seconds
+                    flush(output_unit)
+                endif
+                error stop "Timed out waiting for ready file"
+            endif
+
+            if (.not.reported_wait .and. STD_OUT_PE) then
+                write(*,*) "Waiting for ready file: ", trim(ready_file)
+                reported_wait = .true.
+            endif
+            call execute_command_line("sleep 1", wait=.true.)
+        enddo
+
+    end subroutine wait_for_file_ready
+
     subroutine check_file_exists(filename, message)
         implicit none
         character(len=*), intent(IN) :: filename

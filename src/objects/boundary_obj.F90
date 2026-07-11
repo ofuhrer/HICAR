@@ -7,7 +7,7 @@
 !!------------------------------------------------------------
 submodule(boundary_interface) boundary_implementation
     use array_utilities,        only : interpolate_in_z, array_offset_x, array_offset_y, array_offset_y_2d, array_offset_x_2d
-    use io_routines,            only : io_getdims, io_read, io_maxDims, io_variable_is_present, io_write, io_var_reversed
+    use io_routines,            only : io_getdims, io_read, io_maxDims, io_variable_is_present, io_write, io_var_reversed, wait_for_file_ready
     use time_io,                only : read_times, find_timestep_in_filelist
     use string,                 only : str, as_string
     use mod_atm_utilities,      only : rh_to_mr, relative_humidity, compute_3d_p, compute_3d_z, exner_function
@@ -406,13 +406,14 @@ contains
         ! -----------------------------------------------------------------
         if (trim(options%forcing%time_var) /= "") then
             actual_dt = -1.0
+            call wait_for_file_ready(this%firstfile, options%forcing%ready_file_timeout, options%forcing%wait_for_ready_file)
             call read_times(this%firstfile, options%forcing%time_var, times1)
             if (allocated(times1)) then
                 if (size(times1) >= this%firststep + 1) then
                     ! two time stamps available within the first forcing file
                     dt = times1(this%firststep+1) - times1(this%firststep)
                     actual_dt = real( dt%seconds() )
-                else if (allocated(options%forcing%boundary_files)) then
+                else if (allocated(options%forcing%boundary_files) .and. .not.options%forcing%wait_for_ready_file) then
                     ! only one time in this file -- compare against the next forcing file
                     second_file = next_forcing_file(options%forcing%boundary_files, this%firstfile)
                     if (trim(second_file) /= "") then
@@ -708,7 +709,8 @@ contains
         integer :: full_nz
 
         ! figure out while file and timestep contains the requested start_time
-        call set_firstfile_firststep(this, start_time, options%boundary_files, options%time_var)
+        call set_firstfile_firststep(this, start_time, options%boundary_files, options%time_var, &
+                                     options%wait_for_ready_file, options%ready_file_timeout)
 
         call read_latlon(this%firstfile, options%latvar, options%lonvar, temp_lat, temp_lon, longitude_system, modified=lon_modified)
         if (lon_modified .and. STD_OUT_PE) then
@@ -1014,17 +1016,20 @@ contains
     !!
     !! Reads the time_var from each file successively until it finds a timestep that matches time
     !!------------------------------------------------------------
-    subroutine set_firstfile_firststep(this, time, file_list, time_var)
+    subroutine set_firstfile_firststep(this, time, file_list, time_var, wait_ready, ready_timeout)
         implicit none
         class(boundary_t),  intent(inout) :: this
         type(Time_type),    intent(in) :: time
         character(len=*),   intent(in) :: file_list(:)
         character(len=*),   intent(in) :: time_var
+        logical,            intent(in) :: wait_ready
+        integer,            intent(in) :: ready_timeout
 
         character(len=kMAX_FILE_LENGTH) :: filename
         integer          :: error, n
 
-        this%firststep = find_timestep_in_filelist(file_list, time_var, time, this%firstfile, forward=.False., error=error)
+        this%firststep = find_timestep_in_filelist(file_list, time_var, time, this%firstfile, forward=.False., error=error, &
+                                                   wait_ready=wait_ready, ready_timeout=ready_timeout)
         
         if (error==1) then
             if (STD_OUT_PE) write(*,*) 'ERROR: Could not find the first time step in forcing files'

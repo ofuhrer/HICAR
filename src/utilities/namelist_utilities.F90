@@ -1703,6 +1703,19 @@ contains
                 default = ""
                 group = "Domain"
                 type = 2
+            case("wait_for_ready_file")
+                description = "Wait for a '<data file>.ready' marker before consuming static or forcing input files (T/F)"
+                default = ".False."
+                group = "Input readiness"
+                type = 1
+            case("ready_file_timeout")
+                description = "Maximum time to wait for a '<data file>.ready' marker"
+                min = 0
+                max = 86400
+                default = "60"
+                units = "seconds"
+                group = "Input readiness"
+                type = 1
             case("dx")
                 description = "Horizontal grid spacing"
                 min = 0
