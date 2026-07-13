@@ -341,11 +341,13 @@ contains
         
         type(variable_t) :: var
         type(meta_data_t) :: tmp_var
+        integer, parameter :: kMAX_MPI_ELEMENTS = 1000000000
         integer :: reqs(2)
         integer :: i, n_3d, n_2d, nx, ny, nz_v, i_s_w, i_e_w, j_s_w, j_e_w, idx
         logical :: should_do_restart
         integer :: ii, jj, kk
-        integer :: comm_size, my_rank, ierr
+        integer :: comm_size, my_rank, ierr, j_start, j_end, ny_per_message
+        integer(kind=MPI_ADDRESS_KIND) :: elements_per_y
 
         n_3d = 1
         n_2d = 1
@@ -488,17 +490,45 @@ contains
         ! can then be safely overwritten by the next push().
 
         if (should_do_restart) then
-            call MPI_Isend(this%write_buffer_3d, size(this%write_buffer_3d), MPI_REAL, &
-                            this%server, kIO_TAG_WRITE_3D, this%parent_comms, reqs(1), ierr)
-            call MPI_Isend(this%write_buffer_2d, size(this%write_buffer_2d), MPI_REAL, &
-                            this%server, kIO_TAG_WRITE_2D, this%parent_comms, reqs(2), ierr)
+            ! MPI's legacy count argument is a signed default integer.  A
+            ! single-rank large domain can exceed that limit for the initial
+            ! (restart-union) 3-D buffer, so transfer contiguous y-slabs.
+            ! The IO server mirrors this exact ordering below.
+            elements_per_y = int(size(this%write_buffer_3d, 1), MPI_ADDRESS_KIND) * &
+                             int(size(this%write_buffer_3d, 2), MPI_ADDRESS_KIND) * &
+                             int(size(this%write_buffer_3d, 3), MPI_ADDRESS_KIND)
+            if (elements_per_y > int(kMAX_MPI_ELEMENTS, MPI_ADDRESS_KIND)) then
+                error stop 'HICAR I/O 3-D y-slab exceeds MPI count limit'
+            endif
+            ny_per_message = max(1, min(size(this%write_buffer_3d, 4), &
+                int(int(kMAX_MPI_ELEMENTS, MPI_ADDRESS_KIND) / elements_per_y)))
+            do j_start = 1, size(this%write_buffer_3d, 4), ny_per_message
+                j_end = min(size(this%write_buffer_3d, 4), j_start + ny_per_message - 1)
+                call MPI_Send(this%write_buffer_3d(:,:,:,j_start:j_end), &
+                    int(elements_per_y * int(j_end - j_start + 1, MPI_ADDRESS_KIND)), MPI_REAL, &
+                    this%server, kIO_TAG_WRITE_3D, this%parent_comms, ierr)
+            enddo
+
+            elements_per_y = int(size(this%write_buffer_2d, 1), MPI_ADDRESS_KIND) * &
+                             int(size(this%write_buffer_2d, 2), MPI_ADDRESS_KIND)
+            if (elements_per_y > int(kMAX_MPI_ELEMENTS, MPI_ADDRESS_KIND)) then
+                error stop 'HICAR I/O 2-D y-slab exceeds MPI count limit'
+            endif
+            ny_per_message = max(1, min(size(this%write_buffer_2d, 3), &
+                int(int(kMAX_MPI_ELEMENTS, MPI_ADDRESS_KIND) / elements_per_y)))
+            do j_start = 1, size(this%write_buffer_2d, 3), ny_per_message
+                j_end = min(size(this%write_buffer_2d, 3), j_start + ny_per_message - 1)
+                call MPI_Send(this%write_buffer_2d(:,:,j_start:j_end), &
+                    int(elements_per_y * int(j_end - j_start + 1, MPI_ADDRESS_KIND)), MPI_REAL, &
+                    this%server, kIO_TAG_WRITE_2D, this%parent_comms, ierr)
+            enddo
         else
             call MPI_Isend(this%write_buffer_3d, 1, this%send_type_3d_out, &
                             this%server, kIO_TAG_WRITE_3D, this%parent_comms, reqs(1), ierr)
             call MPI_Isend(this%write_buffer_2d, 1, this%send_type_2d_out, &
                             this%server, kIO_TAG_WRITE_2D, this%parent_comms, reqs(2), ierr)
+            call MPI_Waitall(2, reqs, MPI_STATUSES_IGNORE, ierr)
         endif
-        call MPI_Waitall(2, reqs, MPI_STATUSES_IGNORE, ierr)
 
     end subroutine 
 

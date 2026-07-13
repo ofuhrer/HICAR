@@ -1010,10 +1010,11 @@ contains
         implicit none
         class(ioserver_t), intent(inout)  :: this
 
-        integer :: i, msg_size, ierr, cc
+        integer, parameter :: kMAX_MPI_ELEMENTS = 1000000000
+        integer :: i, msg_size, ierr, cc, j_start, j_end, ny_per_message
         integer :: n, n_3d, n_2d, x_stag, y_stag, oi
         logical :: should_write_restart
-        INTEGER(KIND=MPI_ADDRESS_KIND) :: disp
+        INTEGER(KIND=MPI_ADDRESS_KIND) :: disp, elements_per_y
         integer :: reqs(2 * this%n_children)
 
         msg_size = 1
@@ -1040,14 +1041,37 @@ contains
         ! send size.
         do cc = 1, this%n_children
             if (should_write_restart .or. this%first_write) then
-                call MPI_Irecv(this%write_buffer_3d(cc)%buff, &
-                                size(this%write_buffer_3d(cc)%buff), MPI_REAL, &
-                                cc - 1, kIO_TAG_WRITE_3D, this%client_comms, &
-                                reqs(2*cc - 1), ierr)
-                call MPI_Irecv(this%write_buffer_2d(cc)%buff, &
-                                size(this%write_buffer_2d(cc)%buff), MPI_REAL, &
-                                cc - 1, kIO_TAG_WRITE_2D, this%client_comms, &
-                                reqs(2*cc), ierr)
+                ! Mirror the client's MPI-count-safe y-slab sends.  The
+                ! initial/restart union buffer may exceed INT32_MAX even
+                ! though every individual slab does not.
+                elements_per_y = int(size(this%write_buffer_3d(cc)%buff, 1), MPI_ADDRESS_KIND) * &
+                                 int(size(this%write_buffer_3d(cc)%buff, 2), MPI_ADDRESS_KIND) * &
+                                 int(size(this%write_buffer_3d(cc)%buff, 3), MPI_ADDRESS_KIND)
+                if (elements_per_y > int(kMAX_MPI_ELEMENTS, MPI_ADDRESS_KIND)) then
+                    error stop 'HICAR I/O 3-D y-slab exceeds MPI count limit'
+                endif
+                ny_per_message = max(1, min(size(this%write_buffer_3d(cc)%buff, 4), &
+                    int(int(kMAX_MPI_ELEMENTS, MPI_ADDRESS_KIND) / elements_per_y)))
+                do j_start = 1, size(this%write_buffer_3d(cc)%buff, 4), ny_per_message
+                    j_end = min(size(this%write_buffer_3d(cc)%buff, 4), j_start + ny_per_message - 1)
+                    call MPI_Recv(this%write_buffer_3d(cc)%buff(:,:,:,j_start:j_end), &
+                        int(elements_per_y * int(j_end - j_start + 1, MPI_ADDRESS_KIND)), MPI_REAL, &
+                        cc - 1, kIO_TAG_WRITE_3D, this%client_comms, MPI_STATUS_IGNORE, ierr)
+                enddo
+
+                elements_per_y = int(size(this%write_buffer_2d(cc)%buff, 1), MPI_ADDRESS_KIND) * &
+                                 int(size(this%write_buffer_2d(cc)%buff, 2), MPI_ADDRESS_KIND)
+                if (elements_per_y > int(kMAX_MPI_ELEMENTS, MPI_ADDRESS_KIND)) then
+                    error stop 'HICAR I/O 2-D y-slab exceeds MPI count limit'
+                endif
+                ny_per_message = max(1, min(size(this%write_buffer_2d(cc)%buff, 3), &
+                    int(int(kMAX_MPI_ELEMENTS, MPI_ADDRESS_KIND) / elements_per_y)))
+                do j_start = 1, size(this%write_buffer_2d(cc)%buff, 3), ny_per_message
+                    j_end = min(size(this%write_buffer_2d(cc)%buff, 3), j_start + ny_per_message - 1)
+                    call MPI_Recv(this%write_buffer_2d(cc)%buff(:,:,j_start:j_end), &
+                        int(elements_per_y * int(j_end - j_start + 1, MPI_ADDRESS_KIND)), MPI_REAL, &
+                        cc - 1, kIO_TAG_WRITE_2D, this%client_comms, MPI_STATUS_IGNORE, ierr)
+                enddo
             else
                 call MPI_Irecv(this%write_buffer_3d(cc)%buff, 1, this%recv_type_3d_out, &
                                 cc - 1, kIO_TAG_WRITE_3D, this%client_comms, &
@@ -1057,7 +1081,10 @@ contains
                                 reqs(2*cc), ierr)
             endif
         enddo
-        call MPI_Waitall(2 * this%n_children, reqs, MPI_STATUSES_IGNORE, ierr)
+        ! Restart/first-write transfers use blocking MPI_Recv y-slabs, so
+        ! no nonblocking requests exist to wait on in that path.
+        if (.not. (should_write_restart .or. this%first_write)) &
+            call MPI_Waitall(2 * this%n_children, reqs, MPI_STATUSES_IGNORE, ierr)
 
         ! Unpack into outputer buffers (two-pass)
         ! Pass 1: output variables
