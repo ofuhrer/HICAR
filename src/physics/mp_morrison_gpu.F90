@@ -3257,9 +3257,12 @@ SUBROUTINE MP_MORR_TWO_MOMENT_gpu(ITIMESTEP,                       &
 ! at ~60 levels, this is ~7 KB per gang — easily fits in NVHPC's per-gang
 ! storage (shared memory or registers depending on compiler placement).
 ! Replaces ~45k global memory accesses per column per substep with
-! column-local working memory. Expected speedup on the dominant
-! sedimentation kernel: 5-10x (memory-bandwidth limited → register/SMEM).
-   !$acc parallel loop gang collapse(2) wait(1) async(5) &
+! column-local working memory.
+   ! The production vertical grid has 57 levels.  NVHPC's default 128-lane
+   ! vector therefore leaves over half of the lanes inactive for every
+   ! column.  A 64-lane vector keeps the column-local work in two mostly full
+   ! warps while retaining the same gang-private scratch and numerical order.
+   !$acc parallel loop gang vector_length(64) collapse(2) wait(1) async(5) &
    !$acc private(DUMR_loc, DUMI_loc, DUMC_loc, DUMG_loc, DUMQS_loc, &
    !$acc         DUMFNI_loc, DUMFNS_loc, DUMFNR_loc, DUMFNC_loc, DUMFNG_loc, &
    !$acc         FR_loc, FI_loc, FS_loc, FC_loc, FG_loc, &
