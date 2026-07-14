@@ -668,6 +668,104 @@ contains
         !$acc end data
     end subroutine flux3
 
+    !> Compute the third-order uncorrected RK stages directly into a scalar
+    !! staging field.  The normal route materializes three face-flux arrays,
+    !! then rereads all of them in sum_kernel.  Here each cell reconstructs
+    !! its six horizontal and two vertical faces locally and writes its result
+    !! to flux_x, which is reused only after all input qfluxes reads complete.
+    !! A second, simple copy avoids an in-place stencil race on qfluxes.
+    subroutine fused_divergence_3rd_order(qfluxes,qold,U_m,V_m,W_m,denom,dz, &
+                                           staging,t_factor,q_id)
+        implicit none
+        real, dimension(ims:ime,kms:kme,jms:jme), intent(inout) :: qfluxes
+        real, dimension(ims:ime,kms:kme,jms:jme), intent(in) :: qold, denom, dz
+        real, dimension(i_s_w:i_e_w+1,kms:kme,j_s_w:j_e_w+1), intent(in) :: U_m, V_m, W_m
+        real, dimension(i_s:i_e+1,kms:kme,j_s:j_e+1), intent(inout) :: staging
+        real, intent(in) :: t_factor
+        integer, intent(in) :: q_id
+
+        integer :: i, j, k
+        real :: coef, half_factor
+        real :: um, vm, wm, abs_w
+        real :: fxm, fxp, fym, fyp, fzm, fzp
+
+        coef = t_factor / 12.0
+        half_factor = 0.5 * t_factor
+
+        !$acc parallel loop gang vector async(q_id) tile(32,4,1) &
+        !$acc   present(qfluxes,qold,U_m,V_m,W_m,denom,dz,staging) &
+        !$acc   private(um,vm,wm,abs_w,fxm,fxp,fym,fyp,fzm,fzp)
+        do j = jts, jte
+            do k = kms, kme
+                do i = its, ite
+                    um = U_m(i,k,j)
+                    fxm = (um * (7.0*(qfluxes(i,k,j) + qfluxes(i-1,k,j)) - &
+                           (qfluxes(i+1,k,j) + qfluxes(i-2,k,j))) - &
+                           abs(um) * (3.0*(qfluxes(i,k,j) - qfluxes(i-1,k,j)) - &
+                           (qfluxes(i+1,k,j) - qfluxes(i-2,k,j)))) * coef
+                    um = U_m(i+1,k,j)
+                    fxp = (um * (7.0*(qfluxes(i+1,k,j) + qfluxes(i,k,j)) - &
+                           (qfluxes(i+2,k,j) + qfluxes(i-1,k,j))) - &
+                           abs(um) * (3.0*(qfluxes(i+1,k,j) - qfluxes(i,k,j)) - &
+                           (qfluxes(i+2,k,j) - qfluxes(i-1,k,j)))) * coef
+
+                    vm = V_m(i,k,j)
+                    fym = (vm * (7.0*(qfluxes(i,k,j) + qfluxes(i,k,j-1)) - &
+                           (qfluxes(i,k,j+1) + qfluxes(i,k,j-2))) - &
+                           abs(vm) * (3.0*(qfluxes(i,k,j) - qfluxes(i,k,j-1)) - &
+                           (qfluxes(i,k,j+1) - qfluxes(i,k,j-2)))) * coef
+                    vm = V_m(i,k,j+1)
+                    fyp = (vm * (7.0*(qfluxes(i,k,j+1) + qfluxes(i,k,j)) - &
+                           (qfluxes(i,k,j+2) + qfluxes(i,k,j-1))) - &
+                           abs(vm) * (3.0*(qfluxes(i,k,j+1) - qfluxes(i,k,j)) - &
+                           (qfluxes(i,k,j+2) - qfluxes(i,k,j-1)))) * coef
+
+                    if (k == kms) then
+                        fzm = 0.0
+                    else if (k == kms+1 .or. k == kme) then
+                        wm = W_m(i,k-1,j); abs_w = abs(wm)
+                        fzm = ((wm + abs_w) * qfluxes(i,k-1,j) + &
+                               (wm - abs_w) * qfluxes(i,k,j)) * half_factor
+                    else
+                        wm = W_m(i,k-1,j)
+                        fzm = (wm * (7.0*(qfluxes(i,k,j) + qfluxes(i,k-1,j)) - &
+                               (qfluxes(i,k+1,j) + qfluxes(i,k-2,j))) - &
+                               abs(wm) * (3.0*(qfluxes(i,k,j) - qfluxes(i,k-1,j)) - &
+                               (qfluxes(i,k+1,j) - qfluxes(i,k-2,j)))) * coef
+                    endif
+
+                    if (k == kme) then
+                        fzp = qfluxes(i,kme,j) * W_m(i,kme,j) * t_factor
+                    else if (k == kms .or. k == kme-1) then
+                        wm = W_m(i,k,j); abs_w = abs(wm)
+                        fzp = ((wm + abs_w) * qfluxes(i,k,j) + &
+                               (wm - abs_w) * qfluxes(i,k+1,j)) * half_factor
+                    else
+                        wm = W_m(i,k,j)
+                        fzp = (wm * (7.0*(qfluxes(i,k+1,j) + qfluxes(i,k,j)) - &
+                               (qfluxes(i,k+2,j) + qfluxes(i,k-1,j))) - &
+                               abs(wm) * (3.0*(qfluxes(i,k+1,j) - qfluxes(i,k,j)) - &
+                               (qfluxes(i,k+2,j) - qfluxes(i,k-1,j)))) * coef
+                    endif
+
+                    staging(i,k,j) = qold(i,k,j) - ((fxp-fxm + fyp-fym + &
+                                      (fzp-fzm)/dz(i,k,j)) * denom(i,k,j))
+                enddo
+            enddo
+        enddo
+
+        !$acc parallel loop gang vector async(q_id) tile(64,2,1) &
+        !$acc present(qfluxes,staging)
+        do j = jts, jte
+            do k = kms, kme
+                do i = its, ite
+                    qfluxes(i,k,j) = staging(i,k,j)
+                enddo
+            enddo
+        enddo
+        !$acc wait(q_id)
+    end subroutine fused_divergence_3rd_order
+
     subroutine adv_std_advect3d(qfluxes,qold,U_m,V_m,W_m,denom,dz, flux_time, flux_corr_time, sum_time, t_factor_in,flux_corr_in,q_id_in,apply_cz_diff_in)
         ! !DIR$ INLINEALWAYS adv_std_advect3d
         implicit none
@@ -703,15 +801,14 @@ contains
 
         ! Choose optimized path based on whether flux correction is needed
         if (flux_corr == 0) then
-            ! if ((horder==vorder) .or. (horder==5 .and. vorder==3)) then
-            !     ! FUSED PATH: No flux correction needed
-            !     ! Compute fluxes and directly update qfluxes
-
-            !     call flux_time%start()
-            !     !$acc wait(q_id) !qold is needed for following function
-            !     call flux_and_advect_fused(qfluxes,qold,U_m,V_m,W_m,denom,dz,t_factor,q_id)
-            !     call flux_time%stop()
-            ! else
+            if (horder == 3 .and. vorder == 3 .and. &
+                (cz_diff_order == 0 .or. .not. apply_cz_diff)) then
+                if(present(flux_time)) call flux_time%start()
+                !$acc wait(q_id)
+                call fused_divergence_3rd_order(qfluxes,qold,U_m,V_m,W_m,denom,dz, &
+                                                 flux_x,t_factor,q_id)
+                if(present(flux_time)) call flux_time%stop()
+            else
                 if(present(flux_time)) call flux_time%start()
                 !$acc wait(q_id) !qold is needed for following function
                 call flux3(qfluxes,U_m,V_m,W_m,flux_x,flux_z,flux_y,t_factor,apply_cz_diff=apply_cz_diff)
@@ -720,7 +817,7 @@ contains
                 if(present(sum_time)) call sum_time%start()
                 call sum_kernel(flux_x, flux_y, flux_z, qold, qfluxes, denom, dz, q_id)
                 if(present(sum_time)) call sum_time%stop()
-            ! endif
+            endif
             
         else
             ! STANDARD PATH: Flux correction enabled
