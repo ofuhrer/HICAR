@@ -469,16 +469,25 @@ contains
                       rho    => domain%vars_3d(domain%var_indx(kVARS%density)%v)%data_3d,                &
                       dz     => domain%vars_3d(domain%var_indx(kVARS%dz_interface)%v)%data_3d)
 
-            if (domain%var_indx(kVARS%snow_mass)%v > 0) &
-                call pbl_scalar_diff(domain%vars_3d(domain%var_indx(kVARS%snow_mass)%v)%data_3d, exch_h, rho, dz, dt)
-            if (domain%var_indx(kVARS%ice_number)%v > 0) &
-                call pbl_scalar_diff(domain%vars_3d(domain%var_indx(kVARS%ice_number)%v)%data_3d, exch_h, rho, dz, dt)
-            if (domain%var_indx(kVARS%rain_number)%v > 0) &
-                call pbl_scalar_diff(domain%vars_3d(domain%var_indx(kVARS%rain_number)%v)%data_3d, exch_h, rho, dz, dt)
-            if (domain%var_indx(kVARS%snow_number)%v > 0) &
-                call pbl_scalar_diff(domain%vars_3d(domain%var_indx(kVARS%snow_number)%v)%data_3d, exch_h, rho, dz, dt)
-            if (domain%var_indx(kVARS%graupel_number)%v > 0) &
-                call pbl_scalar_diff(domain%vars_3d(domain%var_indx(kVARS%graupel_number)%v)%data_3d, exch_h, rho, dz, dt)
+            if (domain%var_indx(kVARS%snow_mass)%v > 0 .or. &
+                domain%var_indx(kVARS%ice_number)%v > 0 .or. &
+                domain%var_indx(kVARS%rain_number)%v > 0 .or. &
+                domain%var_indx(kVARS%snow_number)%v > 0 .or. &
+                domain%var_indx(kVARS%graupel_number)%v > 0) then
+                ! All hydrometeors use the same diffusion matrix.  Factor it
+                ! once, then solve its distinct right-hand sides below.
+                call pbl_scalar_diff_prepare(exch_h, rho, dz, dt)
+                if (domain%var_indx(kVARS%snow_mass)%v > 0) &
+                    call pbl_scalar_diff_apply(domain%vars_3d(domain%var_indx(kVARS%snow_mass)%v)%data_3d)
+                if (domain%var_indx(kVARS%ice_number)%v > 0) &
+                    call pbl_scalar_diff_apply(domain%vars_3d(domain%var_indx(kVARS%ice_number)%v)%data_3d)
+                if (domain%var_indx(kVARS%rain_number)%v > 0) &
+                    call pbl_scalar_diff_apply(domain%vars_3d(domain%var_indx(kVARS%rain_number)%v)%data_3d)
+                if (domain%var_indx(kVARS%snow_number)%v > 0) &
+                    call pbl_scalar_diff_apply(domain%vars_3d(domain%var_indx(kVARS%snow_number)%v)%data_3d)
+                if (domain%var_indx(kVARS%graupel_number)%v > 0) &
+                    call pbl_scalar_diff_apply(domain%vars_3d(domain%var_indx(kVARS%graupel_number)%v)%data_3d)
+            endif
 
             end associate
 
@@ -486,18 +495,15 @@ contains
     end subroutine pbl_apply_tend
 
 
-    subroutine pbl_scalar_diff(phi, exch_h, rho, dz, dt_in)
+    subroutine pbl_scalar_diff_prepare(exch_h, rho, dz, dt_in)
         !---------------------------------------------------------------
-        ! Apply implicit vertical diffusion to a scalar field using
-        ! the eddy diffusivity (exch_h) output by the PBL scheme.
-        ! Follows WRF's scalar_pblmix approach (Thomas algorithm).
-        ! Zero-flux boundary conditions at surface and model top.
+        ! Build and factor the implicit scalar-diffusion matrix.  The matrix
+        ! depends only on the PBL state, so all hydrometeor RHSs can reuse it.
         !
         ! Uses module-level work arrays trid_a, trid_b, trid_c, trid_rhs
         ! and module-level index variables.
         !---------------------------------------------------------------
         implicit none
-        real, dimension(ims:ime, kms:kme, jms:jme), intent(inout) :: phi
         real, dimension(ims:ime, kms:kme, jms:jme), intent(in)    :: exch_h, rho, dz
         real, intent(in) :: dt_in
 
@@ -508,7 +514,7 @@ contains
 
         ! Step 1: Build tridiagonal coefficients
         ! exch_h(i,k,j) = diffusivity at interface between levels k-1 and k [m^2/s]
-        !$acc parallel present(trid_a, trid_b, trid_c, trid_rhs, phi, exch_h, rho, dz)
+        !$acc parallel present(trid_a, trid_b, trid_c, exch_h, rho, dz)
         !$acc loop gang vector collapse(3) private(rho_int, dz_half, cddz_below, cddz_above)
         do j2 = jts, jte
         do k2 = kts, kte_pbl
@@ -535,8 +541,6 @@ contains
 
             ! Main diagonal (diagonally dominant)
             trid_b(i2,k2,j2)   = 1.0 - trid_a(i2,k2,j2) - trid_c(i2,k2,j2)
-            ! RHS = current scalar value
-            trid_rhs(i2,k2,j2) = phi(i2,k2,j2)
         enddo
         enddo
         enddo
@@ -544,19 +548,19 @@ contains
 
         ! Step 2: Thomas algorithm forward elimination
         ! First level
-        !$acc parallel present(trid_a, trid_b, trid_c, trid_rhs)
+        !$acc parallel present(trid_a, trid_b, trid_c)
         !$acc loop gang vector collapse(2) private(fk)
         do j2 = jts, jte
         do i2 = its, ite
             fk = 1.0 / trid_b(i2,kts,j2)
             trid_c(i2,kts,j2)   = fk * trid_c(i2,kts,j2)
-            trid_rhs(i2,kts,j2) = fk * trid_rhs(i2,kts,j2)
+            trid_b(i2,kts,j2)   = fk
         enddo
         enddo
         !$acc end parallel
 
         ! Interior + top levels
-        !$acc parallel present(trid_a, trid_b, trid_c, trid_rhs)
+        !$acc parallel present(trid_a, trid_b, trid_c)
         !$acc loop gang vector collapse(2) private(fk)
         do j2 = jts, jte
         do i2 = its, ite
@@ -564,13 +568,57 @@ contains
             do k2 = kts+1, kte_pbl
                 fk = 1.0 / (trid_b(i2,k2,j2) - trid_a(i2,k2,j2) * trid_c(i2,k2-1,j2))
                 trid_c(i2,k2,j2)   = fk * trid_c(i2,k2,j2)
-                trid_rhs(i2,k2,j2) = fk * (trid_rhs(i2,k2,j2) - trid_a(i2,k2,j2) * trid_rhs(i2,k2-1,j2))
+                trid_b(i2,k2,j2)   = fk
             enddo
         enddo
         enddo
         !$acc end parallel
 
-        ! Step 3: Back substitution — write result into phi, clamp non-negative
+    end subroutine pbl_scalar_diff_prepare
+
+
+    subroutine pbl_scalar_diff_apply(phi)
+        ! Apply a previously factored scalar-diffusion matrix to one RHS.
+        implicit none
+        real, dimension(ims:ime, kms:kme, jms:jme), intent(inout) :: phi
+        integer :: i2, j2, k2, kte_pbl
+
+        kte_pbl = kte - 1
+
+        !$acc parallel present(phi, trid_rhs)
+        !$acc loop gang vector collapse(3)
+        do j2 = jts, jte
+        do k2 = kts, kte_pbl
+        do i2 = its, ite
+            trid_rhs(i2,k2,j2) = phi(i2,k2,j2)
+        enddo
+        enddo
+        enddo
+        !$acc end parallel
+
+        !$acc parallel present(trid_a, trid_b, trid_rhs)
+        !$acc loop gang vector collapse(2)
+        do j2 = jts, jte
+        do i2 = its, ite
+            trid_rhs(i2,kts,j2) = trid_b(i2,kts,j2) * trid_rhs(i2,kts,j2)
+        enddo
+        enddo
+        !$acc end parallel
+
+        !$acc parallel present(trid_a, trid_b, trid_rhs)
+        !$acc loop gang vector collapse(2)
+        do j2 = jts, jte
+        do i2 = its, ite
+        !$acc loop seq
+            do k2 = kts+1, kte_pbl
+                trid_rhs(i2,k2,j2) = trid_b(i2,k2,j2) * &
+                    (trid_rhs(i2,k2,j2) - trid_a(i2,k2,j2) * trid_rhs(i2,k2-1,j2))
+            enddo
+        enddo
+        enddo
+        !$acc end parallel
+
+        ! Back substitution — write result into phi, clamp non-negative.
         !$acc parallel present(phi, trid_c, trid_rhs)
         !$acc loop gang vector collapse(2)
         do j2 = jts, jte
@@ -584,7 +632,7 @@ contains
         enddo
         !$acc end parallel
 
-    end subroutine pbl_scalar_diff
+    end subroutine pbl_scalar_diff_apply
 
 
     subroutine pbl_finalize(options)
