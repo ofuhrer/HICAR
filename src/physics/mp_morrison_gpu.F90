@@ -777,7 +777,7 @@ SUBROUTINE MP_MORR_TWO_MOMENT_gpu(ITIMESTEP,                       &
       !   REAL, DIMENSION(KTS:KTE) ::   EFFS            ! SNOW EFFECTIVE RADIUS (MICRON)
       !   REAL, DIMENSION(KTS:KTE) ::   EFFR            ! RAIN EFFECTIVE RADIUS (MICRON)
       !   REAL, DIMENSION(KTS:KTE) ::   EFFG            ! GRAUPEL EFFECTIVE RADIUS (MICRON)
-	  REAL, DIMENSION(ITS:ITE,KTS:KTE,JTS:JTE) ::   C2PREC,CSED,ISED,SSED,GSED,RSED
+	  REAL, DIMENSION(ITS:ITE,KTS:KTE,JTS:JTE) ::   C2PREC,ISED,SSED
 
 ! MODEL INPUT PARAMETERS (FORMERLY IN COMMON BLOCKS)
 
@@ -1038,7 +1038,7 @@ SUBROUTINE MP_MORR_TWO_MOMENT_gpu(ITIMESTEP,                       &
    !$acc             QG3DTEN, NG3DTEN, QG3D, NG3D, &
    !$acc             qrcu1d, qscu1d, qicu1d, &
    !$acc             QGSTEN, QRSTEN, QISTEN, QNISTEN, QCSTEN, LTRUE_COL, &
-   !$acc             nc1d, nc_tend1d, C2PREC,CSED,ISED,SSED,GSED,RSED, &
+   !$acc             nc1d, nc_tend1d, C2PREC,ISED,SSED, &
    !$acc             lamg,acn,arn,ain,agn,ltrue,n0s,n0i,pgam, &
    !$acc             cdist1,xlf,xxlv,xxls,nc3d,lams,asn, &
    !$acc             n0g,cpm,lamr,n0rr,lami,nc3dten,mu,lamc,dap, &
@@ -1190,11 +1190,8 @@ SUBROUTINE MP_MORR_TWO_MOMENT_gpu(ITIMESTEP,                       &
 ! INITIALIZE VARIABLES FOR WRF-CHEM OUTPUT TO ZERO
 
 		C2PREC(I,K,J)=0.
-		CSED(I,K,J)=0.
 		ISED(I,K,J)=0.
 		SSED(I,K,J)=0.
-		GSED(I,K,J)=0.
-		RSED(I,K,J)=0.
 
 ! #if (WRF_CHEM == 1)
 !          rainprod(I,K,J) = 0.
@@ -3544,11 +3541,8 @@ SUBROUTINE MP_MORR_TWO_MOMENT_gpu(ITIMESTEP,                       &
               DUMFNG_loc(K) = DUMFNG_loc(K) + FALTNDNG*DUMT
 
               ! PRECIP RATES (KG/M^2/S)
-              CSED(I,K,J) = CSED(I,K,J) + FALOUTC_loc(K)/NSTEP_COL
               ISED(I,K,J) = ISED(I,K,J) + FALOUTI_loc(K)/NSTEP_COL
               SSED(I,K,J) = SSED(I,K,J) + FALOUTS_loc(K)/NSTEP_COL
-              GSED(I,K,J) = GSED(I,K,J) + FALOUTG_loc(K)/NSTEP_COL
-              RSED(I,K,J) = RSED(I,K,J) + FALOUTR_loc(K)/NSTEP_COL
         END IF
 
         END DO  ! K flux divergence
