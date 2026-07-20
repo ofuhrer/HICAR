@@ -306,8 +306,9 @@ contains
             ! sqrt(ny*nz) ineffective and could exhaust GPU memory on a large,
             ! single-rank domain.  Keep the established floor division so the
             ! normal 200/256-cell settings retain their previous batch count.
-            nblocks = MAX(1, ((ite - its + 1)*(jte - jts + 1)) / &
-                             (options%rad%rrtmgp_block_N**2))
+            nblocks = MIN(jte - jts + 1, MAX(1, &
+                          ((ite - its + 1)*(jte - jts + 1)) / &
+                          (options%rad%rrtmgp_block_N**2)))
 
             ! if (k_dist_sw%is_loaded() .or. k_dist_lw%is_loaded()) then
                 ! call k_dist_sw%finalize()
@@ -1422,20 +1423,12 @@ contains
 
                     !cut RRTMGP up into blocks to reduce memory usage
                     do block = 1, nblocks
-                    if (block == 1 .and. nblocks==1) then
-                        jb_s = jts
-                        jb_e = jte
-                    elseif (block == 1) then
-                        jb_s = jts
-                        jb_e = MIN(jts + block*(jte - jts + 1)/nblocks, jte)
-                    elseif (block == nblocks) then
-                        jb_s = jb_e + 1
-                        jb_e = jte
-                    else
-                        ngpt = jb_e - jb_s + 1
-                        jb_s = jb_e + 1
-                        jb_e = MIN(jb_s + ngpt - 1, jte)
-                    end if
+                    ! Split rows by integer boundaries, rather than carrying the
+                    ! first block's rounded size forward.  The latter can leave
+                    ! an empty final block when the number of batches does not
+                    ! divide the local y extent.
+                    jb_s = jts + (block - 1) * (jte - jts + 1) / nblocks
+                    jb_e = jts + block * (jte - jts + 1) / nblocks - 1
                     ! ----------------------------------------------------------------------------
                     ! 
                     ! ------------------------------ BEGIN INIT  ---------------------------------
