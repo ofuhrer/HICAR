@@ -304,9 +304,10 @@ contains
             ! requested horizontal block size here.  In particular, do not use
             ! the full j-by-k plane as a lower bound: that made block sizes below
             ! sqrt(ny*nz) ineffective and could exhaust GPU memory on a large,
-            ! single-rank domain.
-            nblocks = MAX(1, CEILING(REAL((ite - its + 1)*(jte - jts + 1), kind=8) / &
-                                     REAL(options%rad%rrtmgp_block_N**2, kind=8)))
+            ! single-rank domain.  Keep the established floor division so the
+            ! normal 200/256-cell settings retain their previous batch count.
+            nblocks = MAX(1, ((ite - its + 1)*(jte - jts + 1)) / &
+                             (options%rad%rrtmgp_block_N**2))
 
             ! if (k_dist_sw%is_loaded() .or. k_dist_lw%is_loaded()) then
                 ! call k_dist_sw%finalize()
