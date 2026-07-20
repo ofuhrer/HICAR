@@ -1013,7 +1013,7 @@ contains
         integer, parameter :: kMAX_MPI_ELEMENTS = 1000000000
         integer :: i, msg_size, ierr, cc, j_start, j_end, ny_per_message
         integer :: n, n_3d, n_2d, x_stag, y_stag, oi
-        logical :: should_write_restart
+        logical :: should_write_restart, use_slab_transfer
         INTEGER(KIND=MPI_ADDRESS_KIND) :: disp, elements_per_y
         integer :: reqs(2 * this%n_children)
 
@@ -1039,8 +1039,18 @@ contains
         ! steps receive just the leading-dim output slice via the prebuilt
         ! vector type (recv_type_*_out) — matching the client's conditional
         ! send size.
+        reqs = MPI_REQUEST_NULL
         do cc = 1, this%n_children
-            if (should_write_restart .or. this%first_write) then
+            ! Keep the fast derived-datatype path for normal-size output
+            ! buffers.  Large backing buffers can make that datatype invalid
+            ! on MPICH even when its selected output subset is smaller; use
+            ! the established count-safe y-slab protocol instead.
+            use_slab_transfer = should_write_restart .or. this%first_write .or. &
+                int(size(this%write_buffer_3d(cc)%buff), MPI_ADDRESS_KIND) > &
+                int(kMAX_MPI_ELEMENTS, MPI_ADDRESS_KIND) .or. &
+                int(size(this%write_buffer_2d(cc)%buff), MPI_ADDRESS_KIND) > &
+                int(kMAX_MPI_ELEMENTS, MPI_ADDRESS_KIND)
+            if (use_slab_transfer) then
                 ! Mirror the client's MPI-count-safe y-slab sends.  The
                 ! initial/restart union buffer may exceed INT32_MAX even
                 ! though every individual slab does not.
@@ -1081,10 +1091,9 @@ contains
                                 reqs(2*cc), ierr)
             endif
         enddo
-        ! Restart/first-write transfers use blocking MPI_Recv y-slabs, so
-        ! no nonblocking requests exist to wait on in that path.
-        if (.not. (should_write_restart .or. this%first_write)) &
-            call MPI_Waitall(2 * this%n_children, reqs, MPI_STATUSES_IGNORE, ierr)
+        ! Blocking slab transfers leave MPI_REQUEST_NULL entries; MPI_Waitall
+        ! accepts them and still completes any normal-size child transfers.
+        call MPI_Waitall(2 * this%n_children, reqs, MPI_STATUSES_IGNORE, ierr)
 
         ! Unpack into outputer buffers (two-pass)
         ! Pass 1: output variables

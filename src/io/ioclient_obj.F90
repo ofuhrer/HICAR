@@ -344,7 +344,7 @@ contains
         integer, parameter :: kMAX_MPI_ELEMENTS = 1000000000
         integer :: reqs(2)
         integer :: i, n_3d, n_2d, nx, ny, nz_v, i_s_w, i_e_w, j_s_w, j_e_w, idx
-        logical :: should_do_restart
+        logical :: should_do_restart, use_slab_transfer
         integer :: ii, jj, kk
         integer :: comm_size, my_rank, ierr, j_start, j_end, ny_per_message
         integer(kind=MPI_ADDRESS_KIND) :: elements_per_y
@@ -489,7 +489,19 @@ contains
         ! keeps the Isend buffers live until the server has received; they
         ! can then be safely overwritten by the next push().
 
-        if (should_do_restart) then
+        ! The normal output path uses a derived vector datatype.  Some MPI
+        ! implementations reject that type once the backing buffer is larger
+        ! than their signed-count limit, even though only the leading output
+        ! variables are selected.  Reuse the existing count-safe slab path in
+        ! that case.  Output/restart events are infrequent, so preserving the
+        ! nonblocking datatype path for normal-size domains remains preferable.
+        use_slab_transfer = should_do_restart .or. &
+            int(size(this%write_buffer_3d), MPI_ADDRESS_KIND) > &
+            int(kMAX_MPI_ELEMENTS, MPI_ADDRESS_KIND) .or. &
+            int(size(this%write_buffer_2d), MPI_ADDRESS_KIND) > &
+            int(kMAX_MPI_ELEMENTS, MPI_ADDRESS_KIND)
+
+        if (use_slab_transfer) then
             ! MPI's legacy count argument is a signed default integer.  A
             ! single-rank large domain can exceed that limit for the initial
             ! (restart-union) 3-D buffer, so transfer contiguous y-slabs.
