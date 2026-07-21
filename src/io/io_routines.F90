@@ -103,7 +103,12 @@ contains
             endif
 
             if (.not.reported_wait .and. STD_OUT_PE) then
-                write(*,*) "Waiting for ready file: ", trim(ready_file)
+                write(output_unit,'(A)') "HICAR: waiting for input publication marker"
+                write(output_unit,'(A)') "  Data file  : "//trim(filename)
+                write(output_unit,'(A)') "  Ready file : "//trim(ready_file)
+                write(output_unit,'(A,I0)') "  Timeout [s]: ", timeout_seconds
+                write(output_unit,'(A)') "  Poll interval [s]: 1"
+                flush(output_unit)
                 reported_wait = .true.
             endif
             call execute_command_line("sleep 1", wait=.true.)
