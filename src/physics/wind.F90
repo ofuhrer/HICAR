@@ -13,7 +13,8 @@ module wind
     ! use wind_iterative,      only : calc_iter_winds, init_iter_winds
     use wind_iterative,    only : calc_iter_winds, init_iter_winds, &
                                   probe_lambda_pattern, probe_zero_corrections, &
-                                  probe_apply_corrections, probe_record, probe_finalize
+                                  probe_apply_corrections, probe_record, probe_finalize, &
+                                  probe_exchange_lambda_halos
     use iso_fortran_env, only : output_unit
     use icar_constants
     use domain_interface,  only : domain_t
@@ -1056,6 +1057,12 @@ contains
             do cb = 0, 2
                 do ca = 0, 2
                     call probe_lambda_pattern(ca, cb, cc)
+                    ! The probe must apply exactly the same distributed
+                    ! lambda field as a production SpMV.  In particular,
+                    ! the correction stencil reads neighbouring-rank lambda
+                    ! values at subdomain interfaces; leaving the probe
+                    ! ghosts zero would calibrate a different operator there.
+                    call probe_exchange_lambda_halos(domain)
                     call probe_zero_corrections(domain)
                     call probe_apply_corrections(domain, options%adv%advect_density)
                     call calc_divergence(div, domain, advect_density=options%adv%advect_density, &

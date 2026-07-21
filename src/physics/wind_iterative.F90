@@ -38,7 +38,7 @@ module wind_iterative
     private
     public :: init_iter_winds, calc_iter_winds, finalize_iter_winds
     public :: probe_lambda_pattern, probe_zero_corrections, probe_apply_corrections, &
-              probe_record, probe_finalize
+              probe_record, probe_finalize, probe_exchange_lambda_halos
 
     logical :: initialized_iter_winds = .false.
     logical :: structure_uploaded = .false.
@@ -1200,6 +1200,14 @@ contains
         logical, intent(in) :: adv_den
         call calc_updated_winds(domain, adv_den)
     end subroutine probe_apply_corrections
+
+    !> Exchange the probe lambda field exactly as a production SpMV does.
+    !! Kept behind the probe API because x_sol is solver-private state.
+    subroutine probe_exchange_lambda_halos(domain)
+        implicit none
+        type(domain_t), intent(in) :: domain
+        call exchange_krylov_halos(x_sol, domain)
+    end subroutine probe_exchange_lambda_halos
 
     !> Record the probed response T = 2*div(G(pattern)) into the stencil
     !! coefficient arrays (host side; finalize pushes to device). Any
