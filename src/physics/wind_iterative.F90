@@ -1,7 +1,7 @@
 !>------------------------------------------------------------
 !! Native HICAR iterative wind solver.
 !!
-!! Right-preconditioned BiCGStab + Block-Jacobi (diagonal scaling)
+!! Right-preconditioned BiCGStab + vertical-line block-Jacobi smoothing
 !! over a 15-point stencil with terrain-following boundary
 !! conditions. Pure OpenACC + MPI — vendor-portable, no external
 !! solver library.
@@ -61,12 +61,9 @@ module wind_iterative
     real(c_double), parameter :: bicg_tol_rel = 1.0e-5_c_double
     real(c_double), parameter :: breakdown_eps = 1.0e-30_c_double
 
-    ! Number of Richardson sweeps per Block-Jacobi preconditioner apply.
-    ! AMGX's PBICGSTAB+BLOCK_JACOBI config uses prec:max_iters=2 — matching that
-    ! gives ~2x stronger preconditioning per outer iter at ~2x per-iter cost,
-    ! but the *outer* iter count typically drops 1.5-2x for Poisson-like problems.
-    ! Net: similar total time, but fewer outer iters means fewer halo exchanges
-    ! and allreduces — strict win at multi-rank scale.
+    ! Number of Richardson sweeps per vertical-line block-Jacobi apply.  Each
+    ! block is an exact Thomas solve through one terrain-following column, so
+    ! the dominant fine-vertical-grid coupling is removed before Krylov sees it.
     !
     ! Adaptive retry: if a solve diverges/stagnates, calc_iter_winds bumps
     ! this up to MAX_PREC_SWEEPS, retrying after each bump. On successful
@@ -119,7 +116,8 @@ module wind_iterative
     real(c_double), allocatable, dimension(:,:,:) :: s_vec, s_hat
     real(c_double), allocatable, dimension(:,:,:) :: t_vec
     real(c_double), allocatable, dimension(:,:,:) :: rhs        ! right-hand side b
-    real(c_double), allocatable, dimension(:,:,:) :: D_inv      ! Block-Jacobi: 1/diag(A) per row type
+    real(c_double), allocatable, dimension(:,:,:) :: D_inv      ! inverse Thomas pivots for vertical-line blocks
+    real(c_double), allocatable, dimension(:,:,:) :: line_cprime ! Thomas upper factors for vertical-line blocks
     real(c_double), allocatable, dimension(:,:,:) :: prec_res   ! scratch for multi-sweep Richardson residual
 
     ! Persistent halo face buffers — allocated once at first solve, reused every iter.
@@ -170,7 +168,7 @@ module wind_iterative
         real(c_double), allocatable, dimension(:,:,:) :: x_sol, r_vec, r_hat
         real(c_double), allocatable, dimension(:,:,:) :: p_vec, p_hat, v_vec
         real(c_double), allocatable, dimension(:,:,:) :: s_vec, s_hat, t_vec
-        real(c_double), allocatable, dimension(:,:,:) :: rhs, D_inv, prec_res
+        real(c_double), allocatable, dimension(:,:,:) :: rhs, D_inv, line_cprime, prec_res
         ! Halo face buffers (target attribute only needed on the live module-level
         ! variables for c_loc — not on cache slots, which are pure host storage)
         real(c_double), allocatable, dimension(:,:) :: east_send,  east_recv
@@ -358,7 +356,7 @@ contains
 
             call initialize_coefs(domain)
 
-            ! Allocate Krylov / RHS / D_inv state on host then push to device.
+            ! Allocate Krylov / RHS / vertical-line preconditioner state on host then push to device.
             ! Range matches AMGX's lambda_3d: (i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1).
             allocate(x_sol  (i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1))
             allocate(r_vec  (i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1))
@@ -371,6 +369,7 @@ contains
             allocate(t_vec  (i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1))
             allocate(rhs     (i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1))
             allocate(D_inv   (i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1))
+            allocate(line_cprime(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1))
             allocate(prec_res(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1))
 #ifdef USE_NCCL
             ! Device-resident scalar buffers for NCCL allreduces.
@@ -395,14 +394,14 @@ contains
             x_sol = 0.0_c_double; r_vec = 0.0_c_double; r_hat = 0.0_c_double
             p_vec = 0.0_c_double; p_hat = 0.0_c_double; v_vec = 0.0_c_double
             s_vec = 0.0_c_double; s_hat = 0.0_c_double; t_vec = 0.0_c_double
-            rhs   = 0.0_c_double; D_inv = 1.0_c_double; prec_res = 0.0_c_double
+            rhs   = 0.0_c_double; D_inv = 1.0_c_double; line_cprime = 0.0_c_double; prec_res = 0.0_c_double
             east_send  = 0.0_c_double; east_recv  = 0.0_c_double
             west_send  = 0.0_c_double; west_recv  = 0.0_c_double
             north_send = 0.0_c_double; north_recv = 0.0_c_double
             south_send = 0.0_c_double; south_recv = 0.0_c_double
 
             !$acc enter data copyin(x_sol, r_vec, r_hat, p_vec, p_hat, v_vec, &
-            !$acc                   s_vec, s_hat, t_vec, rhs, D_inv, prec_res, &
+            !$acc                   s_vec, s_hat, t_vec, rhs, D_inv, line_cprime, prec_res, &
             !$acc                   east_send, east_recv, west_send, west_recv, &
             !$acc                   north_send, north_recv, south_send, south_recv)
             !$acc enter data copyin(A_coef, B_coef, C_coef, D_coef, E_coef, F_coef, G_coef, &
@@ -430,8 +429,9 @@ contains
             if (varying_alpha .and. .not. operator_probed) call update_coefs_gpu()
         endif
 
-        ! Build / refresh the diagonal preconditioner from current coefficients
-        call extract_diagonal()
+        ! Build / refresh the vertical-line block-Jacobi preconditioner from
+        ! the current coefficients.
+        call build_line_preconditioner()
 
         ! Build RHS on GPU (3D layout: rhs(i,k,j) = -2*div for interior, 0 at BCs)
         call compute_rhs_3d()
@@ -1047,51 +1047,67 @@ contains
 
 
     !>------------------------------------------------------------
-    !! Block-Jacobi diagonal extraction.
+    !! Build one vertical tridiagonal block per horizontal grid column.
     !!
-    !! D(row) per row category:
-    !!   lateral identity row -> 1
-    !!   top BC k=mz-1        -> 1/dz_if(i,k,j)
-    !!   bottom BC k=0        -> -1/dz_if(i,k+1,j)
-    !!   interior             -> A_coef(i,k,j)
-    !!
-    !! Stored as the inverse so the apply step is a single multiply.
+    !! Horizontal and diagonal-vertical stencil entries are deliberately left
+    !! to the outer Krylov iteration; B/C plus each column's boundary rows are
+    !! factored exactly with Thomas elimination.  This is the natural stronger
+    !! local preconditioner for the thin, vertically stretched Alpine grid.
+    !! D_inv stores inverse pivots and line_cprime the upper factors.
     !!------------------------------------------------------------
-    subroutine extract_diagonal()
+    subroutine build_line_preconditioner()
         implicit none
         integer :: i, j, k
-        real(c_double) :: d
+        real(c_double) :: diag, lower, upper, pivot
 
-        !$acc parallel loop gang vector collapse(3) &
-        !$acc present(D_inv, A_coef, dz_if) private(d)
+        !$acc parallel loop gang vector collapse(2) &
+        !$acc present(D_inv, line_cprime, A_coef, B_coef, C_coef, dz_if) &
+        !$acc private(diag, lower, upper, pivot)
         do j = ys, ys + ym - 1
-            do k = zs, zs + zm - 1
-                do i = xs, xs + xm - 1
-                    if (i <= 0 .or. j <= 0 .or. i >= mx-1 .or. j >= my-1) then
-                        d = 1.0_c_double
-                    else if (k >= mz-1) then
-                        ! probed operator: ghost plane is an identity row
-                        if (operator_probed) then
-                            d = 1.0_c_double
-                        else
-                            d = 1.0_c_double / real(dz_if(i,k,j), c_double)
-                        endif
-                    else if (k <= 0) then
-                        if (operator_probed) then
-                            d = 1.0_c_double
-                        else
-                            d = -1.0_c_double / real(dz_if(i,k+1,j), c_double)
-                        endif
+            do i = xs, xs + xm - 1
+                if (i <= 0 .or. j <= 0 .or. i >= mx-1 .or. j >= my-1) then
+                    do k = zs, zs + zm - 1
+                        D_inv(i,k,j) = 1.0_c_double
+                        line_cprime(i,k,j) = 0.0_c_double
+                    enddo
+                else
+                    ! Bottom row: identity for the probed operator; otherwise
+                    ! retain its two-point vertical boundary condition.
+                    if (operator_probed) then
+                        diag = 1.0_c_double; upper = 0.0_c_double
                     else
-                        d = real(A_coef(i,k,j), c_double)
+                        diag = -1.0_c_double / real(dz_if(i,1,j), c_double)
+                        upper =  1.0_c_double / real(dz_if(i,1,j), c_double)
                     endif
-                    ! Guard against zero diagonal (shouldn't happen for this matrix)
-                    if (abs(d) < breakdown_eps) d = sign(breakdown_eps, d)
-                    D_inv(i,k,j) = 1.0_c_double / d
-                enddo
+                    if (abs(diag) < breakdown_eps) diag = sign(breakdown_eps, diag)
+                    D_inv(i,0,j) = 1.0_c_double / diag
+                    line_cprime(i,0,j) = upper * D_inv(i,0,j)
+
+                    do k = 1, mz - 2
+                        lower = real(C_coef(i,k,j), c_double)
+                        diag  = real(A_coef(i,k,j), c_double)
+                        upper = real(B_coef(i,k,j), c_double)
+                        pivot = diag - lower * line_cprime(i,k-1,j)
+                        if (abs(pivot) < breakdown_eps) pivot = sign(breakdown_eps, pivot)
+                        D_inv(i,k,j) = 1.0_c_double / pivot
+                        line_cprime(i,k,j) = upper * D_inv(i,k,j)
+                    enddo
+
+                    ! Top row mirrors the bottom treatment.
+                    if (operator_probed) then
+                        diag = 1.0_c_double; lower = 0.0_c_double
+                    else
+                        diag  =  1.0_c_double / real(dz_if(i,mz-1,j), c_double)
+                        lower = -1.0_c_double / real(dz_if(i,mz-1,j), c_double)
+                    endif
+                    pivot = diag - lower * line_cprime(i,mz-2,j)
+                    if (abs(pivot) < breakdown_eps) pivot = sign(breakdown_eps, pivot)
+                    D_inv(i,mz-1,j) = 1.0_c_double / pivot
+                    line_cprime(i,mz-1,j) = 0.0_c_double
+                endif
             enddo
         enddo
-    end subroutine extract_diagonal
+    end subroutine build_line_preconditioner
 
 
     !>------------------------------------------------------------
@@ -1268,15 +1284,16 @@ contains
 
 
     !>------------------------------------------------------------
-    !! Block-Jacobi preconditioner apply with multi-sweep Richardson.
+    !! Vertical-line block-Jacobi preconditioner apply with multi-sweep Richardson.
     !!
     !! Applies M^{-1} to in_vec, with M^{-1} approximated by `precond_n_sweeps`
-    !! Richardson sweeps using the diagonal D as the smoother:
+    !! Richardson sweeps using one exact vertical tridiagonal block per (i,j):
     !!   y_0 = 0
-    !!   y_{k+1} = y_k + D^{-1} (in - A y_k)
+    !!   y_{k+1} = y_k + M_line^{-1} (in - A y_k)
     !!
-    !! Sweep 1 reduces to y = D^{-1} in (single diagonal scale).
-    !! Subsequent sweeps add 1 SpMV + 1 fused update each.
+    !! Sweep 1 is an exact column solve. Subsequent sweeps add 1 SpMV and
+    !! another column solve. Horizontal rank boundaries remain homogeneous
+    !! during the local smoothing operation, as required by block-Jacobi.
     !!
     !! Block-Jacobi convention: no halo exchange between inner sweeps.
     !! Halo cells of out_vec stay at zero (initialised at first solve, never
@@ -1307,31 +1324,78 @@ contains
             enddo
         enddo
 
-        ! Sweep 1: y_1 = D^{-1} in   (starting from y_0 = 0)
-        !$acc parallel loop gang vector collapse(3) present(in_vec, out_vec, D_inv)
-        do j = ys, ys + ym - 1
-            do k = zs, zs + zm - 1
-                do i = xs, xs + xm - 1
-                    out_vec(i,k,j) = D_inv(i,k,j) * in_vec(i,k,j)
-                enddo
-            enddo
-        enddo
+        ! Sweep 1: y_1 = M_line^{-1} in (starting from y_0 = 0).
+        call apply_vertical_lines(in_vec, out_vec)
 
-        ! Sweeps 2..n: y += D^{-1} (in - A y).  Inner SpMV uses out_vec's
-        ! zero halo (no MPI exchange — Jacobi convention).
+        ! Sweeps 2..n: y += M_line^{-1} (in - A y). Inner SpMV uses out_vec's
+        ! zero halo (no MPI exchange — block-Jacobi convention). t_vec is safe
+        ! scratch at both preconditioner call sites and avoids a further large
+        ! per-rank allocation.
         do sweep = 2, precond_n_sweeps
             call spmv(out_vec, prec_res)
-            !$acc parallel loop gang vector collapse(3) &
-            !$acc present(in_vec, out_vec, D_inv, prec_res)
+            !$acc parallel loop gang vector collapse(3) present(in_vec, prec_res)
             do j = ys, ys + ym - 1
                 do k = zs, zs + zm - 1
                     do i = xs, xs + xm - 1
-                        out_vec(i,k,j) = out_vec(i,k,j) + D_inv(i,k,j) * (in_vec(i,k,j) - prec_res(i,k,j))
+                        prec_res(i,k,j) = in_vec(i,k,j) - prec_res(i,k,j)
+                    enddo
+                enddo
+            enddo
+            call apply_vertical_lines(prec_res, t_vec)
+            !$acc parallel loop gang vector collapse(3) &
+            !$acc present(in_vec, out_vec, t_vec)
+            do j = ys, ys + ym - 1
+                do k = zs, zs + zm - 1
+                    do i = xs, xs + xm - 1
+                        out_vec(i,k,j) = out_vec(i,k,j) + t_vec(i,k,j)
                     enddo
                 enddo
             enddo
         enddo
     end subroutine apply_precond
+
+
+    !> Apply the factored vertical-line blocks to `in_vec`.
+    !! The forward result is stored in out_vec and overwritten in place by
+    !! backward substitution.  All halos are cleared so subsequent local SpMV
+    !! operations retain block-Jacobi boundary semantics.
+    subroutine apply_vertical_lines(in_vec, out_vec)
+        implicit none
+        real(c_double), dimension(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1), intent(in)    :: in_vec
+        real(c_double), dimension(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1), intent(inout) :: out_vec
+        integer :: i, j, k
+        real(c_double) :: lower
+
+        !$acc parallel loop gang vector collapse(3) present(out_vec)
+        do j = j_s-1, j_e+1
+            do k = k_s-1, k_e+1
+                do i = i_s-1, i_e+1
+                    out_vec(i,k,j) = 0.0_c_double
+                enddo
+            enddo
+        enddo
+
+        !$acc parallel loop gang vector collapse(2) &
+        !$acc present(in_vec, out_vec, D_inv, line_cprime, C_coef, dz_if) private(lower)
+        do j = ys, ys + ym - 1
+            do i = xs, xs + xm - 1
+                out_vec(i,0,j) = D_inv(i,0,j) * in_vec(i,0,j)
+                do k = 1, mz - 1
+                    if (i <= 0 .or. j <= 0 .or. i >= mx-1 .or. j >= my-1) then
+                        lower = 0.0_c_double
+                    else if (k == mz-1 .and. .not. operator_probed) then
+                        lower = -1.0_c_double / real(dz_if(i,k,j), c_double)
+                    else
+                        lower = real(C_coef(i,k,j), c_double)
+                    endif
+                    out_vec(i,k,j) = D_inv(i,k,j) * (in_vec(i,k,j) - lower * out_vec(i,k-1,j))
+                enddo
+                do k = mz - 2, 0, -1
+                    out_vec(i,k,j) = out_vec(i,k,j) - line_cprime(i,k,j) * out_vec(i,k+1,j)
+                enddo
+            enddo
+        enddo
+    end subroutine apply_vertical_lines
 
 
     !>------------------------------------------------------------
@@ -2202,7 +2266,7 @@ contains
 
         if (structure_uploaded) then
             !$acc exit data delete(x_sol, r_vec, r_hat, p_vec, p_hat, v_vec, &
-            !$acc                  s_vec, s_hat, t_vec, rhs, D_inv, prec_res, &
+            !$acc                  s_vec, s_hat, t_vec, rhs, D_inv, line_cprime, prec_res, &
             !$acc                  east_send, east_recv, west_send, west_recv, &
             !$acc                  north_send, north_recv, south_send, south_recv)
             !$acc exit data delete(A_coef, B_coef, C_coef, D_coef, E_coef, F_coef, G_coef, &
@@ -2220,6 +2284,7 @@ contains
         if (allocated(t_vec))       deallocate(t_vec)
         if (allocated(rhs))         deallocate(rhs)
         if (allocated(D_inv))       deallocate(D_inv)
+        if (allocated(line_cprime)) deallocate(line_cprime)
         if (allocated(prec_res))    deallocate(prec_res)
 #ifdef USE_NCCL
         if (allocated(sigma_dev) .or. allocated(red5_dev) .or. allocated(rho0_dev)) then
@@ -2664,13 +2729,13 @@ contains
             !$acc update host(A_coef, B_coef, C_coef, D_coef, E_coef, F_coef, G_coef, &
             !$acc             H_coef, I_coef, J_coef, K_coef, L_coef, M_coef, N_coef, O_coef)
             !$acc update host(x_sol, r_vec, r_hat, p_vec, p_hat, v_vec, &
-            !$acc             s_vec, s_hat, t_vec, rhs, D_inv, prec_res)
+            !$acc             s_vec, s_hat, t_vec, rhs, D_inv, line_cprime, prec_res)
             !$acc update host(east_send, east_recv, west_send, west_recv, &
             !$acc             north_send, north_recv, south_send, south_recv)
             !$acc exit data delete(A_coef, B_coef, C_coef, D_coef, E_coef, F_coef, G_coef, &
             !$acc                  H_coef, I_coef, J_coef, K_coef, L_coef, M_coef, N_coef, O_coef)
             !$acc exit data delete(x_sol, r_vec, r_hat, p_vec, p_hat, v_vec, &
-            !$acc                  s_vec, s_hat, t_vec, rhs, D_inv, prec_res)
+            !$acc                  s_vec, s_hat, t_vec, rhs, D_inv, line_cprime, prec_res)
             !$acc exit data delete(east_send, east_recv, west_send, west_recv, &
             !$acc                  north_send, north_recv, south_send, south_recv)
 #ifdef USE_NCCL
@@ -2729,6 +2794,7 @@ contains
         if (allocated(t_vec))    call move_alloc(t_vec,    domain_cache(slot)%t_vec)
         if (allocated(rhs))      call move_alloc(rhs,      domain_cache(slot)%rhs)
         if (allocated(D_inv))    call move_alloc(D_inv,    domain_cache(slot)%D_inv)
+        if (allocated(line_cprime)) call move_alloc(line_cprime, domain_cache(slot)%line_cprime)
         if (allocated(prec_res)) call move_alloc(prec_res, domain_cache(slot)%prec_res)
 
         ! Halo buffers
@@ -2829,6 +2895,7 @@ contains
         if (allocated(domain_cache(slot)%t_vec))    call move_alloc(domain_cache(slot)%t_vec,    t_vec)
         if (allocated(domain_cache(slot)%rhs))      call move_alloc(domain_cache(slot)%rhs,      rhs)
         if (allocated(domain_cache(slot)%D_inv))    call move_alloc(domain_cache(slot)%D_inv,    D_inv)
+        if (allocated(domain_cache(slot)%line_cprime)) call move_alloc(domain_cache(slot)%line_cprime, line_cprime)
         if (allocated(domain_cache(slot)%prec_res)) call move_alloc(domain_cache(slot)%prec_res, prec_res)
 
         ! Halo buffers
@@ -2856,7 +2923,7 @@ contains
             !$acc enter data copyin(A_coef, B_coef, C_coef, D_coef, E_coef, F_coef, G_coef, &
             !$acc                   H_coef, I_coef, J_coef, K_coef, L_coef, M_coef, N_coef, O_coef)
             !$acc enter data copyin(x_sol, r_vec, r_hat, p_vec, p_hat, v_vec, &
-            !$acc                   s_vec, s_hat, t_vec, rhs, D_inv, prec_res)
+            !$acc                   s_vec, s_hat, t_vec, rhs, D_inv, line_cprime, prec_res)
             !$acc enter data copyin(east_send, east_recv, west_send, west_recv, &
             !$acc                   north_send, north_recv, south_send, south_recv)
 #ifdef USE_NCCL
