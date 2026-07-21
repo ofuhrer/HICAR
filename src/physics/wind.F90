@@ -13,7 +13,8 @@ module wind
     ! use wind_iterative,      only : calc_iter_winds, init_iter_winds
     use wind_iterative,    only : calc_iter_winds, init_iter_winds, &
                                   probe_lambda_pattern, probe_zero_corrections, &
-                                  probe_apply_corrections, probe_record, probe_finalize
+                                  probe_apply_corrections, probe_record, probe_finalize, &
+                                  probe_random_pattern, probe_compare_operator
     use iso_fortran_env, only : output_unit
     use icar_constants
     use domain_interface,  only : domain_t
@@ -1066,6 +1067,19 @@ contains
             enddo
         enddo
         call probe_finalize(max_leak)
+
+        ! A non-coloured distributed vector is an independent end-to-end
+        ! check of the 27-colour stencil reconstruction.  In particular it
+        ! catches a decomposition/interface mistake that the colour probes
+        ! can otherwise mask.  Keep this adjacent to calibration so the
+        ! direct and matrix operators use identical geometry and alpha.
+        call probe_random_pattern()
+        call probe_zero_corrections(domain)
+        call probe_apply_corrections(domain, options%adv%advect_density)
+        call calc_divergence(div, domain, advect_density=options%adv%advect_density, &
+                             horz_only=.False., use_dqdt=.True.)
+        !$acc update host(div)
+        call probe_compare_operator(domain, div)
 
         !$acc parallel default(present)
         !$acc loop gang vector collapse(3)

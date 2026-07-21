@@ -38,7 +38,7 @@ module wind_iterative
     private
     public :: init_iter_winds, calc_iter_winds, finalize_iter_winds
     public :: probe_lambda_pattern, probe_zero_corrections, probe_apply_corrections, &
-              probe_record, probe_finalize
+              probe_record, probe_finalize, probe_random_pattern, probe_compare_operator
 
     logical :: initialized_iter_winds = .false.
     logical :: structure_uploaded = .false.
@@ -1285,6 +1285,79 @@ contains
             write(*,*) "  off-stencil leakage max |T| = ", max_leak, " (should be ~0)"
         endif
     end subroutine probe_finalize
+
+
+    !> Fill the solve vector with a deterministic, non-coloured pseudo-random
+    !! field.  This deliberately crosses every rank interface and is used only
+    !! to verify that the matrix reconstructed from coloured probes is the
+    !! same operator as the direct G then D application.
+    subroutine probe_random_pattern()
+        implicit none
+        integer :: i, j, k
+
+        do j = j_s-1, j_e+1
+            do k = k_s-1, k_e+1
+                do i = i_s-1, i_e+1
+                    if (i >= 1 .and. i <= mx-2 .and. k >= 1 .and. k <= mz-2 .and. &
+                        j >= 1 .and. j <= my-2) then
+                        x_sol(i,k,j) = sin(12.9898_c_double * real(i, c_double) + &
+                                               78.233_c_double * real(k, c_double) + &
+                                               37.719_c_double * real(j, c_double))
+                    else
+                        x_sol(i,k,j) = 0.0_c_double
+                    endif
+                enddo
+            enddo
+        enddo
+        !$acc update device(x_sol)
+    end subroutine probe_random_pattern
+
+
+    !> Compare the calibrated matrix with a direct distributed application of
+    !! A = 2 D o G to the current probe vector.  The relative L2, absolute
+    !! maximum, and rank-interface maximum expose a bad colouring/halo
+    !! reconstruction before a Krylov failure is attributed to conditioning.
+    subroutine probe_compare_operator(domain, direct_div)
+        implicit none
+        type(domain_t), intent(in) :: domain
+        real, intent(in) :: direct_div(domain%ims:domain%ime, domain%kms:domain%kme, domain%jms:domain%jme)
+        integer :: i, j, k, ierr
+        real(c_double) :: local_stats(4), global_stats(4), matrix_value, direct_value, error_value
+        logical :: rank_interface
+
+        call exchange_krylov_halos(x_sol, domain)
+        call spmv(x_sol, t_vec)
+        !$acc update host(t_vec)
+
+        local_stats = 0.0_c_double
+        do j = j_s, j_e
+            do k = k_s, k_e
+                do i = i_s, i_e
+                    if (i < 1 .or. i > mx-2 .or. k < 1 .or. k > mz-2 .or. j < 1 .or. j > my-2) cycle
+                    matrix_value = t_vec(i,k,j)
+                    direct_value = 2.0_c_double * real(direct_div(i,k,j), c_double)
+                    error_value = matrix_value - direct_value
+                    local_stats(1) = local_stats(1) + error_value * error_value
+                    local_stats(2) = local_stats(2) + direct_value * direct_value
+                    local_stats(3) = max(local_stats(3), abs(error_value))
+                    rank_interface = (.not. domain%west_boundary  .and. i == i_s) .or. &
+                                     (.not. domain%east_boundary  .and. i == i_e) .or. &
+                                     (.not. domain%south_boundary .and. j == j_s) .or. &
+                                     (.not. domain%north_boundary .and. j == j_e)
+                    if (rank_interface) local_stats(4) = max(local_stats(4), abs(error_value))
+                enddo
+            enddo
+        enddo
+        call MPI_Allreduce(local_stats, global_stats, 2, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(local_stats(3), global_stats(3), 1, MPI_DOUBLE_PRECISION, MPI_MAX, solver_comm, ierr)
+        call MPI_Allreduce(local_stats(4), global_stats(4), 1, MPI_DOUBLE_PRECISION, MPI_MAX, solver_comm, ierr)
+        if (STD_OUT_PE) then
+            write(*,'(A,ES12.4,A,ES12.4,A,ES12.4)') ' Projection operator equivalence: relative L2=', &
+                sqrt(global_stats(1) / max(global_stats(2), tiny(1.0_c_double))), ' max abs=', global_stats(3), &
+                ' rank-interface max abs=', global_stats(4)
+        endif
+        call vec_zero(x_sol)
+    end subroutine probe_compare_operator
 
 
     !>------------------------------------------------------------
