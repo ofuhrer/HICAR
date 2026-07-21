@@ -500,14 +500,18 @@ contains
                 endif
             end do
 
-            ! Retry succeeded — reset sweep count to base for the next call
-            if (status == 0 .or. res_final <= 0.01_c_double * res0) then
+            ! Only the Krylov solver's success status proves convergence.  A
+            ! residual reduction alone may still be far above its requested
+            ! tolerance, and must never be used to update the winds.
+            if (status == 0) then
                 if (STD_OUT_PE) write(*,*) ' Retry converged, resetting precond_n_sweeps=', BASE_PREC_SWEEPS
             endif
             precond_n_sweeps = BASE_PREC_SWEEPS
 
-            ! Still diverged after max retries and residual is worse than start — fatal
-            if (status /= 0 .and. res_final > res0) then
+            ! A non-zero status after every retry is fatal.  Continuing with
+            ! the failed iterate silently contaminates the following physics
+            ! step, even when the residual happened to decrease somewhat.
+            if (status /= 0) then
                 if (STD_OUT_PE) then
                     associate(density => domain%vars_3d(domain%var_indx(kVARS%density)%v)%data_3d, &
                               u       => domain%vars_3d(domain%var_indx(kVARS%u)%v)%dqdt_3d, &
