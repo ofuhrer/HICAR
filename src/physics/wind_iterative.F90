@@ -573,7 +573,7 @@ contains
         real(c_double) :: sigma_local, sigma_global
         real(c_double) :: red5_local(5), red5_global(5)
         real(c_double) :: ts, tt, rs, rt, ss
-        real(c_double) :: rnorm_global, rnorm_squared, target_norm
+        real(c_double) :: rnorm_global, rnorm_squared, target_norm, max_x_global
         real(c_double) :: rho0_pack(2), b_norm2
         real(c_double) :: t0_solve, t0_region
 
@@ -809,9 +809,53 @@ contains
             rho = rho_new
         enddo
 
+        ! Recurrence residuals can be spuriously small for a non-normal
+        ! operator after a long Krylov run.  Verify the physical algebraic
+        ! residual independently before accepting or applying this solution.
+        if (status_out == 0) then
+            call verify_true_residual(domain, rnorm_global, max_x_global)
+            res_final_out = rnorm_global
+            if (rnorm_global > target_norm) then
+                if (STD_OUT_PE) write(*,'(A,ES12.4,A,ES12.4,A,ES12.4)') &
+                    ' HICAR BiCGStab rejected false recurrence convergence: true residual=', rnorm_global, &
+                    ' target=', target_norm, ' max |x|=', max_x_global
+                status_out = 3
+            endif
+        endif
+
         t_total_acc = MPI_Wtime() - t0_solve
 
     end subroutine bicgstab_solve
+
+
+    !> Recompute ||b-Ax|| from the final solution.  This must stay separate
+    !! from the BiCGStab recurrence because residual drift can otherwise admit
+    !! an enormous, physically invalid correction as "converged".
+    subroutine verify_true_residual(domain, residual_norm, max_x_global)
+        implicit none
+        type(domain_t), intent(in) :: domain
+        real(c_double), intent(out) :: residual_norm, max_x_global
+        real(c_double) :: local_norm2, global_norm2, max_x_local
+        integer :: i, j, k, ierr
+
+        call exchange_krylov_halos(x_sol, domain)
+        call spmv(x_sol, t_vec)
+        call vec_axpby_into(r_vec, 1.0_c_double, rhs, -1.0_c_double, t_vec)
+        call vec_norm2_local(r_vec, local_norm2)
+
+        max_x_local = 0.0_c_double
+        !$acc parallel loop gang vector collapse(3) reduction(max:max_x_local) present(x_sol)
+        do j = ys, ys + ym - 1
+            do k = zs, zs + zm - 1
+                do i = xs, xs + xm - 1
+                    max_x_local = max(max_x_local, abs(x_sol(i,k,j)))
+                enddo
+            enddo
+        enddo
+        call MPI_Allreduce(local_norm2, global_norm2, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(max_x_local, max_x_global, 1, MPI_DOUBLE_PRECISION, MPI_MAX, solver_comm, ierr)
+        residual_norm = sqrt(global_norm2)
+    end subroutine verify_true_residual
 
 
     !>------------------------------------------------------------
@@ -1112,8 +1156,6 @@ contains
             enddo
         enddo
     end subroutine build_line_preconditioner
-
-
     !>------------------------------------------------------------
     !! operator probing (orchestrated by wind.F90::calibrate_projection_operator).
     !!
