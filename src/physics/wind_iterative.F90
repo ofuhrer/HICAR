@@ -81,6 +81,10 @@ module wind_iterative
     ! debug mode or under the diagnostic iterative solver (solves only at
     ! wind updates). Convergence-failure/retry warnings always print.
     logical :: verbose_solver = .False.
+    ! Emit a rank-0 heartbeat while a verbose solve is running.  Swiss-scale
+    ! solves can legitimately take minutes before the final summary, so the
+    ! heartbeat makes a live, converging run distinguishable from a hang.
+    integer, parameter :: SOLVER_PROGRESS_INTERVAL = 100
 
     ! 15-point stencil coefficients (same names as AMGX module)
     real, allocatable, dimension(:,:,:) :: A_coef, B_coef, C_coef, D_coef, E_coef, F_coef, G_coef, &
@@ -632,6 +636,13 @@ contains
         res_final_out = rnorm_global
         target_norm   = max(bicg_tol_abs, bicg_tol_rel * sqrt(b_norm2))
 
+        if (STD_OUT_PE .and. verbose_solver) then
+            write(output_unit,'(A,ES12.4,A,ES12.4,A,I0,A)') &
+                ' HICAR BiCGStab start: residual=', rnorm_global, &
+                ' target=', target_norm, ' max_iterations=', max_iters, '.'
+            flush(output_unit)
+        endif
+
         if (rnorm_global <= target_norm) then
             status_out  = 0
             n_iters_out = 0
@@ -749,6 +760,14 @@ contains
             rnorm_global  = sqrt(rnorm_squared)
             res_final_out = rnorm_global
             n_iters_out   = it
+
+            if (STD_OUT_PE .and. verbose_solver .and. mod(it, SOLVER_PROGRESS_INTERVAL) == 0) then
+                write(output_unit,'(A,I0,A,ES12.4,A,ES12.4,A,F10.2,A)') &
+                    ' HICAR BiCGStab progress: iteration=', it, &
+                    ' residual=', rnorm_global, ' target=', target_norm, &
+                    ' elapsed_s=', MPI_Wtime() - t0_solve, '.'
+                flush(output_unit)
+            endif
 
             ! x = x + alpha*p_hat + omega*s_hat   (single fused kernel)
             t0_region = MPI_Wtime()
