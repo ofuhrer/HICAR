@@ -20,7 +20,28 @@ module wind_multilevel
         procedure :: restrict_adjoint
     end type horizontal_transfer_t
 
+    type, public :: galerkin_stencil_t
+        integer :: nx = 0
+        integer :: ny = 0
+        integer :: nz = 0
+        logical :: fix_lateral_boundaries = .true.
+        logical :: fix_vertical_boundaries = .true.
+        real(c_double), allocatable :: value(:,:,:,:,:,:)
+    contains
+        procedure :: release => release_galerkin_stencil
+        procedure :: apply => apply_galerkin_stencil
+    end type galerkin_stencil_t
+
+    abstract interface
+        subroutine fine_operator_apply(x, ax)
+            import c_double
+            real(c_double), intent(in) :: x(:,:,:)
+            real(c_double), intent(out) :: ax(:,:,:)
+        end subroutine fine_operator_apply
+    end interface
+
     public :: horizontal_coarse_extent
+    public :: assemble_colored_galerkin
 
 contains
 
@@ -253,5 +274,147 @@ contains
             error stop 'coarse array does not match horizontal transfer'
         if (size(coarse,2) /= size(fine,2)) error stop 'horizontal transfer cannot coarsen vertically'
     end subroutine require_transfer_shapes
+
+
+    subroutine assemble_colored_galerkin(transfer, fine_weight, coarse_weight, apply_fine, stencil)
+        type(horizontal_transfer_t), intent(in) :: transfer
+        real(c_double), intent(in) :: fine_weight(:,:,:), coarse_weight(:,:,:)
+        procedure(fine_operator_apply) :: apply_fine
+        type(galerkin_stencil_t), intent(inout) :: stencil
+        real(c_double), allocatable :: coarse_probe(:,:,:), coarse_response(:,:,:)
+        real(c_double), allocatable :: fine_probe(:,:,:), fine_response(:,:,:)
+        integer :: ci, cj, ck, i, j, k, di, dj, dk
+
+        call require_transfer_shapes(transfer, coarse_weight, fine_weight)
+        call stencil%release()
+        stencil%nx = transfer%nx_c
+        stencil%ny = transfer%ny_c
+        stencil%nz = size(fine_weight, 2)
+        stencil%fix_lateral_boundaries = transfer%fix_lateral_boundaries
+        stencil%fix_vertical_boundaries = transfer%fix_vertical_boundaries
+        allocate(stencil%value(-1:1,-1:1,-1:1,stencil%nx,stencil%nz,stencil%ny))
+        allocate(coarse_probe(stencil%nx,stencil%nz,stencil%ny), &
+                 coarse_response(stencil%nx,stencil%nz,stencil%ny))
+        allocate(fine_probe(transfer%nx_f,stencil%nz,transfer%ny_f), &
+                 fine_response(transfer%nx_f,stencil%nz,transfer%ny_f))
+        stencil%value = 0.0_c_double
+
+        ! A 3x3x3 coloring recovers an exact nearest-neighbour coarse stencil
+        ! in 27 operator applications.  Bilinear horizontal P, its weighted
+        ! adjoint R, and a 3x3x3 fine stencil cannot connect coarse points
+        ! farther than one index apart.  Each row therefore sees at most one
+        ! active probe point of a given color, including for nonsymmetric A.
+        do cj = 0, 2
+            do ck = 0, 2
+                do ci = 0, 2
+                    coarse_probe = 0.0_c_double
+                    do j = 1, stencil%ny
+                        do k = 1, stencil%nz
+                            do i = 1, stencil%nx
+                                if (is_fixed_coarse_point(transfer, i, k, j, stencil%nz)) cycle
+                                if (modulo(i-1,3) == ci .and. modulo(k-1,3) == ck .and. &
+                                    modulo(j-1,3) == cj) coarse_probe(i,k,j) = 1.0_c_double
+                            enddo
+                        enddo
+                    enddo
+                    call transfer%prolong(coarse_probe, fine_probe)
+                    call apply_fine(fine_probe, fine_response)
+                    call transfer%restrict_adjoint(fine_response, fine_weight, coarse_weight, coarse_response)
+
+                    do j = 1, stencil%ny
+                        dj = modulo(cj - modulo(j-1,3) + 1, 3) - 1
+                        do k = 1, stencil%nz
+                            dk = modulo(ck - modulo(k-1,3) + 1, 3) - 1
+                            do i = 1, stencil%nx
+                                if (is_fixed_coarse_point(transfer, i, k, j, stencil%nz)) cycle
+                                di = modulo(ci - modulo(i-1,3) + 1, 3) - 1
+                                if (i+di < 1 .or. i+di > stencil%nx .or. &
+                                    k+dk < 1 .or. k+dk > stencil%nz .or. &
+                                    j+dj < 1 .or. j+dj > stencil%ny) cycle
+                                if (is_fixed_coarse_point(transfer, i+di, k+dk, j+dj, stencil%nz)) cycle
+                                stencil%value(di,dk,dj,i,k,j) = coarse_response(i,k,j)
+                            enddo
+                        enddo
+                    enddo
+                enddo
+            enddo
+        enddo
+
+        do j = 1, stencil%ny
+            do k = 1, stencil%nz
+                do i = 1, stencil%nx
+                    if (is_fixed_coarse_point(transfer, i, k, j, stencil%nz)) &
+                        stencil%value(0,0,0,i,k,j) = 1.0_c_double
+                enddo
+            enddo
+        enddo
+    end subroutine assemble_colored_galerkin
+
+
+    subroutine release_galerkin_stencil(this)
+        class(galerkin_stencil_t), intent(inout) :: this
+
+        if (allocated(this%value)) deallocate(this%value)
+        this%nx = 0
+        this%ny = 0
+        this%nz = 0
+        this%fix_lateral_boundaries = .true.
+        this%fix_vertical_boundaries = .true.
+    end subroutine release_galerkin_stencil
+
+
+    subroutine apply_galerkin_stencil(this, x, ax)
+        class(galerkin_stencil_t), intent(in) :: this
+        real(c_double), intent(in) :: x(:,:,:)
+        real(c_double), intent(out) :: ax(:,:,:)
+        integer :: i, j, k, di, dj, dk
+
+        if (size(x,1) /= this%nx .or. size(x,2) /= this%nz .or. size(x,3) /= this%ny) &
+            error stop 'input does not match Galerkin stencil'
+        if (any(shape(ax) /= shape(x))) error stop 'Galerkin output shape mismatch'
+
+        ax = 0.0_c_double
+        do j = 1, this%ny
+            do k = 1, this%nz
+                do i = 1, this%nx
+                    if (is_fixed_stencil_point(this, i, k, j)) then
+                        ax(i,k,j) = x(i,k,j)
+                    else
+                        do dj = -1, 1
+                            if (j+dj < 1 .or. j+dj > this%ny) cycle
+                            do dk = -1, 1
+                                if (k+dk < 1 .or. k+dk > this%nz) cycle
+                                do di = -1, 1
+                                    if (i+di < 1 .or. i+di > this%nx) cycle
+                                    ax(i,k,j) = ax(i,k,j) + this%value(di,dk,dj,i,k,j) * &
+                                                               x(i+di,k+dk,j+dj)
+                                enddo
+                            enddo
+                        enddo
+                    endif
+                enddo
+            enddo
+        enddo
+    end subroutine apply_galerkin_stencil
+
+
+    pure logical function is_fixed_coarse_point(transfer, i, k, j, nz) result(fixed)
+        type(horizontal_transfer_t), intent(in) :: transfer
+        integer, intent(in) :: i, k, j, nz
+
+        fixed = (transfer%fix_lateral_boundaries .and. &
+                 (i == 1 .or. i == transfer%nx_c .or. j == 1 .or. j == transfer%ny_c)) .or. &
+                (transfer%fix_vertical_boundaries .and. (k == 1 .or. k == nz))
+    end function is_fixed_coarse_point
+
+
+    pure logical function is_fixed_stencil_point(stencil, i, k, j) result(fixed)
+        class(galerkin_stencil_t), intent(in) :: stencil
+        integer, intent(in) :: i, k, j
+
+        fixed = (stencil%fix_lateral_boundaries .and. &
+                 (i == 1 .or. i == stencil%nx .or. j == 1 .or. j == stencil%ny)) .or. &
+                (stencil%fix_vertical_boundaries .and. (k == 1 .or. k == stencil%nz))
+    end function is_fixed_stencil_point
 
 end module wind_multilevel

@@ -25,7 +25,8 @@ module test_wind_iterative
     use options_interface,  only : options_t
     use wind,               only : wind_var_request, init_winds, calc_divergence
     use wind_iterative,     only : calc_iter_winds, finalize_iter_winds
-    use wind_multilevel,    only : horizontal_transfer_t, horizontal_coarse_extent
+    use wind_multilevel,    only : horizontal_transfer_t, horizontal_coarse_extent, &
+                                    galerkin_stencil_t, assemble_colored_galerkin
     use advection,          only : adv_var_request
     use io_routines,        only : check_file_exists
     implicit none
@@ -225,7 +226,8 @@ contains
         type(error_type), allocatable, intent(out) :: error
         integer, parameter :: nx = 8, ny = 7, nz = 5
         type(horizontal_transfer_t) :: transfer, free_transfer
-        real(c_double), allocatable :: coarse_x(:,:,:), coarse_y(:,:,:), coarse_r(:,:,:)
+        type(galerkin_stencil_t) :: stencil
+        real(c_double), allocatable :: coarse_x(:,:,:), coarse_y(:,:,:), coarse_r(:,:,:), coarse_stencil(:,:,:)
         real(c_double), allocatable :: coarse_weight(:,:,:), free_weight(:,:,:), free_coarse(:,:,:)
         real(c_double), allocatable :: fine_x(:,:,:), fine_y(:,:,:), fine_v(:,:,:), fine_a_x(:,:,:)
         real(c_double), allocatable :: fine_weight(:,:,:), free_fine(:,:,:)
@@ -239,7 +241,8 @@ contains
 
         call transfer%init(nx, ny, fix_lateral_boundaries=.true., fix_vertical_boundaries=.true.)
         allocate(coarse_x(transfer%nx_c,nz,transfer%ny_c), coarse_y(transfer%nx_c,nz,transfer%ny_c), &
-                 coarse_r(transfer%nx_c,nz,transfer%ny_c), coarse_weight(transfer%nx_c,nz,transfer%ny_c))
+                 coarse_r(transfer%nx_c,nz,transfer%ny_c), coarse_stencil(transfer%nx_c,nz,transfer%ny_c), &
+                 coarse_weight(transfer%nx_c,nz,transfer%ny_c))
         allocate(fine_x(nx,nz,ny), fine_y(nx,nz,ny), fine_v(nx,nz,ny), fine_a_x(nx,nz,ny), &
                  fine_weight(nx,nz,ny))
 
@@ -302,6 +305,19 @@ contains
             return
         endif
 
+        ! Assemble R A P without coefficient rediscretization.  The colored
+        ! probe must reproduce a direct matrix-free application even though
+        ! the test operator is nonsymmetric and the grid has one even extent.
+        call assemble_colored_galerkin(transfer, fine_weight, coarse_weight, apply_test_operator, stencil)
+        call stencil%apply(coarse_x, coarse_stencil)
+        scale = max(1.0_c_double, maxval(abs(coarse_r)), maxval(abs(coarse_stencil)))
+        if (maxval(abs(coarse_r-coarse_stencil)) > 2.0e-12_c_double*scale) then
+            call test_failed(error, 'test_multilevel_transfer', 'colored Galerkin stencil does not equal R A P')
+            call stencil%release()
+            call transfer%release()
+            return
+        endif
+
         ! Without fixed identity rows the normalized adjoint restriction must
         ! preserve constants on both odd and even horizontal extents.
         call free_transfer%init(nx, ny, fix_lateral_boundaries=.false., fix_vertical_boundaries=.false.)
@@ -318,6 +334,7 @@ contains
         endif
 
         call free_transfer%release()
+        call stencil%release()
         call transfer%release()
 
     contains
