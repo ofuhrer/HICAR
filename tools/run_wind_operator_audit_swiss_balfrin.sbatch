@@ -73,6 +73,7 @@ model_rc=${PIPESTATUS[0]}
 set -e
 
 grep -q 'Projection operator equivalence: relative L2=' "$run/model.out"
+grep -q 'HICAR direct D/G diagonal-mass audit:' "$run/model.out"
 grep -q 'HICAR calibrated wind operator structural audit:' "$run/model.out"
 grep -q 'HICAR wind Krylov audit written to' "$run/model.out"
 grep -q 'HICAR operator audit-only exit:' "$run/model.out"
