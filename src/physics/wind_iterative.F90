@@ -2354,12 +2354,24 @@ contains
                 write(output_unit,'(A)') ' HICAR multilevel probe stage: coarse halo'
                 flush(output_unit)
             endif
+            if (rap_apply_count == 1) then
+                write(output_unit,'(A,I0)') ' HICAR multilevel coarse halo enter rank=', solver_rank
+                flush(output_unit)
+            endif
             call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
+            if (rap_apply_count == 1) then
+                write(output_unit,'(A,I0)') ' HICAR multilevel coarse halo exit rank=', solver_rank
+                flush(output_unit)
+            endif
             if (solver_rank == 0) then
                 write(output_unit,'(A)') ' HICAR multilevel probe stage: prolongation'
                 flush(output_unit)
             endif
             call ml_transfer%prolong_owned_device(ml_coarse_halo_x, ml_fine_owned)
+            if (rap_apply_count == 1) then
+                write(output_unit,'(A,I0)') ' HICAR multilevel prolongation exit rank=', solver_rank
+                flush(output_unit)
+            endif
             ! Reuse the solver's persistent Krylov work arrays here.  Besides
             ! avoiding two full-size allocations, these arrays are the exact
             ! allocation class exercised by the production NCCL halo path.
