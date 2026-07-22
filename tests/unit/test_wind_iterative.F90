@@ -112,7 +112,6 @@ contains
         multilevel_test = env_status == 0 .and. env_length > 0 .and. &
                           trim(adjustl(multilevel_env)) /= '0'
         multilevel_ready_ok = .true.
-        if (multilevel_test) STD_OUT_PE = .True.
 
         ims = domain%ims; ime = domain%ime; jms = domain%jms; jme = domain%jme
         kms = domain%kms; kme = domain%kme

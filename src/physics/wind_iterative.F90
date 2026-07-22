@@ -2157,11 +2157,12 @@ contains
         real(c_double), allocatable :: test_x(:,:,:), direct_ax(:,:,:)
         real(c_double) :: local_error, global_error, local_reference, global_reference
         real(c_double) :: relative_error, minimum_pivot
-        integer :: i, j, k, gi, gj, gk, ierr, line_status
+        integer :: i, j, k, gi, gj, gk, ierr, line_status, rap_apply_count
         integer :: west, east, south, north
 
         call release_multilevel_preconditioner()
         multilevel_setup_attempted = .true.
+        rap_apply_count = 0
         if (.not. multilevel_requested .or. .not. operator_probed) return
         if (solver_rank == 0) then
             write(output_unit,'(A,I0,A,I0,A,I0)') &
@@ -2302,6 +2303,11 @@ contains
             real(c_double), intent(out) :: coarse_ax(:,:,:)
             integer :: ii, jj, kk
 
+            rap_apply_count = rap_apply_count+1
+            if (solver_rank == 0) then
+                write(output_unit,'(A,I0,A)') ' HICAR multilevel R A P probe ', rap_apply_count, '/28 start'
+                flush(output_unit)
+            endif
             ml_coarse_halo_x = 0.0_c_double
             ml_coarse_halo_x(1:ml_transfer%nx_c_local,:,1:ml_transfer%ny_c_local) = coarse
             !$acc update device(ml_coarse_halo_x)
@@ -2346,6 +2352,10 @@ contains
                                                             ml_coarse_weight, ml_coarse_r)
             !$acc update self(ml_coarse_r)
             coarse_ax = ml_coarse_r
+            if (solver_rank == 0) then
+                write(output_unit,'(A,I0,A)') ' HICAR multilevel R A P probe ', rap_apply_count, '/28 done'
+                flush(output_unit)
+            endif
         end subroutine apply_coarse_rap
 
     end subroutine setup_multilevel_preconditioner
