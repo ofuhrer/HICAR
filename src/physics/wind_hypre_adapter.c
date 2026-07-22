@@ -17,7 +17,6 @@
 #include "HYPRE_parcsr_ls.h"
 #include "HYPRE_parcsr_mv.h"
 #include "HYPRE_utilities.h"
-#include "_hypre_parcsr_mv.h"
 
 typedef struct {
   int xs, ys, zs, xm, ym, zm;
@@ -32,9 +31,9 @@ typedef struct {
   HYPRE_BigInt first, last;
   hicar_block_t *blocks;
   unsigned char *zero_rows;
-  HYPRE_Real *line_inv, *line_cprime, *line_lower;
   HYPRE_IJMatrix ij_a;
   HYPRE_ParCSRMatrix a;
+  HYPRE_Solver amg;
   HYPRE_Solver fgmres;
   int solver_ready;
   int valid;
@@ -66,12 +65,10 @@ int hicar_hypre_initialize(void)
 static void clear_state(void)
 {
   if (state.fgmres) HYPRE_ParCSRFlexGMRESDestroy(state.fgmres);
+  if (state.amg) HYPRE_BoomerAMGDestroy(state.amg);
   if (state.ij_a) HYPRE_IJMatrixDestroy(state.ij_a);
   free(state.blocks);
   free(state.zero_rows);
-  free(state.line_inv);
-  free(state.line_cprime);
-  free(state.line_lower);
   memset(&state, 0, sizeof(state));
 }
 
@@ -107,41 +104,6 @@ static size_t coeff_index(int i, int k, int j)
   return ((size_t)(j - state.cj_s) * (size_t)(state.ck_e - state.ck_s + 1) +
           (size_t)(k - state.ck_s)) * (size_t)(state.ci_e - state.ci_s + 1) +
          (size_t)(i - state.ci_s);
-}
-
-/* HYPRE calls this through FGMRES before each preconditioner application.
- * The exact vertical line factorization is HICAR's native preconditioner,
- * retained here instead of replacing it with a global AMG hierarchy.  HICAR's
- * production decompositions keep every vertical column on one rank. */
-static HYPRE_Int hicar_line_setup(HYPRE_Solver solver, HYPRE_ParCSRMatrix A,
-                                  HYPRE_ParVector b, HYPRE_ParVector x)
-{
-  (void)solver; (void)A; (void)b; (void)x;
-  return 0;
-}
-
-static HYPRE_Int hicar_line_solve(HYPRE_Solver solver, HYPRE_ParCSRMatrix A,
-                                  HYPRE_ParVector b, HYPRE_ParVector x)
-{
-  hicar_hypre_t *s = (hicar_hypre_t *)solver;
-  HYPRE_Real *rhs, *sol;
-  int li, lk, lj;
-  (void)A;
-  if (!s || !s->line_inv || !s->line_cprime || !s->line_lower) return -1;
-  rhs = hypre_VectorData(hypre_ParVectorLocalVector(b));
-  sol = hypre_VectorData(hypre_ParVectorLocalVector(x));
-  for (lj = 0; lj < s->ym; ++lj) for (li = 0; li < s->xm; ++li) {
-    HYPRE_BigInt q0 = ((HYPRE_BigInt)lj * s->zm) * s->xm + li;
-    for (lk = 0; lk < s->zm; ++lk) {
-      HYPRE_BigInt q = q0 + (HYPRE_BigInt)lk * s->xm;
-      sol[q] = (rhs[q] - (lk ? s->line_lower[q] * sol[q - s->xm] : 0.0)) * s->line_inv[q];
-    }
-    for (lk = s->zm - 2; lk >= 0; --lk) {
-      HYPRE_BigInt q = q0 + (HYPRE_BigInt)lk * s->xm;
-      sol[q] -= s->line_cprime[q] * sol[q + s->xm];
-    }
-  }
-  return 0;
 }
 
 int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, int zm,
@@ -260,34 +222,21 @@ int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, i
   if (!ierr) { fprintf(stderr, "HICAR HYPRE rank %d: matrix assembled\n", state.rank); fflush(stderr); }
   if (!ierr) ierr |= HYPRE_IJMatrixGetObject(state.ij_a, (void **)&state.a);
   if (!ierr) { fprintf(stderr, "HICAR HYPRE rank %d: matrix retained on host\n", state.rank); fflush(stderr); }
-  /* Factor the vertical tridiagonal block exactly.  This is the same line
-   * preconditioner used by the native solver, but FGMRES handles the
-   * nonnormal horizontal coupling without BiCGStab's breakdown behaviour. */
-  if (!ierr && (state.zs != 0 || state.zm != state.mz)) ierr = -7;
-  if (!ierr) {
-    state.line_inv = malloc((size_t)nlocal * sizeof(*state.line_inv));
-    state.line_cprime = calloc((size_t)nlocal, sizeof(*state.line_cprime));
-    state.line_lower = calloc((size_t)nlocal, sizeof(*state.line_lower));
-    if (!state.line_inv || !state.line_cprime || !state.line_lower) ierr = -6;
-  }
-  if (!ierr) for (lj = 0; lj < ym; ++lj) for (li = 0; li < xm; ++li) {
-    HYPRE_BigInt q0 = ((HYPRE_BigInt)lj * zm) * xm + li;
-    for (lk = 0; lk < zm; ++lk) {
-      int i = xs + li, k = zs + lk, j = ys + lj;
-      HYPRE_BigInt qline = q0 + (HYPRE_BigInt)lk * xm;
-      double diag, lower, upper, pivot;
-      if (hicar_row_is_identity(i, k, j)) { state.line_inv[qline] = 1.0; continue; }
-      diag = a[coeff_index(i, k, j)];
-      lower = c[coeff_index(i, k, j)];
-      upper = b[coeff_index(i, k, j)];
-      pivot = diag - lower * (lk ? state.line_cprime[qline - xm] : 0.0);
-      if (fabs(pivot) < 1.0e-30) { ierr = -8; break; }
-      state.line_lower[qline] = lower;
-      state.line_inv[qline] = 1.0 / pivot;
-      state.line_cprime[qline] = upper * state.line_inv[qline];
-    }
-    if (ierr) break;
-  }
+  if (!ierr) ierr |= HYPRE_BoomerAMGCreate(&state.amg);
+  /* The terrain-following projection operator is generally nonsymmetric.
+   * Use AMG for one flexible preconditioning cycle, and let FGMRES own the
+   * outer convergence test rather than applying AMG as a stationary solver. */
+  if (!ierr) ierr |= HYPRE_BoomerAMGSetTol(state.amg, 0.0);
+  if (!ierr) ierr |= HYPRE_BoomerAMGSetMaxIter(state.amg, 1);
+  if (!ierr) ierr |= HYPRE_BoomerAMGSetPrintLevel(state.amg, 0);
+  /* The default Falgout hierarchy is prohibitively expensive on the 3.75 M
+   * cell Swiss operator.  HMIS plus extended+i interpolation is HYPRE's
+   * scalable nonsymmetric-3D policy; bound interpolation density to keep
+   * coarse operators and setup memory controlled. */
+  if (!ierr) ierr |= HYPRE_BoomerAMGSetCoarsenType(state.amg, 10);
+  if (!ierr) ierr |= HYPRE_BoomerAMGSetInterpType(state.amg, 6);
+  if (!ierr) ierr |= HYPRE_BoomerAMGSetPMaxElmts(state.amg, 4);
+  if (!ierr) ierr |= HYPRE_BoomerAMGSetStrongThreshold(state.amg, 0.25);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESCreate(state.comm, &state.fgmres);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetKDim(state.fgmres, 50);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetTol(state.fgmres, 1.0e-5);
@@ -298,9 +247,11 @@ int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, i
   if (fgmres_print_level > 2) fgmres_print_level = 2;
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetLogging(state.fgmres, fgmres_print_level ? 1 : 0);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetPrintLevel(state.fgmres, fgmres_print_level);
-  /* Apply the exact vertical line solve as a flexible FGMRES preconditioner. */
+  /* The calibrated matrix has now been assembled with its true local
+   * coefficient bounds.  Use one BoomerAMG cycle as a flexible FGMRES
+   * preconditioner; FGMRES retains responsibility for convergence. */
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetPrecond(state.fgmres,
-      hicar_line_solve, hicar_line_setup, &state);
+      HYPRE_BoomerAMGSolve, HYPRE_BoomerAMGSetup, state.amg);
   free(ncols); free(rows); free(cols); free(vals);
   if (ierr) { clear_state(); return ierr; }
   state.valid=1;
@@ -363,7 +314,7 @@ int hicar_hypre_solve(const double *rhs, double *x, int max_iter, double tol, in
     HICAR_HYPRE_STEP(17, HYPRE_ParCSRFlexGMRESSetup(state.fgmres,state.a,b,sol));
     state.solver_ready = 1;
     if (state.rank == 0) {
-      fprintf(stderr, "HICAR HYPRE: FGMRES/vertical-line setup complete in %.3f s\n", MPI_Wtime() - setup_start);
+      fprintf(stderr, "HICAR HYPRE: FGMRES/AMG setup complete in %.3f s\n", MPI_Wtime() - setup_start);
       fflush(stderr);
     }
   }
