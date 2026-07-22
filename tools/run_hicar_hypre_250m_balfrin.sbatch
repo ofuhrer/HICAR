@@ -48,6 +48,6 @@ for asset in NoahmpTable.TBL rrtmgp_support mp_support; do cp -a "$root/run/$ass
 cd "$run"
 srun --distribution=block:block --cpu-bind=none "$wrapper" "$exe" "$run/input.nml" \
   | tee "$run/model.out"
-grep -q 'HICAR HYPRE FGMRES+vertical-line:' "$run/model.out"
+grep -q 'HICAR HYPRE FGMRES+AMG:' "$run/model.out"
 grep -q 'Timing across all compute images:' "$run/model.out"
 test -n "$(find "$run/output" -name '*.nc' -print -quit)"
