@@ -35,6 +35,7 @@ typedef struct {
   HYPRE_ParCSRMatrix a;
   HYPRE_Solver amg;
   HYPRE_Solver fgmres;
+  int solver_ready;
   int valid;
 } hicar_hypre_t;
 
@@ -227,6 +228,14 @@ int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, i
   if (!ierr) ierr |= HYPRE_BoomerAMGSetTol(state.amg, 0.0);
   if (!ierr) ierr |= HYPRE_BoomerAMGSetMaxIter(state.amg, 1);
   if (!ierr) ierr |= HYPRE_BoomerAMGSetPrintLevel(state.amg, 0);
+  /* The default Falgout hierarchy is prohibitively expensive on the 3.75 M
+   * cell Swiss operator.  HMIS plus extended+i interpolation is HYPRE's
+   * scalable nonsymmetric-3D policy; bound interpolation density to keep
+   * coarse operators and setup memory controlled. */
+  if (!ierr) ierr |= HYPRE_BoomerAMGSetCoarsenType(state.amg, 10);
+  if (!ierr) ierr |= HYPRE_BoomerAMGSetInterpType(state.amg, 6);
+  if (!ierr) ierr |= HYPRE_BoomerAMGSetPMaxElmts(state.amg, 4);
+  if (!ierr) ierr |= HYPRE_BoomerAMGSetStrongThreshold(state.amg, 0.25);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESCreate(state.comm, &state.fgmres);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetKDim(state.fgmres, 50);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetTol(state.fgmres, 1.0e-5);
@@ -252,6 +261,7 @@ int hicar_hypre_solve(const double *rhs, double *x, int max_iter, double tol, in
   HYPRE_BigInt *ids=NULL;
   HYPRE_Real *bvals=NULL, *xvals=NULL;
   int ierr=0, stage=0, local_gauge_rhs=0, global_gauge_rhs=0;
+  double setup_start;
   if (!state.valid) return -10;
   HYPRE_ClearAllErrors();
   ids=malloc((size_t)nlocal*sizeof(*ids)); bvals=malloc((size_t)nlocal*sizeof(*bvals)); xvals=malloc((size_t)nlocal*sizeof(*xvals));
@@ -292,8 +302,16 @@ int hicar_hypre_solve(const double *rhs, double *x, int max_iter, double tol, in
     stage = 16;
     goto done;
   }
-  fprintf(stderr, "HICAR HYPRE rank %d: entering FGMRES setup\n", state.rank); fflush(stderr);
-  HICAR_HYPRE_STEP(17, HYPRE_ParCSRFlexGMRESSetup(state.fgmres,state.a,b,sol));
+  if (!state.solver_ready) {
+    fprintf(stderr, "HICAR HYPRE rank %d: entering FGMRES setup\n", state.rank); fflush(stderr);
+    setup_start = MPI_Wtime();
+    HICAR_HYPRE_STEP(17, HYPRE_ParCSRFlexGMRESSetup(state.fgmres,state.a,b,sol));
+    state.solver_ready = 1;
+    if (state.rank == 0) {
+      fprintf(stderr, "HICAR HYPRE: FGMRES/AMG setup complete in %.3f s\n", MPI_Wtime() - setup_start);
+      fflush(stderr);
+    }
+  }
   stage=18;
   ierr=HYPRE_ParCSRFlexGMRESSolve(state.fgmres,state.a,b,sol);
   /* A non-converged Krylov solve still has actionable iteration and residual
