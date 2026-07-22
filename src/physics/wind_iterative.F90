@@ -2157,7 +2157,7 @@ contains
         real(c_double), allocatable :: test_x(:,:,:), direct_ax(:,:,:)
         real(c_double) :: local_error, global_error, local_reference, global_reference
         real(c_double) :: relative_error, minimum_pivot
-        integer :: i, j, k, gi, gj, gk, ierr, line_status, rap_apply_count
+        integer :: i, j, k, gi, gj, gk, ierr, line_status, rap_apply_count, print_rank, nprocs
         integer :: west, east, south, north
 
         call release_multilevel_preconditioner()
@@ -2179,6 +2179,19 @@ contains
         call ml_fine_halo%init(xm, ym, mz, solver_comm, west, east, south, north)
         call ml_coarse_halo%init(ml_transfer%nx_c_local, ml_transfer%ny_c_local, mz, &
                                  solver_comm, west, east, south, north)
+        call MPI_Comm_size(solver_comm, nprocs, ierr)
+        do print_rank = 0, nprocs-1
+            call MPI_Barrier(solver_comm, ierr)
+            if (solver_rank == print_rank) then
+                write(output_unit,'(A,I0,A,4(I0,1X),A,4(I0,1X),A,4(I0,1X))') &
+                    ' HICAR multilevel rank ', solver_rank, ' fine[x0 nx y0 ny]=', xs, xm, ys, ym, &
+                    ' coarse[x0 nx y0 ny]=', ml_transfer%x_c_first, ml_transfer%nx_c_local, &
+                    ml_transfer%y_c_first, ml_transfer%ny_c_local, &
+                    ' neighbors[W E S N]=', west, east, south, north
+                flush(output_unit)
+            endif
+        enddo
+        call MPI_Barrier(solver_comm, ierr)
 
         allocate(ml_fine_owned(xm,mz,ym), &
                  ml_fine_residual(0:xm+1,mz,0:ym+1), &
@@ -2311,7 +2324,15 @@ contains
             ml_coarse_halo_x = 0.0_c_double
             ml_coarse_halo_x(1:ml_transfer%nx_c_local,:,1:ml_transfer%ny_c_local) = coarse
             !$acc update device(ml_coarse_halo_x)
+            if (solver_rank == 0) then
+                write(output_unit,'(A)') ' HICAR multilevel probe stage: coarse halo'
+                flush(output_unit)
+            endif
             call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
+            if (solver_rank == 0) then
+                write(output_unit,'(A)') ' HICAR multilevel probe stage: prolongation'
+                flush(output_unit)
+            endif
             call ml_transfer%prolong_owned_device(ml_coarse_halo_x, ml_fine_owned)
             !$acc parallel loop gang vector collapse(3) present(ml_solver_x)
             do jj = j_s-1, j_e+1
@@ -2329,7 +2350,15 @@ contains
                     enddo
                 enddo
             enddo
+            if (solver_rank == 0) then
+                write(output_unit,'(A)') ' HICAR multilevel probe stage: fine solver halo'
+                flush(output_unit)
+            endif
             call exchange_multilevel_solver_halos(ml_solver_x)
+            if (solver_rank == 0) then
+                write(output_unit,'(A)') ' HICAR multilevel probe stage: fine operator'
+                flush(output_unit)
+            endif
             call spmv(ml_solver_x, ml_solver_ax)
             !$acc parallel loop gang vector collapse(3) present(ml_fine_residual)
             do jj = 0, ym+1
@@ -2347,7 +2376,15 @@ contains
                     enddo
                 enddo
             enddo
+            if (solver_rank == 0) then
+                write(output_unit,'(A)') ' HICAR multilevel probe stage: fine response halo'
+                flush(output_unit)
+            endif
             call ml_fine_halo%exchange_device(ml_fine_residual)
+            if (solver_rank == 0) then
+                write(output_unit,'(A)') ' HICAR multilevel probe stage: restriction'
+                flush(output_unit)
+            endif
             call ml_transfer%restrict_owned_adjoint_device(ml_fine_residual, ml_fine_weight, &
                                                             ml_coarse_weight, ml_coarse_r)
             !$acc update self(ml_coarse_r)
