@@ -300,7 +300,7 @@ int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, i
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetPrintLevel(state.fgmres, fgmres_print_level);
   /* Apply the exact vertical line solve as a flexible FGMRES preconditioner. */
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetPrecond(state.fgmres,
-      hicar_line_solve, hicar_line_setup, &state);
+      hicar_line_solve, hicar_line_setup, (HYPRE_Solver)(void *)&state);
   free(ncols); free(rows); free(cols); free(vals);
   if (ierr) { clear_state(); return ierr; }
   state.valid=1;

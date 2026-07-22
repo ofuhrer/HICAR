@@ -512,18 +512,18 @@ contains
             if (status == 0) then
                 call verify_true_residual(domain, res_final, max_x_global)
                 if (STD_OUT_PE) then
-                    write(*,'(A,I0,A,ES12.4,A,ES12.4)') ' HICAR HYPRE FGMRES+AMG: iterations=', n_iters, &
+                    write(*,'(A,I0,A,ES12.4,A,ES12.4)') ' HICAR HYPRE FGMRES+vertical-line: iterations=', n_iters, &
                         ' true_residual=', res_final, ' target=', target_norm
                     flush(output_unit)
                 endif
                 if (res_final > target_norm) then
                     if (STD_OUT_PE) write(*,'(A,ES12.4,A,ES12.4,A,ES12.4)') &
-                        ' HICAR HYPRE FGMRES+AMG rejected by true residual: ', res_final, ' target=', target_norm, &
+                        ' HICAR HYPRE FGMRES+vertical-line rejected by true residual: ', res_final, ' target=', target_norm, &
                         ' max |x|=', max_x_global
                     status = 3
                 endif
             else if (STD_OUT_PE) then
-                write(*,'(A,I0,A,I0)') ' HICAR HYPRE FGMRES+AMG failed: status=', status, &
+                write(*,'(A,I0,A,I0)') ' HICAR HYPRE FGMRES+vertical-line failed: status=', status, &
                     ' iterations=', n_iters
                 flush(output_unit)
             endif
