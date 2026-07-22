@@ -48,6 +48,7 @@ contains
 
         testsuite = [ &
             new_unittest("multilevel_transfer", test_multilevel_transfer), &
+            new_unittest("multilevel_device", test_multilevel_device), &
             new_unittest("multilevel_halo", test_multilevel_halo), &
             new_unittest("iter_wind_solve_decomp", test_iter_wind_solve) &
             ]
@@ -550,6 +551,143 @@ contains
     end subroutine test_multilevel_transfer
 
 
+    subroutine test_multilevel_device(error)
+        type(error_type), allocatable, intent(out) :: error
+#ifdef _OPENACC
+        integer, parameter :: nx = 8, ny = 7, nz = 5
+        type(horizontal_tile_transfer_t) :: transfer
+        type(galerkin_tile_stencil_t) :: stencil
+        type(vertical_line_factor_t) :: line_factor
+        real(c_double), allocatable :: coarse_halo(:,:,:), fine(:,:,:), fine_reference(:,:,:)
+        real(c_double), allocatable :: fine_halo(:,:,:), fine_weight(:,:,:)
+        real(c_double), allocatable :: coarse_weight(:,:,:), coarse_weight_reference(:,:,:)
+        real(c_double), allocatable :: coarse_r(:,:,:), coarse_r_reference(:,:,:)
+        real(c_double), allocatable :: stencil_x(:,:,:), stencil_ax(:,:,:), stencil_reference(:,:,:)
+        real(c_double), allocatable :: line_rhs(:,:,:), line_x(:,:,:), line_reference(:,:,:)
+        real(c_double) :: scale, minimum_pivot
+        integer :: i, j, k, line_status
+
+        call transfer%init(nx, ny, 0, nx, 0, ny, &
+                           fix_lateral_boundaries=.true., fix_vertical_boundaries=.true.)
+        allocate(coarse_halo(0:transfer%nx_c_local+1,nz,0:transfer%ny_c_local+1), &
+                 fine(nx,nz,ny), fine_reference(nx,nz,ny), &
+                 fine_halo(0:nx+1,nz,0:ny+1), fine_weight(0:nx+1,nz,0:ny+1), &
+                 coarse_weight(transfer%nx_c_local,nz,transfer%ny_c_local), &
+                 coarse_weight_reference(transfer%nx_c_local,nz,transfer%ny_c_local), &
+                 coarse_r(transfer%nx_c_local,nz,transfer%ny_c_local), &
+                 coarse_r_reference(transfer%nx_c_local,nz,transfer%ny_c_local))
+        do j = 0, transfer%ny_c_local+1
+            do k = 1, nz
+                do i = 0, transfer%nx_c_local+1
+                    coarse_halo(i,k,j) = sin(0.11_c_double*real(3*i+2*k+j,c_double))
+                enddo
+            enddo
+        enddo
+        do j = 0, ny+1
+            do k = 1, nz
+                do i = 0, nx+1
+                    fine_halo(i,k,j) = cos(0.09_c_double*real(i+3*k+2*j,c_double))
+                    fine_weight(i,k,j) = 1.0_c_double + 0.01_c_double*real(i+k+j,c_double)
+                enddo
+            enddo
+        enddo
+        call transfer%prolong_owned(coarse_halo, fine_reference)
+        call transfer%build_owned_coarse_weights(fine_weight, coarse_weight_reference)
+        call transfer%restrict_owned_adjoint(fine_halo, fine_weight, coarse_weight_reference, coarse_r_reference)
+
+        call transfer%upload_device()
+        !$acc enter data copyin(coarse_halo, fine_halo, fine_weight) &
+        !$acc            create(fine, coarse_weight, coarse_r)
+        call transfer%prolong_owned_device(coarse_halo, fine)
+        call transfer%build_owned_coarse_weights_device(fine_weight, coarse_weight)
+        call transfer%restrict_owned_adjoint_device(fine_halo, fine_weight, coarse_weight, coarse_r)
+        !$acc update self(fine, coarse_weight, coarse_r)
+        !$acc exit data delete(coarse_halo, fine_halo, fine_weight, fine, coarse_weight, coarse_r)
+        scale = max(1.0_c_double, maxval(abs(fine_reference)), maxval(abs(coarse_r_reference)))
+        if (maxval(abs(fine-fine_reference)) > 5.0e-13_c_double*scale .or. &
+            maxval(abs(coarse_weight-coarse_weight_reference)) > 5.0e-13_c_double*scale .or. &
+            maxval(abs(coarse_r-coarse_r_reference)) > 5.0e-13_c_double*scale) then
+            call test_failed(error, 'test_multilevel_device', 'device transfer differs from host reference')
+            call transfer%release()
+            return
+        endif
+
+        stencil%nx_global = transfer%nx_c_global
+        stencil%ny_global = transfer%ny_c_global
+        stencil%x_first = 0
+        stencil%y_first = 0
+        stencil%nx = transfer%nx_c_local
+        stencil%ny = transfer%ny_c_local
+        stencil%nz = nz
+        stencil%fix_lateral_boundaries = .true.
+        stencil%fix_vertical_boundaries = .true.
+        allocate(stencil%value(-1:1,-1:1,-1:1,stencil%nx,nz,stencil%ny), &
+                 stencil_x(0:stencil%nx+1,nz,0:stencil%ny+1), &
+                 stencil_ax(stencil%nx,nz,stencil%ny), stencil_reference(stencil%nx,nz,stencil%ny), &
+                 line_rhs(stencil%nx,nz,stencil%ny), line_x(stencil%nx,nz,stencil%ny), &
+                 line_reference(stencil%nx,nz,stencil%ny))
+        stencil%value = 0.0_c_double
+        stencil%value(0,0,0,:,:,:) = 4.0_c_double
+        stencil%value(0,-1,0,:,:,:) = -0.45_c_double
+        stencil%value(0,1,0,:,:,:) = -0.35_c_double
+        stencil%value(-1,0,0,:,:,:) = -0.20_c_double
+        stencil%value(1,0,0,:,:,:) = -0.10_c_double
+        stencil%value(0,0,-1,:,:,:) = -0.15_c_double
+        stencil%value(0,0,1,:,:,:) = -0.05_c_double
+        do j = 1, stencil%ny
+            do k = 1, nz
+                do i = 1, stencil%nx
+                    if (i == 1 .or. i == stencil%nx .or. j == 1 .or. j == stencil%ny .or. &
+                        k == 1 .or. k == nz) then
+                        stencil%value(:,:,:,i,k,j) = 0.0_c_double
+                        stencil%value(0,0,0,i,k,j) = 1.0_c_double
+                    endif
+                enddo
+            enddo
+        enddo
+        do j = 0, stencil%ny+1
+            do k = 1, nz
+                do i = 0, stencil%nx+1
+                    stencil_x(i,k,j) = sin(0.07_c_double*real(2*i+5*k+3*j,c_double))
+                enddo
+            enddo
+        enddo
+        call stencil%apply_owned(stencil_x, stencil_reference)
+        call line_factor%factorize(stencil, line_status, minimum_pivot)
+        if (line_status /= 0 .or. minimum_pivot <= 0.0_c_double) then
+            call test_failed(error, 'test_multilevel_device', 'device-test line factorization failed')
+            call stencil%release()
+            call transfer%release()
+            return
+        endif
+        do j = 1, stencil%ny
+            do k = 1, nz
+                do i = 1, stencil%nx
+                    line_rhs(i,k,j) = cos(0.13_c_double*real(i+2*k+4*j,c_double))
+                enddo
+            enddo
+        enddo
+        call line_factor%apply(line_rhs, line_reference)
+
+        call stencil%upload_device()
+        call line_factor%upload_device()
+        !$acc enter data copyin(stencil_x, line_rhs) create(stencil_ax, line_x)
+        call stencil%apply_owned_device(stencil_x, stencil_ax)
+        call line_factor%apply_device(line_rhs, line_x)
+        !$acc update self(stencil_ax, line_x)
+        !$acc exit data delete(stencil_x, line_rhs, stencil_ax, line_x)
+        scale = max(1.0_c_double, maxval(abs(stencil_reference)), maxval(abs(line_reference)))
+        if (maxval(abs(stencil_ax-stencil_reference)) > 5.0e-13_c_double*scale .or. &
+            maxval(abs(line_x-line_reference)) > 5.0e-13_c_double*scale) then
+            call test_failed(error, 'test_multilevel_device', 'device coarse kernel differs from host reference')
+        endif
+        call line_factor%release()
+        call stencil%release()
+        call transfer%release()
+#endif
+    end subroutine test_multilevel_device
+
+
     subroutine test_multilevel_halo(error)
         type(error_type), allocatable, intent(out) :: error
         integer, parameter :: nx_global = 8, ny_global = 8, nz = 3
@@ -603,6 +741,42 @@ contains
                 enddo
             enddo
         enddo
+#ifdef _OPENACC
+        field = 0.0_c_double
+        do j = 1, ny_local
+            gj = ry*ny_local+j-1
+            do k = 1, nz
+                do i = 1, nx_local
+                    gi = rx*nx_local+i-1
+                    field(i,k,j) = real(1000*k+100*gj+gi,c_double)
+                enddo
+            enddo
+        enddo
+        call halo%upload_device()
+        !$acc enter data copyin(field)
+        call halo%exchange_device(field)
+        !$acc update self(field)
+        !$acc exit data delete(field)
+        do j = 0, ny_local+1
+            do k = 1, nz
+                do i = 0, nx_local+1
+                    if (i >= 1 .and. i <= nx_local .and. j >= 1 .and. j <= ny_local) cycle
+                    gi = rx*nx_local+i-1
+                    gj = ry*ny_local+j-1
+                    if (gi < 0 .or. gi >= nx_global .or. gj < 0 .or. gj >= ny_global) then
+                        expected = 0.0_c_double
+                    else
+                        expected = real(1000*k+100*gj+gi,c_double)
+                    endif
+                    if (field(i,k,j) /= expected) then
+                        call test_failed(error, 'test_multilevel_halo', 'device halo or corner value is incorrect')
+                        call halo%release()
+                        return
+                    endif
+                enddo
+            enddo
+        enddo
+#endif
         call halo%release()
     end subroutine test_multilevel_halo
 
