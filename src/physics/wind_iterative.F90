@@ -112,6 +112,13 @@ module wind_iterative
     ! Do not increase this value further; it remains here only while the audit
     ! identifies the bounded recycled subspace that will replace it.
     integer, parameter :: FGMRES_RESTART = 100
+    ! Coarse global sketch used only by the opt-in Arnoldi audit.  Signed
+    ! basis sums on this fixed grid let the offline analyzer reconstruct the
+    ! spatial envelope of harmonic Ritz vectors without exporting full 3-D
+    ! Krylov fields.
+    integer, parameter :: AUDIT_X_BINS = 16
+    integer, parameter :: AUDIT_Y_BINS = 12
+    integer, parameter :: AUDIT_Z_BINS = 8
 
     ! 15-point stencil coefficients (same names as AMGX module)
     real, allocatable, dimension(:,:,:) :: A_coef, B_coef, C_coef, D_coef, E_coef, F_coef, G_coef, &
@@ -1974,7 +1981,9 @@ contains
     !! small CSV is written by rank zero only; all vector inner products are
     !! globally reduced first.  H_raw represents the right-preconditioned
     !! operator A M^{-1}, which is the operator whose restart behaviour the
-    !! recycling solver must address.
+    !! recycling solver must address.  Coarse signed spatial sums for each
+    !! basis vector are also exported.  Combining them with a Ritz coefficient
+    !! vector reconstructs that mode's global 16x12x8 mean-field envelope.
     subroutine write_krylov_audit(h_raw, used, v_basis, current_residual)
         implicit none
         real(c_double), intent(in) :: h_raw(FGMRES_RESTART+1,FGMRES_RESTART)
@@ -1985,7 +1994,10 @@ contains
             intent(in) :: current_residual
         real(c_double) :: bootstrap_local(FGMRES_RESTART), bootstrap_global(FGMRES_RESTART)
         real(c_double) :: current_local(FGMRES_RESTART), current_global(FGMRES_RESTART)
-        integer :: i, j, ierr, audit_unit, io_status
+        real(c_double), allocatable :: spatial_local(:,:), spatial_global(:,:)
+        real(c_double), allocatable :: cell_count_local(:), cell_count_global(:)
+        integer :: i, j, k, basis, bin_index, bx, by, bz, n_spatial_bins
+        integer :: ierr, audit_unit, io_status
 
         bootstrap_local = 0.0_c_double
         bootstrap_global = 0.0_c_double
@@ -2000,6 +2012,47 @@ contains
         call MPI_Allreduce(bootstrap_local, bootstrap_global, used, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
         call MPI_Allreduce(current_local, current_global, used, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
 
+        n_spatial_bins = AUDIT_X_BINS * AUDIT_Y_BINS * AUDIT_Z_BINS
+        allocate(spatial_local(used,n_spatial_bins), spatial_global(used,n_spatial_bins))
+        allocate(cell_count_local(n_spatial_bins), cell_count_global(n_spatial_bins))
+        spatial_local = 0.0_c_double
+        spatial_global = 0.0_c_double
+        cell_count_local = 0.0_c_double
+        cell_count_global = 0.0_c_double
+
+        ! Arnoldi vectors are device-resident during the solve.  This one-time
+        ! audit transfer is bounded by the existing restart allocation and
+        ! happens only after the first cycle has completed.
+        !$acc update host(v_basis)
+        do j = max(ys,1), min(ys+ym-1,my-2)
+            by = min(AUDIT_Y_BINS-1, (j*AUDIT_Y_BINS)/max(my,1))
+            do k = 1, mz-2
+                bz = min(AUDIT_Z_BINS-1, (k*AUDIT_Z_BINS)/max(mz,1))
+                do i = max(xs,1), min(xs+xm-1,mx-2)
+                    bx = min(AUDIT_X_BINS-1, (i*AUDIT_X_BINS)/max(mx,1))
+                    bin_index = 1 + bx + AUDIT_X_BINS*(by + AUDIT_Y_BINS*bz)
+                    cell_count_local(bin_index) = cell_count_local(bin_index) + 1.0_c_double
+                enddo
+            enddo
+        enddo
+        do basis = 1, used
+            do j = max(ys,1), min(ys+ym-1,my-2)
+                by = min(AUDIT_Y_BINS-1, (j*AUDIT_Y_BINS)/max(my,1))
+                do k = 1, mz-2
+                    bz = min(AUDIT_Z_BINS-1, (k*AUDIT_Z_BINS)/max(mz,1))
+                    do i = max(xs,1), min(xs+xm-1,mx-2)
+                        bx = min(AUDIT_X_BINS-1, (i*AUDIT_X_BINS)/max(mx,1))
+                        bin_index = 1 + bx + AUDIT_X_BINS*(by + AUDIT_Y_BINS*bz)
+                        spatial_local(basis,bin_index) = spatial_local(basis,bin_index) + v_basis(i,k,j,basis)
+                    enddo
+                enddo
+            enddo
+        enddo
+        call MPI_Allreduce(cell_count_local, cell_count_global, n_spatial_bins, &
+                           MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(spatial_local, spatial_global, used*n_spatial_bins, &
+                           MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+
         if (solver_rank == 0) then
             open(newunit=audit_unit, file=trim(operator_audit_file), status='replace', &
                  action='write', iostat=io_status)
@@ -2007,12 +2060,16 @@ contains
                 write(output_unit,'(A,A,A,I0)') ' HICAR wind audit could not open ', &
                     trim(operator_audit_file), ' iostat=', io_status
                 flush(output_unit)
+                deallocate(spatial_local, spatial_global, cell_count_local, cell_count_global)
                 return
             endif
             write(audit_unit,'(A)') 'record,name,index_i,index_j,value'
             write(audit_unit,'(A,I0)') 'metadata,arnoldi_dimension,,,', used
             write(audit_unit,'(A,I0)') 'metadata,restart,,,', FGMRES_RESTART
             write(audit_unit,'(A,I0)') 'metadata,bootstrap_rhs_saved,,,', merge(1,0,bootstrap_rhs_saved)
+            write(audit_unit,'(A,I0)') 'metadata,spatial_x_bins,,,', AUDIT_X_BINS
+            write(audit_unit,'(A,I0)') 'metadata,spatial_y_bins,,,', AUDIT_Y_BINS
+            write(audit_unit,'(A,I0)') 'metadata,spatial_z_bins,,,', AUDIT_Z_BINS
             do j = 1, used
                 do i = 1, j+1
                     write(audit_unit,'(A,I0,A,I0,A,ES24.16)') 'hessenberg,H,', i, ',', j, ',', h_raw(i,j)
@@ -2022,11 +2079,22 @@ contains
                 write(audit_unit,'(A,I0,A,ES24.16)') 'projection,bootstrap,', i, ',,', bootstrap_global(i)
                 write(audit_unit,'(A,I0,A,ES24.16)') 'projection,current,', i, ',,', current_global(i)
             enddo
+            do bin_index = 1, n_spatial_bins
+                write(audit_unit,'(A,I0,A,ES24.16)') 'spatial,cell_count,0,', bin_index, ',', &
+                    cell_count_global(bin_index)
+            enddo
+            do basis = 1, used
+                do bin_index = 1, n_spatial_bins
+                    write(audit_unit,'(A,I0,A,I0,A,ES24.16)') 'spatial,basis_sum,', basis, ',', &
+                        bin_index, ',', spatial_global(basis,bin_index)
+                enddo
+            enddo
             close(audit_unit)
             write(output_unit,'(A,A,A,I0)') ' HICAR wind Krylov audit written to ', &
                 trim(operator_audit_file), ' with Arnoldi dimension ', used
             flush(output_unit)
         endif
+        deallocate(spatial_local, spatial_global, cell_count_local, cell_count_global)
     end subroutine write_krylov_audit
 
 
