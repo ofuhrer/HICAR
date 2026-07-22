@@ -1724,7 +1724,10 @@ contains
         real(c_double) :: rayleigh_min(N_WEIGHTS), rayleigh_max(N_WEIGHTS)
         real(c_double) :: rhs_defect(N_WEIGHTS), rhs_rayleigh_bootstrap(N_WEIGHTS)
         real(c_double) :: rhs_rayleigh_current(N_WEIGHTS), rhs_cosine(N_WEIGHTS)
-        real(c_double) :: local_constant(4), global_constant(4)
+        real(c_double) :: local_constant_response, global_constant_response
+        real(c_double) :: local_constant_diagonal, global_constant_diagonal
+        real(c_double) :: local_constant_count, global_constant_count
+        real(c_double) :: local_boundary_error, global_boundary_error
         logical :: is_boundary
 
         symmetry_defect = 0.0_c_double
@@ -1771,28 +1774,32 @@ contains
         enddo
         call exchange_krylov_halos(p_vec, domain)
         call spmv(p_vec, p_hat)
-        local_constant = 0.0_c_double
+        local_constant_response = 0.0_c_double
+        local_constant_diagonal = 0.0_c_double
+        local_constant_count = 0.0_c_double
+        local_boundary_error = 0.0_c_double
         !$acc parallel loop gang vector collapse(3) &
-        !$acc reduction(+:local_constant(1),local_constant(2),local_constant(3)) &
-        !$acc reduction(max:local_constant(4)) present(p_hat, A_coef) private(is_boundary)
+        !$acc reduction(+:local_constant_response,local_constant_diagonal,local_constant_count) &
+        !$acc reduction(max:local_boundary_error) present(p_hat, A_coef) private(is_boundary)
         do j = ys, ys + ym - 1
             do k = zs, zs + zm - 1
                 do i = xs, xs + xm - 1
                     is_boundary = i <= 0 .or. i >= mx-1 .or. j <= 0 .or. j >= my-1 .or. &
                                   k <= 0 .or. k >= mz-1
                     if (is_boundary) then
-                        local_constant(4) = max(local_constant(4), abs(p_hat(i,k,j)-1.0_c_double))
+                        local_boundary_error = max(local_boundary_error, abs(p_hat(i,k,j)-1.0_c_double))
                     else
-                        local_constant(1) = local_constant(1) + p_hat(i,k,j)*p_hat(i,k,j)
-                        local_constant(2) = local_constant(2) + &
-                                            real(A_coef(i,k,j),c_double)**2
-                        local_constant(3) = local_constant(3) + 1.0_c_double
+                        local_constant_response = local_constant_response + p_hat(i,k,j)*p_hat(i,k,j)
+                        local_constant_diagonal = local_constant_diagonal + real(A_coef(i,k,j),c_double)**2
+                        local_constant_count = local_constant_count + 1.0_c_double
                     endif
                 enddo
             enddo
         enddo
-        call MPI_Allreduce(local_constant, global_constant, 3, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
-        call MPI_Allreduce(local_constant(4), global_constant(4), 1, MPI_DOUBLE_PRECISION, MPI_MAX, solver_comm, ierr)
+        call MPI_Allreduce(local_constant_response, global_constant_response, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(local_constant_diagonal, global_constant_diagonal, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(local_constant_count, global_constant_count, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(local_boundary_error, global_boundary_error, 1, MPI_DOUBLE_PRECISION, MPI_MAX, solver_comm, ierr)
 
         if (bootstrap_rhs_saved) then
             call exchange_krylov_halos(r_hat, domain)
@@ -1819,10 +1826,10 @@ contains
             enddo
             write(output_unit,'(A,ES12.4,A,ES12.4,A,ES12.4)') &
                 '   constant_response_relative_diagonal=', &
-                sqrt(global_constant(1)/max(global_constant(2),tiny(1.0_c_double))), &
+                sqrt(global_constant_response/max(global_constant_diagonal,tiny(1.0_c_double))), &
                 ' constant_response_rms=', &
-                sqrt(global_constant(1)/max(global_constant(3),1.0_c_double)), &
-                ' boundary_identity_max_error=', global_constant(4)
+                sqrt(global_constant_response/max(global_constant_count,1.0_c_double)), &
+                ' boundary_identity_max_error=', global_boundary_error
             if (bootstrap_rhs_saved) then
                 do weight_kind = 1, N_WEIGHTS
                     write(output_unit,'(A,A,A,ES12.4,A,ES12.4,A,ES12.4,A,ES12.4)') &
