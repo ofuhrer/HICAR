@@ -27,6 +27,7 @@ module wind_iterative
     use openacc
     use string,        only : str
     use debug_module,  only : domain_check_winds
+    use wind_hypre,    only : wind_hypre_available, wind_hypre_invalidate, wind_hypre_solve, wind_hypre_apply
 #ifdef USE_NCCL
     use nccl_interface, only : nccl_comm_init, nccl_comm_destroy, &
                                nccl_group_start, nccl_group_end, &
@@ -51,6 +52,14 @@ module wind_iterative
     ! rows on the ghost planes (the correction operator no longer reads
     ! ghost lambda under w_to_grid).
     logical :: operator_probed = .false.
+    ! Emit one post-calibration backend-selection report.  This makes a
+    ! fallback before HYPRE is entered visible in the model stdout without
+    ! adding a line for every subsequent wind solve.
+    logical :: hypre_selection_reported = .false.
+    ! An assembled external matrix is immutable after the calibration probe.
+    ! Check its action once per probe, then avoid an extra distributed SpMV
+    ! and a line of stdout for every physical time step.
+    logical :: hypre_operator_verified = .false.
 
 
     real, parameter :: deg2rad = 0.017453293
@@ -303,9 +312,11 @@ contains
         integer :: i, j, k
         real    :: alpha_min, alpha_max
         logical :: varying_alpha
-        integer :: status, n_iters
+        integer :: status, n_iters, apply_status
         integer :: nan_count
-        real(c_double) :: res0, res_final
+        real(c_double) :: res0, res_final, local_norm2, global_norm2, target_norm, max_x_global
+        real(c_double) :: local_apply_stats(2), global_apply_stats(2), operator_error
+        integer :: ierr
 
         ! Copy alpha and div into module-resident arrays on GPU
         !$acc parallel loop gang vector collapse(3) present(alpha, div, alpha_in, div_in)
@@ -445,8 +456,80 @@ contains
 
         !$acc wait
 
-        ! Solve A x = b at the current preconditioner sweep count
-        call bicgstab_solve(domain, wind_solver_max_iters, status, n_iters, res0, res_final)
+        ! The calibrated operator can use HYPRE's algebraic GPU hierarchy when
+        ! the executable was built with HICAR_HYPRE.  The analytic bootstrap
+        ! stays on the established native path; it is only the exact probed
+        ! matrix that is handed to the external backend.
+        if (STD_OUT_PE .and. .not. hypre_selection_reported) then
+            write(*,'(A,L1,A,L1)') ' HICAR wind backend selection: operator_probed=', operator_probed, &
+                ' hypre_available=', wind_hypre_available()
+            flush(output_unit)
+            hypre_selection_reported = .true.
+        endif
+        if (operator_probed .and. wind_hypre_available()) then
+            !$acc update host(rhs, x_sol)
+            call vec_norm2_local(rhs, local_norm2)
+            call MPI_Allreduce(local_norm2, global_norm2, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+            res0 = sqrt(global_norm2)
+            target_norm = max(bicg_tol_abs, bicg_tol_rel * res0)
+            call wind_hypre_solve(solver_comm, xs, ys, zs, xm, ym, zm, mx, my, mz, &
+                                  i_s, i_e, k_s, k_e, j_s, j_e, A_coef, B_coef, C_coef, D_coef, E_coef, &
+                                  F_coef, G_coef, H_coef, I_coef, J_coef, K_coef, L_coef, M_coef, N_coef, O_coef, &
+                                  rhs, x_sol, wind_solver_max_iters, bicg_tol_rel, status, n_iters, res_final)
+            !$acc update device(x_sol)
+            if (status == 0 .and. .not. hypre_operator_verified) then
+                call wind_hypre_apply(xs, ys, zs, xm, ym, zm, i_s, i_e, k_s, k_e, j_s, j_e, x_sol, r_vec, apply_status)
+                if (apply_status == 0) then
+                    call exchange_krylov_halos(x_sol, domain)
+                    call spmv(x_sol, t_vec)
+                    !$acc update host(t_vec)
+                    local_apply_stats = 0.0_c_double
+                    do j = j_s, j_e
+                        do k = k_s, k_e
+                            do i = i_s, i_e
+                                local_apply_stats(1) = local_apply_stats(1) + (t_vec(i,k,j)-r_vec(i,k,j))**2
+                                local_apply_stats(2) = local_apply_stats(2) + t_vec(i,k,j)**2
+                            enddo
+                        enddo
+                    enddo
+                    call MPI_Allreduce(local_apply_stats, global_apply_stats, 2, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+                    operator_error = sqrt(global_apply_stats(1) / max(global_apply_stats(2), tiny(1.0_c_double)))
+                    if (STD_OUT_PE) then
+                        write(*,'(A,ES12.4)') ' HICAR HYPRE/native operator relative L2=', operator_error
+                        flush(output_unit)
+                    endif
+                    if (operator_error <= 1.0e-10_c_double) then
+                        hypre_operator_verified = .true.
+                    else
+                        if (STD_OUT_PE) write(*,'(A,ES12.4)') ' HICAR HYPRE matrix rejected: operator mismatch=', operator_error
+                        status = 4
+                    endif
+                else
+                    if (STD_OUT_PE) write(*,'(A,I0)') ' HICAR HYPRE matrix apply failed: status=', apply_status
+                    status = apply_status
+                endif
+            endif
+            if (status == 0) then
+                call verify_true_residual(domain, res_final, max_x_global)
+                if (STD_OUT_PE) then
+                    write(*,'(A,I0,A,ES12.4,A,ES12.4)') ' HICAR HYPRE FGMRES+AMG: iterations=', n_iters, &
+                        ' true_residual=', res_final, ' target=', target_norm
+                    flush(output_unit)
+                endif
+                if (res_final > target_norm) then
+                    if (STD_OUT_PE) write(*,'(A,ES12.4,A,ES12.4,A,ES12.4)') &
+                        ' HICAR HYPRE FGMRES+AMG rejected by true residual: ', res_final, ' target=', target_norm, &
+                        ' max |x|=', max_x_global
+                    status = 3
+                endif
+            else if (STD_OUT_PE) then
+                write(*,'(A,I0,A,I0)') ' HICAR HYPRE FGMRES+AMG failed: status=', status, &
+                    ' iterations=', n_iters
+                flush(output_unit)
+            endif
+        else
+            call bicgstab_solve(domain, wind_solver_max_iters, status, n_iters, res0, res_final)
+        endif
 
         if (STD_OUT_PE .and. verbose_solver) then
             write(*,*) ' HICAR BiCGStab status=', status, ' iterations=', n_iters, &
@@ -1317,6 +1400,9 @@ contains
         implicit none
         real, intent(in) :: max_leak
         operator_probed = .true.
+        hypre_selection_reported = .false.
+        hypre_operator_verified = .false.
+        call wind_hypre_invalidate()
         !$acc update device(A_coef, B_coef, C_coef, D_coef, E_coef, F_coef, G_coef, &
         !$acc               H_coef, I_coef, J_coef, K_coef, L_coef, M_coef, N_coef, O_coef)
         ! x_sol holds the last probe pattern — useless as a warm-start

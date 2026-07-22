@@ -101,6 +101,8 @@ option(FSM "Link to the FSM2 snow model, requires separate compilation of the FS
 option(SNOWPACK_CPP "Use the C++ SNOWPACK wrapper instead of the native-Fortran port" OFF)
 option(NCCL "Link to the NCCL library, if available" ON)
 option(OPENACC "Enable OpenACC support for GPU acceleration" OFF)
+option(HICAR_HYPRE "Enable the exact wind-operator HYPRE backend" OFF)
+set(HYPRE_DIR "" CACHE PATH "HYPRE CMake package prefix or config directory")
 set(SRUN_FLAGS "" CACHE STRING "srun flags to use for running the test cases")
 
 # SNOWPACK is always compiled into HICAR; SNOWPACK_CPP is the single switch that
@@ -704,6 +706,18 @@ if (OpenACC_Fortran_FOUND AND OPENACC)
 	else()
 		message(STATUS "NCCL not found -- using GPU-aware MPI for halo exchange")
 	endif()
+endif()
+
+# HYPRE is an opt-in managed dependency. Its adapter is a C shim because the
+# public HYPRE ParCSR interface is C; the Fortran solver module is always
+# compiled but only calls that shim when this definition is present.
+if(HICAR_HYPRE)
+	enable_language(C)
+	find_package(HYPRE CONFIG REQUIRED)
+	target_sources(hicar_lib PRIVATE ${PROJECT_SOURCE_DIR}/src/physics/wind_hypre_adapter.c)
+	target_link_libraries(hicar_lib PUBLIC HYPRE::HYPRE)
+	target_compile_definitions(hicar_lib PUBLIC USE_HYPRE)
+	message(STATUS "HICAR exact wind HYPRE backend enabled")
 endif()
 
 # Link rte-rrtmgp libraries
