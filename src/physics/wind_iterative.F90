@@ -189,7 +189,6 @@ module wind_iterative
     type(horizontal_halo_exchange_t) :: ml_fine_halo, ml_coarse_halo
     real(c_double), allocatable :: ml_fine_owned(:,:,:)
     real(c_double), allocatable :: ml_fine_residual(:,:,:), ml_fine_weight(:,:,:)
-    real(c_double), allocatable :: ml_solver_x(:,:,:), ml_solver_ax(:,:,:)
     real(c_double), allocatable :: ml_coarse_halo_x(:,:,:)
     real(c_double), allocatable :: ml_coarse_weight(:,:,:), ml_coarse_b(:,:,:)
     real(c_double), allocatable :: ml_coarse_x(:,:,:), ml_coarse_ax(:,:,:)
@@ -2228,8 +2227,6 @@ contains
         allocate(ml_fine_owned(xm,mz,ym), &
                  ml_fine_residual(0:xm+1,mz,0:ym+1), &
                  ml_fine_weight(0:xm+1,mz,0:ym+1), &
-                 ml_solver_x(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), &
-                 ml_solver_ax(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), &
                  ml_coarse_halo_x(0:ml_transfer%nx_c_local+1,mz,0:ml_transfer%ny_c_local+1), &
                  ml_coarse_weight(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local), &
                  ml_coarse_b(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local), &
@@ -2257,8 +2254,6 @@ contains
             enddo
         enddo
         call ml_fine_halo%exchange(ml_fine_weight)
-        ml_solver_x = 0.0_c_double
-        ml_solver_ax = 0.0_c_double
         ml_coarse_halo_x = 0.0_c_double
         ml_coarse_weight = 0.0_c_double
         ml_coarse_b = 0.0_c_double
@@ -2268,7 +2263,7 @@ contains
         ml_coarse_correction = 0.0_c_double
 
         !$acc enter data copyin(ml_fine_weight) &
-        !$acc            create(ml_fine_owned, ml_fine_residual, ml_solver_x, ml_solver_ax, &
+        !$acc            create(ml_fine_owned, ml_fine_residual, &
         !$acc                   ml_coarse_halo_x, ml_coarse_weight, ml_coarse_b, ml_coarse_x, &
         !$acc                   ml_coarse_ax, ml_coarse_r, ml_coarse_correction)
         multilevel_arrays_uploaded = .true.
@@ -2365,19 +2360,22 @@ contains
                 flush(output_unit)
             endif
             call ml_transfer%prolong_owned_device(ml_coarse_halo_x, ml_fine_owned)
-            !$acc parallel loop gang vector collapse(3) present(ml_solver_x)
+            ! Reuse the solver's persistent Krylov work arrays here.  Besides
+            ! avoiding two full-size allocations, these arrays are the exact
+            ! allocation class exercised by the production NCCL halo path.
+            !$acc parallel loop gang vector collapse(3) present(x_sol)
             do jj = j_s-1, j_e+1
                 do kk = k_s-1, k_e+1
                     do ii = i_s-1, i_e+1
-                        ml_solver_x(ii,kk,jj) = 0.0_c_double
+                        x_sol(ii,kk,jj) = 0.0_c_double
                     enddo
                 enddo
             enddo
-            !$acc parallel loop gang vector collapse(3) present(ml_solver_x,ml_fine_owned)
+            !$acc parallel loop gang vector collapse(3) present(x_sol,ml_fine_owned)
             do jj = ys, ys+ym-1
                 do kk = zs, zs+zm-1
                     do ii = xs, xs+xm-1
-                        ml_solver_x(ii,kk,jj) = ml_fine_owned(ii-xs+1,kk-zs+1,jj-ys+1)
+                        x_sol(ii,kk,jj) = ml_fine_owned(ii-xs+1,kk-zs+1,jj-ys+1)
                     enddo
                 enddo
             enddo
@@ -2385,20 +2383,20 @@ contains
                 write(output_unit,'(A)') ' HICAR multilevel probe stage: fine solver halo'
                 flush(output_unit)
             endif
-            call exchange_krylov_halos(ml_solver_x, domain)
+            call exchange_krylov_halos(x_sol, domain)
             if (solver_rank == 0) then
                 write(output_unit,'(A)') ' HICAR multilevel probe stage: fine operator'
                 flush(output_unit)
             endif
-            call spmv(ml_solver_x, ml_solver_ax)
-            call exchange_krylov_halos(ml_solver_ax, domain)
+            call spmv(x_sol, t_vec)
+            call exchange_krylov_halos(t_vec, domain)
             ! The adjoint restriction has a 3x3 horizontal footprint.  The
             ! production exchange posts all four faces concurrently, so a
             ! second pass is required to propagate newly received face data
             ! into diagonal corners (the coarse halo exchanger instead does
             ! this explicitly as x-then-y).
-            call exchange_krylov_halos(ml_solver_ax, domain)
-            call copy_solver_to_multilevel_halo(ml_solver_ax)
+            call exchange_krylov_halos(t_vec, domain)
+            call copy_solver_to_multilevel_halo(t_vec)
             if (solver_rank == 0) then
                 write(output_unit,'(A)') ' HICAR multilevel probe stage: fine response restriction'
                 flush(output_unit)
@@ -2421,7 +2419,7 @@ contains
 
         if (multilevel_arrays_uploaded) then
             !$acc exit data delete(ml_fine_owned, ml_fine_residual, ml_fine_weight, &
-            !$acc                  ml_solver_x, ml_solver_ax, ml_coarse_halo_x, ml_coarse_weight, &
+            !$acc                  ml_coarse_halo_x, ml_coarse_weight, &
             !$acc                  ml_coarse_b, ml_coarse_x, ml_coarse_ax, ml_coarse_r, &
             !$acc                  ml_coarse_correction)
         endif
@@ -2434,8 +2432,6 @@ contains
         if (allocated(ml_fine_owned)) deallocate(ml_fine_owned)
         if (allocated(ml_fine_residual)) deallocate(ml_fine_residual)
         if (allocated(ml_fine_weight)) deallocate(ml_fine_weight)
-        if (allocated(ml_solver_x)) deallocate(ml_solver_x)
-        if (allocated(ml_solver_ax)) deallocate(ml_solver_ax)
         if (allocated(ml_coarse_halo_x)) deallocate(ml_coarse_halo_x)
         if (allocated(ml_coarse_weight)) deallocate(ml_coarse_weight)
         if (allocated(ml_coarse_b)) deallocate(ml_coarse_b)
