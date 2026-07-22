@@ -25,6 +25,7 @@ root=${HICAR_AUDIT_ROOT:-$SCRATCH/icon_hicar/HICAR-wind-operator-audit}
 exe="$root/build_gpu_nccl/HICAR_gpu"
 tester="$root/build_gpu_nccl/tests/HICAR-tester"
 nml_src="${NML_SRC:-$SCRATCH/icon_hicar/case_studies/swiss_200m/runs/integration_20100101_0030_dynamic_prec4/hicar.nml}"
+static_override="${STATIC_FILE:-}"
 wrapper="$SCRATCH/icon_hicar/case_studies/swiss_200m/scripts/gpu_rank_wrapper.sh"
 run="$root/validation/audit_swiss_${SLURM_JOB_ID:?}"
 
@@ -48,6 +49,11 @@ sed -e "/^[[:space:]]*restart_folder[[:space:]]*=/c\  restart_folder = '$run/res
     -e "/^[[:space:]]*output_folder[[:space:]]*=/c\  output_folder = '$run/output/'" \
     -e "/^[[:space:]]*forcing_file_list[[:space:]]*=/c\  forcing_file_list = '$forcing_list'" \
     "$nml_src" > "$run/input.nml"
+if [[ -n "$static_override" ]]; then
+  sed -e "/^[[:space:]]*init_conditions_file[[:space:]]*=/c\  init_conditions_file = '$static_override'" \
+    "$run/input.nml" > "$run/input.nml.tmp"
+  mv "$run/input.nml.tmp" "$run/input.nml"
+fi
 for asset in NoahmpTable.TBL rrtmgp_support mp_support; do cp -a "$root/run/$asset" "$run/"; done
 
 static_file=$(awk -F"'" '/^[[:space:]]*init_conditions_file[[:space:]]*=/{print $2; exit}' "$run/input.nml")
