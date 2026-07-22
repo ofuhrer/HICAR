@@ -69,7 +69,7 @@ set -e
 grep -q 'Projection operator equivalence: relative L2=' "$run/model.out"
 grep -q 'HICAR calibrated wind operator structural audit:' "$run/model.out"
 grep -q 'HICAR wind Krylov audit written to' "$run/model.out"
-grep -q 'HICAR native FGMRES+line failed\|HICAR wind solve rejected' "$run/model.out"
+grep -q 'HICAR operator audit-only exit:' "$run/model.out"
 test -s "$run/operator_audit.csv"
 test "$model_rc" -ne 0
 echo "Swiss audit-only gate captured the expected one-cycle rejection (model rc=$model_rc)."

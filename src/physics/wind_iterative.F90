@@ -652,6 +652,22 @@ contains
             endif
         endif
 
+        ! A capped calibrated solve is an audit-only execution: the Krylov
+        ! artifact has been written, but the iterate is not authorized for
+        ! physics.  Abort the full MPI application so CPU I/O ranks cannot
+        ! remain blocked after compute ranks stop, and so no output can be
+        ! mistaken for a scientifically accepted run.
+        if (operator_probed .and. operator_audit_enabled .and. operator_audit_max_iters > 0) then
+            if (STD_OUT_PE) then
+                write(output_unit,'(A,I0,A,I0,A,ES12.4)') &
+                    ' HICAR operator audit-only exit: status=', status, &
+                    ' iterations=', n_iters, ' residual=', res_final
+                flush(output_unit)
+            endif
+            call MPI_Abort(MPI_COMM_WORLD, 86, ierr)
+            error stop
+        endif
+
         ! Adaptive preconditioner retry: if the solver diverged/stagnated
         ! (status non-zero AND residual didn't shrink by 100x), bump the
         ! Block-Jacobi sweep count and retry. Each retry restarts from
