@@ -1,6 +1,6 @@
 #!/bin/bash -l
-# Target-stack 250 m regression for the exact HICAR operator with
-# AMG-preconditioned FGMRES.  Each invocation owns its run directory.
+# Target-stack 250 m regression for the exact HICAR operator with native
+# GPU-resident restarted FGMRES and vertical-line preconditioning.
 #SBATCH --job-name=hicar-hypre-250m
 #SBATCH --partition=debug
 #SBATCH --nodes=2
@@ -48,6 +48,6 @@ for asset in NoahmpTable.TBL rrtmgp_support mp_support; do cp -a "$root/run/$ass
 cd "$run"
 srun --distribution=block:block --cpu-bind=none "$wrapper" "$exe" "$run/input.nml" \
   | tee "$run/model.out"
-grep -q 'HICAR HYPRE FGMRES+AMG:' "$run/model.out"
+grep -q 'HICAR native FGMRES+line:' "$run/model.out"
 grep -q 'Timing across all compute images:' "$run/model.out"
 test -n "$(find "$run/output" -name '*.nc' -print -quit)"

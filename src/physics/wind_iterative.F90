@@ -91,6 +91,14 @@ module wind_iterative
     ! solves can legitimately take minutes before the final summary, so the
     ! heartbeat makes a live, converging run distinguishable from a hang.
     integer, parameter :: SOLVER_PROGRESS_INTERVAL = 100
+    ! Keep the native flexible-GMRES workspace bounded.  Unlike the external
+    ! host FGMRES path this is an explicit GPU allocation, so the national
+    ! decomposition has a predictable (2*(restart+1)) vector footprint.
+    ! The 12-vector prototype made a valid first reduction but restarted into
+    ! stagnation on the 250 m calibrated operator.  Fifty is the established
+    ! convergent Krylov dimension for this operator; native GPU storage keeps
+    ! its 2*(50+1) vectors bounded at roughly 3 GB per Swiss GPU.
+    integer, parameter :: FGMRES_RESTART = 50
 
     ! 15-point stencil coefficients (same names as AMGX module)
     real, allocatable, dimension(:,:,:) :: A_coef, B_coef, C_coef, D_coef, E_coef, F_coef, G_coef, &
@@ -466,7 +474,28 @@ contains
             flush(output_unit)
             hypre_selection_reported = .true.
         endif
-        if (operator_probed .and. wind_hypre_available()) then
+        if (operator_probed) then
+            call fgmres_line_solve(domain, wind_solver_max_iters, status, n_iters, res0, res_final)
+            if (status == 0) then
+                call verify_true_residual(domain, res_final, max_x_global)
+                ! FGMRES, like the existing BiCGStab implementation, uses
+                ! ||b|| as its relative scale.  Do not tighten that criterion
+                ! after a warm start by substituting the smaller ||r_0||.
+                call vec_norm2_local(rhs, local_norm2)
+                call MPI_Allreduce(local_norm2, global_norm2, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+                target_norm = max(bicg_tol_abs, bicg_tol_rel * sqrt(global_norm2))
+                if (STD_OUT_PE) then
+                    write(*,'(A,I0,A,ES12.4,A,ES12.4)') ' HICAR native FGMRES+line: iterations=', n_iters, &
+                        ' true_residual=', res_final, ' target=', target_norm
+                    flush(output_unit)
+                endif
+                if (res_final > target_norm) status = 3
+            else if (STD_OUT_PE) then
+                write(*,'(A,I0,A,I0)') ' HICAR native FGMRES+line failed: status=', status, &
+                    ' iterations=', n_iters
+                flush(output_unit)
+            endif
+        else if (operator_probed .and. wind_hypre_available()) then
             !$acc update host(rhs, x_sol)
             call vec_norm2_local(rhs, local_norm2)
             call MPI_Allreduce(local_norm2, global_norm2, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
@@ -617,6 +646,15 @@ contains
                 endif
                 stop
             endif
+        endif
+
+        ! A status that did not meet the retry trigger (for example a failed
+        ! independent true-residual check after substantial reduction) is
+        ! still not an acceptable wind correction.  Never fall through to
+        ! calc_updated_winds with it.
+        if (status /= 0) then
+            if (STD_OUT_PE) write(*,'(A,I0)') ' HICAR wind solve rejected after acceptance gate: status=', status
+            stop
         endif
 
         call calc_updated_winds(domain, adv_den)
@@ -960,6 +998,116 @@ contains
     !! ~140 bytes/cell traffic (~14% reduction), plus the branchless
     !! inner loop auto-vectorises cleanly.
     !!------------------------------------------------------------
+    !> Restarted right-preconditioned flexible GMRES for the calibrated wind
+    !! operator.  The Arnoldi basis and its preconditioned images live on the
+    !! GPU only for this solve and are released afterwards.  This deliberately
+    !! avoids the unbounded host FGMRES allocation observed on Switzerland.
+    subroutine fgmres_line_solve(domain, max_iters, status_out, n_iters_out, res0_out, res_final_out)
+        implicit none
+        type(domain_t), intent(in) :: domain
+        integer, intent(in) :: max_iters
+        integer, intent(out) :: status_out, n_iters_out
+        real(c_double), intent(out) :: res0_out, res_final_out
+        real(c_double), allocatable :: v_basis(:,:,:,:), z_basis(:,:,:,:)
+        real(c_double) :: h(FGMRES_RESTART+1,FGMRES_RESTART), h_local(FGMRES_RESTART+1)
+        real(c_double) :: cs(FGMRES_RESTART), sn(FGMRES_RESTART), g(FGMRES_RESTART+1)
+        real(c_double) :: ycoef(FGMRES_RESTART), dots_local(FGMRES_RESTART)
+        real(c_double) :: beta, bnorm2, target_norm, tmp, denom
+        integer :: ierr, cycle, j, i, used, total, ii, jj, kk
+
+        status_out = 1; n_iters_out = 0; res0_out = 0.0_c_double; res_final_out = 0.0_c_double
+        t_total_acc = 0.0_c_double
+        call exchange_krylov_halos(x_sol, domain)
+        call spmv(x_sol, t_vec)
+        call vec_axpby_into(r_vec, 1.0_c_double, rhs, -1.0_c_double, t_vec)
+        call vec_norm2_local(r_vec, beta)
+        call vec_norm2_local(rhs, bnorm2)
+        call MPI_Allreduce(MPI_IN_PLACE, beta, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(MPI_IN_PLACE, bnorm2, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        beta = sqrt(max(beta, 0.0_c_double))
+        target_norm = max(bicg_tol_abs, bicg_tol_rel * sqrt(max(bnorm2, 0.0_c_double)))
+        res0_out = beta; res_final_out = beta
+        if (STD_OUT_PE .and. verbose_solver) then
+            write(output_unit,'(A,ES12.4,A,ES12.4,A,I0,A)') ' HICAR native FGMRES+line start: residual=', beta, &
+                ' target=', target_norm, ' restart=', FGMRES_RESTART, '.'
+            flush(output_unit)
+        endif
+        if (beta <= target_norm) then; status_out = 0; return; endif
+
+        allocate(v_basis(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1,FGMRES_RESTART+1))
+        allocate(z_basis(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1,FGMRES_RESTART))
+        v_basis = 0.0_c_double; z_basis = 0.0_c_double
+        !$acc enter data copyin(v_basis, z_basis)
+        total = 0
+        do cycle = 1, max(1, (max_iters + FGMRES_RESTART - 1) / FGMRES_RESTART)
+            if (total >= max_iters) exit
+            call vec_axpby_into(v_basis(:,:,:,1), 1.0_c_double/beta, r_vec, 0.0_c_double, r_vec)
+            h = 0.0_c_double; cs = 0.0_c_double; sn = 0.0_c_double; g = 0.0_c_double; g(1) = beta
+            used = min(FGMRES_RESTART, max_iters-total)
+            do j = 1, used
+                call apply_precond(v_basis(:,:,:,j), z_basis(:,:,:,j))
+                call exchange_krylov_halos(z_basis(:,:,:,j), domain)
+                call spmv(z_basis(:,:,:,j), t_vec)
+                dots_local = 0.0_c_double
+                do i = 1, j
+                    call vec_dot_local(v_basis(:,:,:,i), t_vec, dots_local(i))
+                enddo
+                call MPI_Allreduce(dots_local, h_local, j, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+                do i = 1, j
+                    h(i,j) = h_local(i)
+                    call vec_axpby_into(t_vec, -h(i,j), v_basis(:,:,:,i), 1.0_c_double, t_vec)
+                enddo
+                call vec_norm2_local(t_vec, h(j+1,j))
+                call MPI_Allreduce(MPI_IN_PLACE, h(j+1,j), 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+                h(j+1,j) = sqrt(max(h(j+1,j), 0.0_c_double))
+                if (h(j+1,j) > breakdown_eps .and. j < FGMRES_RESTART+1) then
+                    call vec_axpby_into(v_basis(:,:,:,j+1), 1.0_c_double/h(j+1,j), t_vec, 0.0_c_double, t_vec)
+                endif
+                do i = 1, j-1
+                    tmp = cs(i)*h(i,j) + sn(i)*h(i+1,j)
+                    h(i+1,j) = -sn(i)*h(i,j) + cs(i)*h(i+1,j)
+                    h(i,j) = tmp
+                enddo
+                denom = sqrt(h(j,j)*h(j,j) + h(j+1,j)*h(j+1,j))
+                if (denom <= breakdown_eps) then; used = j; exit; endif
+                cs(j) = h(j,j)/denom; sn(j) = h(j+1,j)/denom
+                h(j,j) = denom; h(j+1,j) = 0.0_c_double
+                tmp = cs(j)*g(j) + sn(j)*g(j+1)
+                g(j+1) = -sn(j)*g(j) + cs(j)*g(j+1); g(j) = tmp
+                total = total + 1; n_iters_out = total; res_final_out = abs(g(j+1))
+                if (STD_OUT_PE .and. verbose_solver .and. mod(total,SOLVER_PROGRESS_INTERVAL) == 0) then
+                    write(output_unit,'(A,I0,A,ES12.4,A,ES12.4,A)') ' HICAR native FGMRES+line progress: iteration=', total, &
+                        ' residual=', res_final_out, ' target=', target_norm, '.'
+                    flush(output_unit)
+                endif
+                if (res_final_out <= target_norm) then; used = j; exit; endif
+            enddo
+            ycoef = 0.0_c_double
+            do i = used, 1, -1
+                ycoef(i) = g(i)
+                do j = i+1, used; ycoef(i) = ycoef(i) - h(i,j)*ycoef(j); enddo
+                ycoef(i) = ycoef(i) / h(i,i)
+            enddo
+            do i = 1, used
+                ! Use the in-place AXPY primitive. Passing x_sol both as an
+                ! output and an INTENT(IN) argument to axpby is forbidden
+                ! aliasing in Fortran and let the accelerator compiler discard
+                ! the restart correction on the 250 m run.
+                call vec_axpy(x_sol, ycoef(i), z_basis(:,:,:,i))
+            enddo
+            call exchange_krylov_halos(x_sol, domain)
+            call spmv(x_sol, t_vec)
+            call vec_axpby_into(r_vec, 1.0_c_double, rhs, -1.0_c_double, t_vec)
+            call vec_norm2_local(r_vec, beta)
+            call MPI_Allreduce(MPI_IN_PLACE, beta, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+            beta = sqrt(max(beta, 0.0_c_double)); res_final_out = beta
+            if (beta <= target_norm) then; status_out = 0; exit; endif
+            if (used < min(FGMRES_RESTART, max_iters-total)) exit
+        enddo
+        !$acc exit data delete(v_basis, z_basis)
+        deallocate(v_basis, z_basis)
+    end subroutine fgmres_line_solve
+
     subroutine spmv(x, y)
         implicit none
         real(c_double), dimension(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1), intent(in)    :: x
