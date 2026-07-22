@@ -27,7 +27,8 @@ module test_wind_iterative
     use wind_iterative,     only : calc_iter_winds, finalize_iter_winds
     use wind_multilevel,    only : horizontal_transfer_t, horizontal_tile_transfer_t, horizontal_coarse_extent, &
                                     horizontal_coarse_coordinate, owned_coarse_interval, &
-                                    galerkin_stencil_t, vertical_line_factor_t, assemble_colored_galerkin, &
+                                    galerkin_stencil_t, galerkin_tile_stencil_t, vertical_line_factor_t, &
+                                    assemble_colored_galerkin, assemble_colored_tile_galerkin, &
                                     relax_with_vertical_lines
     use wind_multilevel_mpi, only : horizontal_halo_exchange_t
     use advection,          only : adv_var_request
@@ -232,6 +233,7 @@ contains
         type(horizontal_transfer_t) :: transfer, free_transfer
         type(horizontal_tile_transfer_t) :: tile_transfer
         type(galerkin_stencil_t) :: stencil
+        type(galerkin_tile_stencil_t) :: tile_stencil
         type(vertical_line_factor_t) :: line_factor
         real(c_double), allocatable :: coarse_x(:,:,:), coarse_y(:,:,:), coarse_r(:,:,:), coarse_stencil(:,:,:)
         real(c_double), allocatable :: line_rhs(:,:,:), line_x(:,:,:), line_ax(:,:,:)
@@ -240,6 +242,7 @@ contains
         real(c_double), allocatable :: fine_weight(:,:,:), free_fine(:,:,:)
         real(c_double), allocatable :: tile_coarse_halo(:,:,:), tile_fine_halo(:,:,:), tile_weight_halo(:,:,:)
         real(c_double), allocatable :: tile_fine(:,:,:), tile_coarse_weight(:,:,:), tile_coarse_r(:,:,:)
+        real(c_double), allocatable :: stencil_tile_halo(:,:,:), stencil_tile_result(:,:,:)
         real(c_double) :: lhs, rhs, scale, boundary_max, constant_error, minimum_pivot
         integer :: i, j, k, dk, line_status, rank_case, coarse_first, coarse_count
         integer :: gi, gj, gc_i, gc_j
@@ -275,7 +278,9 @@ contains
                  coarse_r(transfer%nx_c,nz,transfer%ny_c), coarse_stencil(transfer%nx_c,nz,transfer%ny_c), &
                  coarse_weight(transfer%nx_c,nz,transfer%ny_c), &
                  line_rhs(transfer%nx_c,nz,transfer%ny_c), line_x(transfer%nx_c,nz,transfer%ny_c), &
-                 line_ax(transfer%nx_c,nz,transfer%ny_c))
+                 line_ax(transfer%nx_c,nz,transfer%ny_c), &
+                 stencil_tile_halo(0:transfer%nx_c+1,nz,0:transfer%ny_c+1), &
+                 stencil_tile_result(transfer%nx_c,nz,transfer%ny_c))
         allocate(fine_x(nx,nz,ny), fine_y(nx,nz,ny), fine_v(nx,nz,ny), fine_a_x(nx,nz,ny), &
                  fine_weight(nx,nz,ny))
 
@@ -413,6 +418,25 @@ contains
             call transfer%release()
             return
         endif
+        call assemble_colored_tile_galerkin(transfer%nx_c, transfer%ny_c, 0, 0, transfer%nx_c, &
+            transfer%ny_c, nz, .true., .true., apply_test_galerkin, tile_stencil)
+        if (maxval(abs(tile_stencil%value-stencil%value)) > 2.0e-12_c_double*scale) then
+            call test_failed(error, 'test_multilevel_transfer', 'tile colored assembly differs from global assembly')
+            call tile_stencil%release()
+            call stencil%release()
+            call transfer%release()
+            return
+        endif
+        stencil_tile_halo = 0.0_c_double
+        stencil_tile_halo(1:transfer%nx_c,:,1:transfer%ny_c) = coarse_x
+        call tile_stencil%apply_owned(stencil_tile_halo, stencil_tile_result)
+        if (maxval(abs(stencil_tile_result-coarse_r)) > 2.0e-12_c_double*scale) then
+            call test_failed(error, 'test_multilevel_transfer', 'tile Galerkin application differs from R A P')
+            call tile_stencil%release()
+            call stencil%release()
+            call transfer%release()
+            return
+        endif
 
         call line_factor%factorize(stencil, line_status, minimum_pivot)
         if (line_status /= 0 .or. minimum_pivot <= 0.0_c_double) then
@@ -480,6 +504,7 @@ contains
 
         call free_transfer%release()
         call line_factor%release()
+        call tile_stencil%release()
         call stencil%release()
         call transfer%release()
 
@@ -512,6 +537,15 @@ contains
                 enddo
             enddo
         end subroutine apply_test_operator
+
+        subroutine apply_test_galerkin(x, ax)
+            real(c_double), intent(in) :: x(:,:,:)
+            real(c_double), intent(out) :: ax(:,:,:)
+
+            call transfer%prolong(x, fine_x)
+            call apply_test_operator(fine_x, fine_a_x)
+            call transfer%restrict_adjoint(fine_a_x, fine_weight, coarse_weight, ax)
+        end subroutine apply_test_galerkin
 
     end subroutine test_multilevel_transfer
 

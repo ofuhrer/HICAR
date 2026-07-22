@@ -57,6 +57,22 @@ module wind_multilevel
         procedure :: apply => apply_galerkin_stencil
     end type galerkin_stencil_t
 
+    type, public :: galerkin_tile_stencil_t
+        integer :: nx_global = 0
+        integer :: ny_global = 0
+        integer :: x_first = 0
+        integer :: y_first = 0
+        integer :: nx = 0
+        integer :: ny = 0
+        integer :: nz = 0
+        logical :: fix_lateral_boundaries = .true.
+        logical :: fix_vertical_boundaries = .true.
+        real(c_double), allocatable :: value(:,:,:,:,:,:)
+    contains
+        procedure :: release => release_galerkin_tile_stencil
+        procedure :: apply_owned => apply_galerkin_tile_stencil
+    end type galerkin_tile_stencil_t
+
     type, public :: vertical_line_factor_t
         integer :: nx = 0
         integer :: ny = 0
@@ -77,11 +93,17 @@ module wind_multilevel
             real(c_double), intent(in) :: x(:,:,:)
             real(c_double), intent(out) :: ax(:,:,:)
         end subroutine fine_operator_apply
+
+        subroutine tile_operator_apply(x, ax)
+            import c_double
+            real(c_double), intent(in) :: x(:,:,:)
+            real(c_double), intent(out) :: ax(:,:,:)
+        end subroutine tile_operator_apply
     end interface
 
     public :: horizontal_coarse_extent, horizontal_coarse_coordinate
     public :: horizontal_coarse_bracket, owned_coarse_interval
-    public :: assemble_colored_galerkin, relax_with_vertical_lines
+    public :: assemble_colored_galerkin, assemble_colored_tile_galerkin, relax_with_vertical_lines
 
 contains
 
@@ -598,6 +620,121 @@ contains
     end subroutine release_galerkin_stencil
 
 
+    subroutine assemble_colored_tile_galerkin(nx_global, ny_global, x_first, y_first, nx, ny, nz, &
+                                              fix_lateral_boundaries, fix_vertical_boundaries, &
+                                              apply_operator, stencil)
+        integer, intent(in) :: nx_global, ny_global, x_first, y_first, nx, ny, nz
+        logical, intent(in) :: fix_lateral_boundaries, fix_vertical_boundaries
+        procedure(tile_operator_apply) :: apply_operator
+        type(galerkin_tile_stencil_t), intent(inout) :: stencil
+        real(c_double), allocatable :: probe(:,:,:), response(:,:,:)
+        integer :: ci, cj, ck, i, j, k, gi, gj, di, dj, dk
+
+        call stencil%release()
+        stencil%nx_global = nx_global; stencil%ny_global = ny_global
+        stencil%x_first = x_first; stencil%y_first = y_first
+        stencil%nx = nx; stencil%ny = ny; stencil%nz = nz
+        stencil%fix_lateral_boundaries = fix_lateral_boundaries
+        stencil%fix_vertical_boundaries = fix_vertical_boundaries
+        allocate(stencil%value(-1:1,-1:1,-1:1,nx,nz,ny), probe(nx,nz,ny), response(nx,nz,ny))
+        stencil%value = 0.0_c_double
+
+        do cj = 0, 2
+            do ck = 0, 2
+                do ci = 0, 2
+                    probe = 0.0_c_double
+                    do j = 1, ny
+                        gj = y_first+j-1
+                        do k = 1, nz
+                            do i = 1, nx
+                                gi = x_first+i-1
+                                if (is_fixed_tile_stencil_point(stencil, gi, k, gj)) cycle
+                                if (modulo(gi,3) == ci .and. modulo(k-1,3) == ck .and. &
+                                    modulo(gj,3) == cj) probe(i,k,j) = 1.0_c_double
+                            enddo
+                        enddo
+                    enddo
+                    call apply_operator(probe, response)
+
+                    do j = 1, ny
+                        gj = y_first+j-1
+                        dj = modulo(cj-modulo(gj,3)+1,3)-1
+                        do k = 1, nz
+                            dk = modulo(ck-modulo(k-1,3)+1,3)-1
+                            do i = 1, nx
+                                gi = x_first+i-1
+                                if (is_fixed_tile_stencil_point(stencil, gi, k, gj)) cycle
+                                di = modulo(ci-modulo(gi,3)+1,3)-1
+                                if (gi+di < 0 .or. gi+di >= nx_global .or. &
+                                    k+dk < 1 .or. k+dk > nz .or. gj+dj < 0 .or. gj+dj >= ny_global) cycle
+                                if (is_fixed_tile_stencil_point(stencil, gi+di, k+dk, gj+dj)) cycle
+                                stencil%value(di,dk,dj,i,k,j) = response(i,k,j)
+                            enddo
+                        enddo
+                    enddo
+                enddo
+            enddo
+        enddo
+
+        do j = 1, ny
+            gj = y_first+j-1
+            do k = 1, nz
+                do i = 1, nx
+                    gi = x_first+i-1
+                    if (is_fixed_tile_stencil_point(stencil, gi, k, gj)) &
+                        stencil%value(0,0,0,i,k,j) = 1.0_c_double
+                enddo
+            enddo
+        enddo
+    end subroutine assemble_colored_tile_galerkin
+
+
+    subroutine release_galerkin_tile_stencil(this)
+        class(galerkin_tile_stencil_t), intent(inout) :: this
+
+        if (allocated(this%value)) deallocate(this%value)
+        this%nx_global = 0; this%ny_global = 0
+        this%x_first = 0; this%y_first = 0
+        this%nx = 0; this%ny = 0; this%nz = 0
+        this%fix_lateral_boundaries = .true.
+        this%fix_vertical_boundaries = .true.
+    end subroutine release_galerkin_tile_stencil
+
+
+    subroutine apply_galerkin_tile_stencil(this, x, ax)
+        class(galerkin_tile_stencil_t), intent(in) :: this
+        real(c_double), intent(in) :: x(0:,:,0:)
+        real(c_double), intent(out) :: ax(:,:,:)
+        integer :: i, j, k, di, dj, dk, gi, gj
+
+        if (size(x,1) /= this%nx+2 .or. size(x,2) /= this%nz .or. size(x,3) /= this%ny+2) &
+            error stop 'tile Galerkin input must include one horizontal halo'
+        if (size(ax,1) /= this%nx .or. size(ax,2) /= this%nz .or. size(ax,3) /= this%ny) &
+            error stop 'tile Galerkin output shape mismatch'
+        ax = 0.0_c_double
+        do j = 1, this%ny
+            gj = this%y_first+j-1
+            do k = 1, this%nz
+                do i = 1, this%nx
+                    gi = this%x_first+i-1
+                    if (is_fixed_tile_stencil_point(this, gi, k, gj)) then
+                        ax(i,k,j) = x(i,k,j)
+                    else
+                        do dj = -1, 1
+                            do dk = -1, 1
+                                if (k+dk < 1 .or. k+dk > this%nz) cycle
+                                do di = -1, 1
+                                    ax(i,k,j) = ax(i,k,j) + this%value(di,dk,dj,i,k,j)*x(i+di,k+dk,j+dj)
+                                enddo
+                            enddo
+                        enddo
+                    endif
+                enddo
+            enddo
+        enddo
+    end subroutine apply_galerkin_tile_stencil
+
+
     subroutine apply_galerkin_stencil(this, x, ax)
         class(galerkin_stencil_t), intent(in) :: this
         real(c_double), intent(in) :: x(:,:,:)
@@ -771,6 +908,16 @@ contains
                  (i == 1 .or. i == stencil%nx .or. j == 1 .or. j == stencil%ny)) .or. &
                 (stencil%fix_vertical_boundaries .and. (k == 1 .or. k == stencil%nz))
     end function is_fixed_stencil_point
+
+
+    pure logical function is_fixed_tile_stencil_point(stencil, i, k, j) result(fixed)
+        class(galerkin_tile_stencil_t), intent(in) :: stencil
+        integer, intent(in) :: i, k, j
+
+        fixed = (stencil%fix_lateral_boundaries .and. &
+                 (i == 0 .or. i == stencil%nx_global-1 .or. j == 0 .or. j == stencil%ny_global-1)) .or. &
+                (stencil%fix_vertical_boundaries .and. (k == 1 .or. k == stencil%nz))
+    end function is_fixed_tile_stencil_point
 
 
     pure real(c_double) function horizontal_basis_weight(f, n_f, c) result(weight)
