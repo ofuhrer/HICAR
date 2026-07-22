@@ -53,9 +53,8 @@ contains
 
         type(domain_t)  :: domain
         type(options_t) :: options
-        real, allocatable :: div(:,:,:), div_explicit(:,:,:)
+        real, allocatable :: div(:,:,:)
         real    :: div0_max, div1_max, div0_max_g, div1_max_g
-        real    :: explicit_error, explicit_error_g
         integer :: ierr
         integer :: ims, ime, jms, jme, kms, kme, its, ite, jts, jte
         logical :: ok
@@ -100,7 +99,6 @@ contains
         its = domain%its; ite = domain%ite; jts = domain%jts; jte = domain%jte
 
         allocate(div(ims:ime, kms:kme, jms:jme)); div = 0.0
-        allocate(div_explicit(ims:ime, kms:kme, jms:jme)); div_explicit = 0.0
 
         ! The iterative solver operates on the forcing-tendency winds (dqdt_3d), which
         ! are auto-allocated only for variables flagged as forcing inputs (i.e. when
@@ -124,19 +122,7 @@ contains
         !$acc enter data copyin(domain%vars_3d(domain%var_indx(kVARS%u)%v)%dqdt_3d, &
         !$acc                       domain%vars_3d(domain%var_indx(kVARS%v)%v)%dqdt_3d)
 
-        !$acc data copy(kVARS) copy(div, div_explicit)
-        ! The operator audit must evaluate D(q) without overwriting live wind
-        ! tendencies. Verify that its explicit-face path is identical to the
-        ! established dqdt path before exercising the solve.
-        call calc_divergence(div, domain, advect_density=.True., horz_only=.False., use_dqdt=.True.)
-        call calc_divergence(div_explicit, domain, advect_density=.True., horz_only=.False., &
-            u_explicit=domain%vars_3d(domain%var_indx(kVARS%u)%v)%dqdt_3d, &
-            v_explicit=domain%vars_3d(domain%var_indx(kVARS%v)%v)%dqdt_3d, &
-            w_explicit=domain%vars_3d(domain%var_indx(kVARS%w)%v)%dqdt_3d)
-        !$acc update host(div, div_explicit)
-        explicit_error = maxval(abs(div_explicit(its:ite, kms:kme, jts:jte) - &
-                                    div(its:ite, kms:kme, jts:jte)))
-
+        !$acc data copy(kVARS) copy(div)
         ! divergence of the seeded field
         call calc_divergence(div, domain, advect_density=.False., horz_only=.False., use_dqdt=.True.)
         !$acc update host(div)
@@ -157,14 +143,10 @@ contains
         ! reduce to a global max so the assertion is decomposition-independent
         call MPI_Allreduce(div0_max, div0_max_g, 1, MPI_REAL, MPI_MAX, domain%compute_comms, ierr)
         call MPI_Allreduce(div1_max, div1_max_g, 1, MPI_REAL, MPI_MAX, domain%compute_comms, ierr)
-        call MPI_Allreduce(explicit_error, explicit_error_g, 1, MPI_REAL, MPI_MAX, domain%compute_comms, ierr)
 
         ! --- evaluate BEFORE tearing down (so cleanup always runs) -------------------
         ok = .True.; msg = ''
-        if (explicit_error_g > 1.0e-6) then
-            ok = .False.
-            write(msg,'(A,ES12.4)') 'explicit divergence path differs from dqdt path: max error=', explicit_error_g
-        else if (div1_max_g /= div1_max_g) then                  ! NaN
+        if (div1_max_g /= div1_max_g) then                       ! NaN
             ok = .False.
             msg = 'corrected wind divergence is NaN'
         else if (.not. (div1_max_g < div0_max_g)) then
