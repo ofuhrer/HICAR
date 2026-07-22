@@ -26,7 +26,7 @@ module test_wind_iterative
     use wind,               only : wind_var_request, init_winds, calc_divergence
     use wind_iterative,     only : calc_iter_winds, finalize_iter_winds
     use wind_multilevel,    only : horizontal_transfer_t, horizontal_coarse_extent, &
-                                    galerkin_stencil_t, assemble_colored_galerkin
+                                    galerkin_stencil_t, vertical_line_factor_t, assemble_colored_galerkin
     use advection,          only : adv_var_request
     use io_routines,        only : check_file_exists
     implicit none
@@ -227,12 +227,14 @@ contains
         integer, parameter :: nx = 8, ny = 7, nz = 5
         type(horizontal_transfer_t) :: transfer, free_transfer
         type(galerkin_stencil_t) :: stencil
+        type(vertical_line_factor_t) :: line_factor
         real(c_double), allocatable :: coarse_x(:,:,:), coarse_y(:,:,:), coarse_r(:,:,:), coarse_stencil(:,:,:)
+        real(c_double), allocatable :: line_rhs(:,:,:), line_x(:,:,:), line_ax(:,:,:)
         real(c_double), allocatable :: coarse_weight(:,:,:), free_weight(:,:,:), free_coarse(:,:,:)
         real(c_double), allocatable :: fine_x(:,:,:), fine_y(:,:,:), fine_v(:,:,:), fine_a_x(:,:,:)
         real(c_double), allocatable :: fine_weight(:,:,:), free_fine(:,:,:)
-        real(c_double) :: lhs, rhs, scale, boundary_max, constant_error
-        integer :: i, j, k
+        real(c_double) :: lhs, rhs, scale, boundary_max, constant_error, minimum_pivot
+        integer :: i, j, k, dk, line_status
 
         if (horizontal_coarse_extent(nx) /= 5 .or. horizontal_coarse_extent(ny) /= 4) then
             call test_failed(error, 'test_multilevel_transfer', 'coarse extent does not retain both boundaries')
@@ -242,7 +244,9 @@ contains
         call transfer%init(nx, ny, fix_lateral_boundaries=.true., fix_vertical_boundaries=.true.)
         allocate(coarse_x(transfer%nx_c,nz,transfer%ny_c), coarse_y(transfer%nx_c,nz,transfer%ny_c), &
                  coarse_r(transfer%nx_c,nz,transfer%ny_c), coarse_stencil(transfer%nx_c,nz,transfer%ny_c), &
-                 coarse_weight(transfer%nx_c,nz,transfer%ny_c))
+                 coarse_weight(transfer%nx_c,nz,transfer%ny_c), &
+                 line_rhs(transfer%nx_c,nz,transfer%ny_c), line_x(transfer%nx_c,nz,transfer%ny_c), &
+                 line_ax(transfer%nx_c,nz,transfer%ny_c))
         allocate(fine_x(nx,nz,ny), fine_y(nx,nz,ny), fine_v(nx,nz,ny), fine_a_x(nx,nz,ny), &
                  fine_weight(nx,nz,ny))
 
@@ -318,6 +322,42 @@ contains
             return
         endif
 
+        call line_factor%factorize(stencil, line_status, minimum_pivot)
+        if (line_status /= 0 .or. minimum_pivot <= 0.0_c_double) then
+            call test_failed(error, 'test_multilevel_transfer', 'coarse vertical block factorization failed')
+            call stencil%release()
+            call transfer%release()
+            return
+        endif
+        do j = 1, transfer%ny_c
+            do k = 1, nz
+                do i = 1, transfer%nx_c
+                    line_rhs(i,k,j) = cos(0.13_c_double*real(3*i+2*k+j,c_double))
+                enddo
+            enddo
+        enddo
+        call line_factor%apply(line_rhs, line_x)
+        line_ax = 0.0_c_double
+        do j = 1, transfer%ny_c
+            do k = 1, nz
+                do i = 1, transfer%nx_c
+                    do dk = -1, 1
+                        if (k+dk < 1 .or. k+dk > nz) cycle
+                        line_ax(i,k,j) = line_ax(i,k,j) + &
+                            stencil%value(0,dk,0,i,k,j)*line_x(i,k+dk,j)
+                    enddo
+                enddo
+            enddo
+        enddo
+        scale = max(1.0_c_double, maxval(abs(line_rhs)))
+        if (maxval(abs(line_ax-line_rhs)) > 2.0e-12_c_double*scale) then
+            call test_failed(error, 'test_multilevel_transfer', 'exact coarse vertical line solve failed')
+            call line_factor%release()
+            call stencil%release()
+            call transfer%release()
+            return
+        endif
+
         ! Without fixed identity rows the normalized adjoint restriction must
         ! preserve constants on both odd and even horizontal extents.
         call free_transfer%init(nx, ny, fix_lateral_boundaries=.false., fix_vertical_boundaries=.false.)
@@ -334,6 +374,7 @@ contains
         endif
 
         call free_transfer%release()
+        call line_factor%release()
         call stencil%release()
         call transfer%release()
 

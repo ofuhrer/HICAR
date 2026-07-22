@@ -32,6 +32,20 @@ module wind_multilevel
         procedure :: apply => apply_galerkin_stencil
     end type galerkin_stencil_t
 
+    type, public :: vertical_line_factor_t
+        integer :: nx = 0
+        integer :: ny = 0
+        integer :: nz = 0
+        logical :: ready = .false.
+        real(c_double), allocatable :: diagonal_inverse(:,:,:)
+        real(c_double), allocatable :: upper_prime(:,:,:)
+        real(c_double), allocatable :: lower_coefficient(:,:,:)
+    contains
+        procedure :: factorize => factorize_vertical_lines
+        procedure :: release => release_vertical_line_factor
+        procedure :: apply => apply_vertical_line_factor
+    end type vertical_line_factor_t
+
     abstract interface
         subroutine fine_operator_apply(x, ax)
             import c_double
@@ -396,6 +410,101 @@ contains
             enddo
         enddo
     end subroutine apply_galerkin_stencil
+
+
+    subroutine factorize_vertical_lines(this, stencil, status, minimum_pivot)
+        class(vertical_line_factor_t), intent(inout) :: this
+        type(galerkin_stencil_t), intent(in) :: stencil
+        integer, intent(out) :: status
+        real(c_double), intent(out), optional :: minimum_pivot
+        real(c_double), parameter :: pivot_floor = 1.0e-28_c_double
+        real(c_double) :: diagonal, lower, upper, pivot, min_pivot
+        integer :: i, j, k
+
+        call this%release()
+        this%nx = stencil%nx
+        this%ny = stencil%ny
+        this%nz = stencil%nz
+        allocate(this%diagonal_inverse(this%nx,this%nz,this%ny), &
+                 this%upper_prime(this%nx,this%nz,this%ny), &
+                 this%lower_coefficient(this%nx,this%nz,this%ny))
+        this%diagonal_inverse = 0.0_c_double
+        this%upper_prime = 0.0_c_double
+        this%lower_coefficient = 0.0_c_double
+        min_pivot = huge(1.0_c_double)
+        status = 0
+
+        do j = 1, this%ny
+            do i = 1, this%nx
+                diagonal = stencil%value(0,0,0,i,1,j)
+                upper = stencil%value(0,1,0,i,1,j)
+                min_pivot = min(min_pivot, abs(diagonal))
+                if (abs(diagonal) <= pivot_floor) then
+                    status = 1
+                    cycle
+                endif
+                this%diagonal_inverse(i,1,j) = 1.0_c_double / diagonal
+                this%upper_prime(i,1,j) = upper * this%diagonal_inverse(i,1,j)
+
+                do k = 2, this%nz
+                    lower = stencil%value(0,-1,0,i,k,j)
+                    diagonal = stencil%value(0,0,0,i,k,j)
+                    upper = stencil%value(0,1,0,i,k,j)
+                    pivot = diagonal - lower * this%upper_prime(i,k-1,j)
+                    min_pivot = min(min_pivot, abs(pivot))
+                    if (abs(pivot) <= pivot_floor) then
+                        status = 1
+                        exit
+                    endif
+                    this%diagonal_inverse(i,k,j) = 1.0_c_double / pivot
+                    this%upper_prime(i,k,j) = upper * this%diagonal_inverse(i,k,j)
+                    this%lower_coefficient(i,k,j) = lower
+                enddo
+            enddo
+        enddo
+
+        this%ready = (status == 0)
+        if (present(minimum_pivot)) minimum_pivot = min_pivot
+    end subroutine factorize_vertical_lines
+
+
+    subroutine release_vertical_line_factor(this)
+        class(vertical_line_factor_t), intent(inout) :: this
+
+        if (allocated(this%diagonal_inverse)) deallocate(this%diagonal_inverse)
+        if (allocated(this%upper_prime)) deallocate(this%upper_prime)
+        if (allocated(this%lower_coefficient)) deallocate(this%lower_coefficient)
+        this%nx = 0
+        this%ny = 0
+        this%nz = 0
+        this%ready = .false.
+    end subroutine release_vertical_line_factor
+
+
+    subroutine apply_vertical_line_factor(this, rhs, x)
+        class(vertical_line_factor_t), intent(in) :: this
+        real(c_double), intent(in) :: rhs(:,:,:)
+        real(c_double), intent(out) :: x(:,:,:)
+        integer :: i, j, k
+
+        if (.not. this%ready) error stop 'vertical line factor is not ready'
+        if (size(rhs,1) /= this%nx .or. size(rhs,2) /= this%nz .or. size(rhs,3) /= this%ny) &
+            error stop 'vertical line right-hand side shape mismatch'
+        if (any(shape(x) /= shape(rhs))) error stop 'vertical line output shape mismatch'
+
+        do j = 1, this%ny
+            do i = 1, this%nx
+                x(i,1,j) = this%diagonal_inverse(i,1,j) * rhs(i,1,j)
+                do k = 2, this%nz
+                    x(i,k,j) = this%diagonal_inverse(i,k,j) * &
+                        (rhs(i,k,j) - this%lower_coefficient(i,k,j) * x(i,k-1,j))
+                enddo
+                do k = this%nz-1, 1, -1
+                    x(i,k,j) = x(i,k,j) - this%upper_prime(i,k,j) * x(i,k+1,j)
+                enddo
+            enddo
+        enddo
+    end subroutine apply_vertical_line_factor
 
 
     pure logical function is_fixed_coarse_point(transfer, i, k, j, nz) result(fixed)
