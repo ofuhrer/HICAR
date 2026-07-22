@@ -25,7 +25,7 @@ module test_wind_iterative
     use options_interface,  only : options_t
     use wind,               only : wind_var_request, init_winds, calc_divergence
     use wind_iterative,     only : calc_iter_winds, finalize_iter_winds, probe_finalize, &
-                                   multilevel_preconditioner_is_ready
+                                   multilevel_preconditioner_smoke
     use wind_multilevel,    only : horizontal_transfer_t, horizontal_tile_transfer_t, horizontal_coarse_extent, &
                                     horizontal_coarse_coordinate, owned_coarse_interval, &
                                     galerkin_stencil_t, galerkin_tile_stencil_t, vertical_line_factor_t, &
@@ -154,12 +154,11 @@ contains
             ! The fixture bypasses wind.F90's physical D o G calibration.
             ! Its first analytic solve allocates the solver structure; now
             ! mark that stencil as calibrated and polish once through the
-            ! feature-gated hierarchy.  The exact R A P gate is unchanged.
+            ! feature-gated hierarchy.  The exact R A P gate is unchanged;
+            ! the smoke applies one complete V-cycle to a deterministic RHS
+            ! without constructing an invalid second physical divergence.
             call probe_finalize(0.0)
-            call calc_divergence(div, domain, advect_density=.False., horz_only=.False., use_dqdt=.True.)
-            call calc_iter_winds(domain, &
-                domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d, div, .False.)
-            multilevel_ready_ok = multilevel_preconditioner_is_ready()
+            multilevel_ready_ok = multilevel_preconditioner_smoke(domain)
         endif
 
         ! divergence of the corrected field

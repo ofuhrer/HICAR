@@ -44,6 +44,7 @@ module wind_iterative
     public :: probe_lambda_pattern, probe_zero_corrections, probe_apply_corrections, &
               probe_record, probe_finalize, probe_random_pattern, probe_compare_operator
     public :: multilevel_preconditioner_is_ready
+    public :: multilevel_preconditioner_smoke
 
     logical :: initialized_iter_winds = .false.
     logical :: structure_uploaded = .false.
@@ -277,6 +278,36 @@ contains
     logical function multilevel_preconditioner_is_ready()
         multilevel_preconditioner_is_ready = multilevel_ready
     end function multilevel_preconditioner_is_ready
+
+
+    logical function multilevel_preconditioner_smoke(domain)
+        type(domain_t), intent(in) :: domain
+        real(c_double) :: local_norm, global_norm
+        integer :: i, j, k, ierr
+
+        multilevel_preconditioner_smoke = .false.
+        if (.not. multilevel_requested .or. .not. operator_probed .or. .not. structure_uploaded) return
+        call build_line_preconditioner()
+        if (.not. multilevel_setup_attempted) call setup_multilevel_preconditioner(domain)
+        if (.not. multilevel_ready) return
+        !$acc parallel loop gang vector collapse(3) present(rhs)
+        do j = ys, ys+ym-1
+            do k = zs, zs+zm-1
+                do i = xs, xs+xm-1
+                    if (i <= 0 .or. i >= mx-1 .or. j <= 0 .or. j >= my-1 .or. &
+                        k <= 0 .or. k >= mz-1) then
+                        rhs(i,k,j) = 0.0_c_double
+                    else
+                        rhs(i,k,j) = sin(0.071_c_double*real(3*i+5*k+7*j,c_double))
+                    endif
+                enddo
+            enddo
+        enddo
+        call apply_multilevel_preconditioner(rhs, x_sol, domain)
+        call vec_norm2_local(x_sol, local_norm)
+        call MPI_Allreduce(local_norm, global_norm, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        multilevel_preconditioner_smoke = global_norm > 0.0_c_double .and. global_norm < huge(global_norm)
+    end function multilevel_preconditioner_smoke
 
     !>------------------------------------------------------------
     !! Per-nest initialisation — called once per nest at startup.
@@ -547,7 +578,7 @@ contains
         ! the current coefficients.
         call build_line_preconditioner()
         if (multilevel_requested .and. operator_probed .and. .not. multilevel_setup_attempted) &
-            call setup_multilevel_preconditioner()
+            call setup_multilevel_preconditioner(domain)
 
         ! Build RHS on GPU (3D layout: rhs(i,k,j) = -2*div for interior, 0 at BCs)
         call compute_rhs_3d()
@@ -919,7 +950,7 @@ contains
 
             ! ----- First half-step: p_hat = M^{-1} p, v = A p_hat -----
             t0_region = MPI_Wtime()
-            call apply_precond(p_vec, p_hat)
+            call apply_precond(p_vec, p_hat, domain)
             t_precond_acc = t_precond_acc + (MPI_Wtime() - t0_region)
 
             t0_region = MPI_Wtime()
@@ -965,7 +996,7 @@ contains
 
             ! ----- Second half-step: s_hat = M^{-1} s, t = A s_hat -----
             t0_region = MPI_Wtime()
-            call apply_precond(s_vec, s_hat)
+            call apply_precond(s_vec, s_hat, domain)
             t_precond_acc = t_precond_acc + (MPI_Wtime() - t0_region)
 
             t0_region = MPI_Wtime()
@@ -1151,7 +1182,7 @@ contains
         real(c_double) :: cs(FGMRES_RESTART), sn(FGMRES_RESTART), g(FGMRES_RESTART+1)
         real(c_double) :: ycoef(FGMRES_RESTART), dots_local(FGMRES_RESTART)
         real(c_double) :: beta, bnorm2, target_norm, tmp, denom
-        integer :: ierr, cycle, j, i, used, total, ii, jj, kk
+        integer :: ierr, cycle, j, i, used, total
 
         status_out = 1; n_iters_out = 0; res0_out = 0.0_c_double; res_final_out = 0.0_c_double
         t_total_acc = 0.0_c_double
@@ -1184,7 +1215,7 @@ contains
             cs = 0.0_c_double; sn = 0.0_c_double; g = 0.0_c_double; g(1) = beta
             used = min(FGMRES_RESTART, max_iters-total)
             do j = 1, used
-                call apply_precond(v_basis(:,:,:,j), z_basis(:,:,:,j))
+                call apply_precond(v_basis(:,:,:,j), z_basis(:,:,:,j), domain)
                 call exchange_krylov_halos(z_basis(:,:,:,j), domain)
                 call spmv(z_basis(:,:,:,j), t_vec)
                 dots_local = 0.0_c_double
@@ -2152,8 +2183,9 @@ contains
     end function audit_weight_name
 
 
-    subroutine setup_multilevel_preconditioner()
+    subroutine setup_multilevel_preconditioner(domain)
         implicit none
+        type(domain_t), intent(in) :: domain
         real(c_double), allocatable :: test_x(:,:,:), direct_ax(:,:,:)
         real(c_double) :: local_error, global_error, local_reference, global_reference
         real(c_double) :: relative_error, minimum_pivot
@@ -2241,7 +2273,6 @@ contains
         !$acc                   ml_coarse_ax, ml_coarse_r, ml_coarse_correction)
         multilevel_arrays_uploaded = .true.
         call ml_transfer%upload_device()
-        call ml_fine_halo%upload_device()
         call ml_coarse_halo%upload_device()
         call ml_transfer%build_owned_coarse_weights_device(ml_fine_weight, ml_coarse_weight)
         !$acc update self(ml_coarse_weight)
@@ -2354,35 +2385,22 @@ contains
                 write(output_unit,'(A)') ' HICAR multilevel probe stage: fine solver halo'
                 flush(output_unit)
             endif
-            call exchange_multilevel_solver_halos(ml_solver_x)
+            call exchange_krylov_halos(ml_solver_x, domain)
             if (solver_rank == 0) then
                 write(output_unit,'(A)') ' HICAR multilevel probe stage: fine operator'
                 flush(output_unit)
             endif
             call spmv(ml_solver_x, ml_solver_ax)
-            !$acc parallel loop gang vector collapse(3) present(ml_fine_residual)
-            do jj = 0, ym+1
-                do kk = 1, mz
-                    do ii = 0, xm+1
-                        ml_fine_residual(ii,kk,jj) = 0.0_c_double
-                    enddo
-                enddo
-            enddo
-            !$acc parallel loop gang vector collapse(3) present(ml_fine_residual,ml_solver_ax)
-            do jj = ys, ys+ym-1
-                do kk = zs, zs+zm-1
-                    do ii = xs, xs+xm-1
-                        ml_fine_residual(ii-xs+1,kk-zs+1,jj-ys+1) = ml_solver_ax(ii,kk,jj)
-                    enddo
-                enddo
-            enddo
+            call exchange_krylov_halos(ml_solver_ax, domain)
+            ! The adjoint restriction has a 3x3 horizontal footprint.  The
+            ! production exchange posts all four faces concurrently, so a
+            ! second pass is required to propagate newly received face data
+            ! into diagonal corners (the coarse halo exchanger instead does
+            ! this explicitly as x-then-y).
+            call exchange_krylov_halos(ml_solver_ax, domain)
+            call copy_solver_to_multilevel_halo(ml_solver_ax)
             if (solver_rank == 0) then
-                write(output_unit,'(A)') ' HICAR multilevel probe stage: fine response halo'
-                flush(output_unit)
-            endif
-            call ml_fine_halo%exchange_device(ml_fine_residual)
-            if (solver_rank == 0) then
-                write(output_unit,'(A)') ' HICAR multilevel probe stage: restriction'
+                write(output_unit,'(A)') ' HICAR multilevel probe stage: fine response restriction'
                 flush(output_unit)
             endif
             call ml_transfer%restrict_owned_adjoint_device(ml_fine_residual, ml_fine_weight, &
@@ -2429,20 +2447,11 @@ contains
     end subroutine release_multilevel_preconditioner
 
 
-    subroutine exchange_multilevel_solver_halos(vec)
+    subroutine copy_solver_to_multilevel_halo(vec)
         implicit none
-        real(c_double), dimension(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), intent(inout) :: vec
+        real(c_double), dimension(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), intent(in) :: vec
         integer :: i, j, k, gi, gj, gk
 
-        !$acc parallel loop gang vector collapse(3) present(vec,ml_fine_residual)
-        do j = 1, ym
-            do k = 1, mz
-                do i = 1, xm
-                    ml_fine_residual(i,k,j) = vec(xs+i-1,zs+k-1,ys+j-1)
-                enddo
-            enddo
-        enddo
-        call ml_fine_halo%exchange_device(ml_fine_residual)
         !$acc parallel loop gang vector collapse(3) present(vec,ml_fine_residual) private(gi,gj,gk)
         do j = 0, ym+1
             do k = 1, mz
@@ -2452,18 +2461,22 @@ contains
                     gj = ys+j-1
                     if (gi >= i_s-1 .and. gi <= i_e+1 .and. &
                         gk >= k_s-1 .and. gk <= k_e+1 .and. &
-                        gj >= j_s-1 .and. gj <= j_e+1) &
-                        vec(gi,gk,gj) = ml_fine_residual(i,k,j)
+                        gj >= j_s-1 .and. gj <= j_e+1) then
+                        ml_fine_residual(i,k,j) = vec(gi,gk,gj)
+                    else
+                        ml_fine_residual(i,k,j) = 0.0_c_double
+                    endif
                 enddo
             enddo
         enddo
-    end subroutine exchange_multilevel_solver_halos
+    end subroutine copy_solver_to_multilevel_halo
 
 
-    subroutine apply_multilevel_preconditioner(in_vec, out_vec)
+    subroutine apply_multilevel_preconditioner(in_vec, out_vec, domain)
         implicit none
         real(c_double), dimension(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), intent(in) :: in_vec
         real(c_double), dimension(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), intent(inout) :: out_vec
+        type(domain_t), intent(in) :: domain
         integer :: i, j, k, sweep, nxc, nyc
         real(c_double), parameter :: coarse_omega = 0.8_c_double
         real(c_double), parameter :: post_omega = 0.8_c_double
@@ -2480,18 +2493,19 @@ contains
             enddo
         enddo
         call apply_vertical_lines(in_vec, out_vec)
-        call exchange_multilevel_solver_halos(out_vec)
+        call exchange_krylov_halos(out_vec, domain)
         call spmv(out_vec, prec_res)
         !$acc parallel loop gang vector collapse(3) present(in_vec,prec_res,ml_fine_residual)
         do j = ys, ys+ym-1
             do k = zs, zs+zm-1
                 do i = xs, xs+xm-1
                     prec_res(i,k,j) = in_vec(i,k,j)-prec_res(i,k,j)
-                    ml_fine_residual(i-xs+1,k-zs+1,j-ys+1) = prec_res(i,k,j)
                 enddo
             enddo
         enddo
-        call ml_fine_halo%exchange_device(ml_fine_residual)
+        call exchange_krylov_halos(prec_res, domain)
+        call exchange_krylov_halos(prec_res, domain)
+        call copy_solver_to_multilevel_halo(prec_res)
         call ml_transfer%restrict_owned_adjoint_device(ml_fine_residual, ml_fine_weight, &
                                                         ml_coarse_weight, ml_coarse_b)
         call ml_line_factor%apply_device(ml_coarse_b, ml_coarse_x)
@@ -2542,7 +2556,7 @@ contains
                 enddo
             enddo
         enddo
-        call exchange_multilevel_solver_halos(out_vec)
+        call exchange_krylov_halos(out_vec, domain)
         call spmv(out_vec, prec_res)
         !$acc parallel loop gang vector collapse(3) present(in_vec,prec_res)
         do j = ys, ys+ym-1
@@ -2582,14 +2596,15 @@ contains
     !! to homogeneous Dirichlet at the rank boundary. This is the standard
     !! approximation used by AMGX BLOCK_JACOBI and Hypre's PCJacobi.
     !!------------------------------------------------------------
-    subroutine apply_precond(in_vec, out_vec)
+    subroutine apply_precond(in_vec, out_vec, domain)
         implicit none
         real(c_double), dimension(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1), intent(in)    :: in_vec
         real(c_double), dimension(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1), intent(inout) :: out_vec
+        type(domain_t), intent(in) :: domain
         integer :: i, j, k, sweep
 
         if (multilevel_ready) then
-            call apply_multilevel_preconditioner(in_vec, out_vec)
+            call apply_multilevel_preconditioner(in_vec, out_vec, domain)
             return
         endif
 
