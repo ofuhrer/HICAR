@@ -2163,6 +2163,11 @@ contains
         call release_multilevel_preconditioner()
         multilevel_setup_attempted = .true.
         if (.not. multilevel_requested .or. .not. operator_probed) return
+        if (solver_rank == 0) then
+            write(output_unit,'(A,I0,A,I0,A,I0)') &
+                ' HICAR multilevel setup start: fine=', mx, 'x', my, 'x', mz
+            flush(output_unit)
+        endif
 
         call ml_transfer%init(mx, my, xs, xm, ys, ym, &
                               fix_lateral_boundaries=.true., fix_vertical_boundaries=.true.)
@@ -2227,12 +2232,17 @@ contains
         call ml_transfer%build_owned_coarse_weights_device(ml_fine_weight, ml_coarse_weight)
         !$acc update self(ml_coarse_weight)
 
+        if (solver_rank == 0) then
+            write(output_unit,'(A,I0,A,I0,A)') ' HICAR multilevel assembling exact ', &
+                ml_transfer%nx_c_global, 'x', ml_transfer%ny_c_global, ' coarse R A P stencil'
+            flush(output_unit)
+        endif
         call assemble_colored_tile_galerkin(ml_transfer%nx_c_global, ml_transfer%ny_c_global, &
             ml_transfer%x_c_first, ml_transfer%y_c_first, ml_transfer%nx_c_local, &
             ml_transfer%ny_c_local, mz, .true., .true., apply_coarse_rap, ml_stencil)
         call ml_line_factor%factorize(ml_stencil, line_status, minimum_pivot)
         if (line_status /= 0) then
-            if (STD_OUT_PE) write(output_unit,'(A,ES12.4)') &
+            if (solver_rank == 0) write(output_unit,'(A,ES12.4)') &
                 ' HICAR multilevel rejected: singular coarse vertical line, pivot=', minimum_pivot
             call release_multilevel_preconditioner()
             multilevel_setup_attempted = .true.
@@ -2270,7 +2280,7 @@ contains
         relative_error = sqrt(global_error/max(global_reference,tiny(1.0_c_double)))
         deallocate(test_x, direct_ax)
         if (relative_error > 2.0e-11_c_double) then
-            if (STD_OUT_PE) write(output_unit,'(A,ES12.4)') &
+            if (solver_rank == 0) write(output_unit,'(A,ES12.4)') &
                 ' HICAR multilevel rejected: coarse operator is not R A P, relative error=', relative_error
             call release_multilevel_preconditioner()
             multilevel_setup_attempted = .true.
@@ -2278,7 +2288,7 @@ contains
         endif
 
         multilevel_ready = .true.
-        if (STD_OUT_PE) then
+        if (solver_rank == 0) then
             write(output_unit,'(A,I0,A,I0,A,ES12.4,A,ES12.4)') &
                 ' HICAR Petrov-Galerkin level ready: global coarse=', ml_transfer%nx_c_global, 'x', &
                 ml_transfer%ny_c_global, ' RAP_error=', relative_error, ' min_line_pivot=', minimum_pivot
