@@ -274,8 +274,9 @@ contains
         adv_den = .True.
         if (present(advect_density)) adv_den=advect_density
         explicit_fields = present(u_explicit) .and. present(v_explicit) .and. present(w_explicit)
-        if (present(u_explicit) .neqv. present(v_explicit) .or. &
-            present(u_explicit) .neqv. present(w_explicit)) then
+        if (.not. (explicit_fields .or. &
+            (.not. present(u_explicit) .and. .not. present(v_explicit) .and. &
+             .not. present(w_explicit)))) then
             error stop 'calc_divergence requires all or none of u_explicit/v_explicit/w_explicit'
         endif
 
