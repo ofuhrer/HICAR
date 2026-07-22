@@ -17,6 +17,7 @@
 
 module test_wind_iterative
 
+    use, intrinsic :: iso_c_binding, only : c_double
     use mpi
     use icar_constants
     use testdrive,          only : new_unittest, unittest_type, error_type, test_failed
@@ -24,6 +25,7 @@ module test_wind_iterative
     use options_interface,  only : options_t
     use wind,               only : wind_var_request, init_winds, calc_divergence
     use wind_iterative,     only : calc_iter_winds, finalize_iter_winds
+    use wind_multilevel,    only : horizontal_transfer_t, horizontal_coarse_extent
     use advection,          only : adv_var_request
     use io_routines,        only : check_file_exists
     implicit none
@@ -40,6 +42,7 @@ contains
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
 
         testsuite = [ &
+            new_unittest("multilevel_transfer", test_multilevel_transfer), &
             new_unittest("iter_wind_solve_decomp", test_iter_wind_solve) &
             ]
     end subroutine collect_wind_iterative_suite
@@ -216,5 +219,137 @@ contains
         end subroutine seed_divergent_winds
 
     end subroutine test_iter_wind_solve
+
+
+    subroutine test_multilevel_transfer(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: nx = 8, ny = 7, nz = 5
+        type(horizontal_transfer_t) :: transfer, free_transfer
+        real(c_double), allocatable :: coarse_x(:,:,:), coarse_y(:,:,:), coarse_r(:,:,:)
+        real(c_double), allocatable :: coarse_weight(:,:,:), free_weight(:,:,:), free_coarse(:,:,:)
+        real(c_double), allocatable :: fine_x(:,:,:), fine_y(:,:,:), fine_v(:,:,:), fine_a_x(:,:,:)
+        real(c_double), allocatable :: fine_weight(:,:,:), free_fine(:,:,:)
+        real(c_double) :: lhs, rhs, scale, boundary_max, constant_error
+        integer :: i, j, k
+
+        if (horizontal_coarse_extent(nx) /= 5 .or. horizontal_coarse_extent(ny) /= 4) then
+            call test_failed(error, 'test_multilevel_transfer', 'coarse extent does not retain both boundaries')
+            return
+        endif
+
+        call transfer%init(nx, ny, fix_lateral_boundaries=.true., fix_vertical_boundaries=.true.)
+        allocate(coarse_x(transfer%nx_c,nz,transfer%ny_c), coarse_y(transfer%nx_c,nz,transfer%ny_c), &
+                 coarse_r(transfer%nx_c,nz,transfer%ny_c), coarse_weight(transfer%nx_c,nz,transfer%ny_c))
+        allocate(fine_x(nx,nz,ny), fine_y(nx,nz,ny), fine_v(nx,nz,ny), fine_a_x(nx,nz,ny), &
+                 fine_weight(nx,nz,ny))
+
+        do j = 1, transfer%ny_c
+            do k = 1, nz
+                do i = 1, transfer%nx_c
+                    coarse_x(i,k,j) = sin(0.31_c_double*real(i,c_double)) + &
+                                      0.07_c_double*real(k*j,c_double)
+                    coarse_y(i,k,j) = cos(0.23_c_double*real(i*j,c_double)) - &
+                                      0.04_c_double*real(k,c_double)
+                enddo
+            enddo
+        enddo
+        call zero_fixed_coarse(coarse_x)
+        call zero_fixed_coarse(coarse_y)
+
+        do j = 1, ny
+            do k = 1, nz
+                do i = 1, nx
+                    fine_weight(i,k,j) = 1.0_c_double + 0.03_c_double*real(i,c_double) + &
+                                         0.02_c_double*real(j,c_double) + 0.01_c_double*real(k,c_double)
+                    fine_v(i,k,j) = sin(0.17_c_double*real(i+2*j+3*k,c_double))
+                enddo
+            enddo
+        enddo
+
+        call transfer%build_coarse_weights(fine_weight, coarse_weight)
+        call transfer%prolong(coarse_x, fine_x)
+        call transfer%prolong(coarse_y, fine_y)
+        call transfer%restrict_adjoint(fine_v, fine_weight, coarse_weight, coarse_r)
+
+        lhs = sum(fine_weight * fine_x * fine_v)
+        rhs = sum(coarse_weight * coarse_x * coarse_r)
+        scale = max(1.0_c_double, abs(lhs), abs(rhs))
+        if (abs(lhs-rhs) > 5.0e-13_c_double*scale) then
+            call test_failed(error, 'test_multilevel_transfer', 'metric-weighted transfer adjointness failed')
+            call transfer%release()
+            return
+        endif
+
+        boundary_max = max(maxval(abs(fine_x(1,:,:))), maxval(abs(fine_x(nx,:,:))), &
+                           maxval(abs(fine_x(:,:,1))), maxval(abs(fine_x(:,:,ny))), &
+                           maxval(abs(fine_x(:,1,:))), maxval(abs(fine_x(:,nz,:))))
+        if (boundary_max /= 0.0_c_double) then
+            call test_failed(error, 'test_multilevel_transfer', 'prolongation changed a fixed identity boundary')
+            call transfer%release()
+            return
+        endif
+
+        ! Verify the actual Petrov-Galerkin composition, including a deliberately
+        ! nonsymmetric fine-grid operator: <Py,A Px>_f = <y,R A P x>_c.
+        call apply_test_operator(fine_x, fine_a_x)
+        call transfer%restrict_adjoint(fine_a_x, fine_weight, coarse_weight, coarse_r)
+        lhs = sum(fine_weight * fine_y * fine_a_x)
+        rhs = sum(coarse_weight * coarse_y * coarse_r)
+        scale = max(1.0_c_double, abs(lhs), abs(rhs))
+        if (abs(lhs-rhs) > 5.0e-13_c_double*scale) then
+            call test_failed(error, 'test_multilevel_transfer', 'Petrov-Galerkin composition identity failed')
+            call transfer%release()
+            return
+        endif
+
+        ! Without fixed identity rows the normalized adjoint restriction must
+        ! preserve constants on both odd and even horizontal extents.
+        call free_transfer%init(nx, ny, fix_lateral_boundaries=.false., fix_vertical_boundaries=.false.)
+        allocate(free_coarse(free_transfer%nx_c,nz,free_transfer%ny_c), &
+                 free_weight(free_transfer%nx_c,nz,free_transfer%ny_c), free_fine(nx,nz,ny))
+        free_coarse = 1.0_c_double
+        call free_transfer%prolong(free_coarse, free_fine)
+        constant_error = maxval(abs(free_fine - 1.0_c_double))
+        call free_transfer%build_coarse_weights(fine_weight, free_weight)
+        call free_transfer%restrict_adjoint(free_fine, fine_weight, free_weight, free_coarse)
+        constant_error = max(constant_error, maxval(abs(free_coarse - 1.0_c_double)))
+        if (constant_error > 5.0e-14_c_double) then
+            call test_failed(error, 'test_multilevel_transfer', 'unconstrained transfer does not preserve constants')
+        endif
+
+        call free_transfer%release()
+        call transfer%release()
+
+    contains
+
+        subroutine zero_fixed_coarse(field)
+            real(c_double), intent(inout) :: field(:,:,:)
+            field(1,:,:) = 0.0_c_double
+            field(size(field,1),:,:) = 0.0_c_double
+            field(:,:,1) = 0.0_c_double
+            field(:,:,size(field,3)) = 0.0_c_double
+            field(:,1,:) = 0.0_c_double
+            field(:,size(field,2),:) = 0.0_c_double
+        end subroutine zero_fixed_coarse
+
+        subroutine apply_test_operator(x, ax)
+            real(c_double), intent(in) :: x(:,:,:)
+            real(c_double), intent(out) :: ax(:,:,:)
+            integer :: ii, jj, kk
+
+            ax = 0.0_c_double
+            do jj = 2, size(x,3)-1
+                do kk = 2, size(x,2)-1
+                    do ii = 2, size(x,1)-1
+                        ax(ii,kk,jj) = 3.7_c_double*x(ii,kk,jj) &
+                            - 0.8_c_double*x(ii-1,kk,jj) + 0.35_c_double*x(ii+1,kk,jj) &
+                            - 0.6_c_double*x(ii,kk,jj-1) + 0.15_c_double*x(ii,kk,jj+1) &
+                            - 1.1_c_double*x(ii,kk-1,jj) + 0.45_c_double*x(ii,kk+1,jj)
+                    enddo
+                enddo
+            enddo
+        end subroutine apply_test_operator
+
+    end subroutine test_multilevel_transfer
 
 end module test_wind_iterative
