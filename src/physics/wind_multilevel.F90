@@ -54,7 +54,8 @@ module wind_multilevel
         end subroutine fine_operator_apply
     end interface
 
-    public :: horizontal_coarse_extent
+    public :: horizontal_coarse_extent, horizontal_coarse_coordinate
+    public :: horizontal_coarse_bracket, owned_coarse_interval
     public :: assemble_colored_galerkin
 
 contains
@@ -71,6 +72,58 @@ contains
             n_c = n_f / 2 + 1
         endif
     end function horizontal_coarse_extent
+
+
+    pure integer function horizontal_coarse_coordinate(c, n_f) result(f)
+        integer, intent(in) :: c, n_f
+
+        f = min(2*c, n_f-1)
+    end function horizontal_coarse_coordinate
+
+
+    pure subroutine horizontal_coarse_bracket(f, n_f, lo, hi, hi_weight)
+        integer, intent(in) :: f, n_f
+        integer, intent(out) :: lo, hi
+        real(c_double), intent(out) :: hi_weight
+        integer :: n_c, left_coordinate, right_coordinate
+
+        n_c = horizontal_coarse_extent(n_f)
+        if (f == n_f-1) then
+            lo = n_c-1
+            hi = n_c-1
+            hi_weight = 0.0_c_double
+            return
+        endif
+
+        lo = f / 2
+        hi = min(lo + 1, n_c-1)
+        left_coordinate = horizontal_coarse_coordinate(lo, n_f)
+        right_coordinate = horizontal_coarse_coordinate(hi, n_f)
+        if (right_coordinate == left_coordinate) then
+            hi_weight = 0.0_c_double
+        else
+            hi_weight = real(f-left_coordinate,c_double) / &
+                        real(right_coordinate-left_coordinate,c_double)
+        endif
+    end subroutine horizontal_coarse_bracket
+
+
+    pure subroutine owned_coarse_interval(n_f, fine_first, fine_count, coarse_first, coarse_count)
+        integer, intent(in) :: n_f, fine_first, fine_count
+        integer, intent(out) :: coarse_first, coarse_count
+        integer :: c, coordinate, n_c
+
+        n_c = horizontal_coarse_extent(n_f)
+        coarse_first = 0
+        coarse_count = 0
+        do c = 0, n_c-1
+            coordinate = horizontal_coarse_coordinate(c, n_f)
+            if (coordinate >= fine_first .and. coordinate < fine_first+fine_count) then
+                if (coarse_count == 0) coarse_first = c
+                coarse_count = coarse_count + 1
+            endif
+        enddo
+    end subroutine owned_coarse_interval
 
 
     subroutine init_horizontal_transfer(this, nx_f, ny_f, fix_lateral_boundaries, fix_vertical_boundaries)
@@ -90,8 +143,8 @@ contains
 
         allocate(this%i_lo(nx_f), this%i_hi(nx_f), this%i_hi_weight(nx_f))
         allocate(this%j_lo(ny_f), this%j_hi(ny_f), this%j_hi_weight(ny_f))
-        call build_axis_map(nx_f, this%nx_c, this%i_lo, this%i_hi, this%i_hi_weight)
-        call build_axis_map(ny_f, this%ny_c, this%j_lo, this%j_hi, this%j_hi_weight)
+        call build_axis_map(nx_f, this%i_lo, this%i_hi, this%i_hi_weight)
+        call build_axis_map(ny_f, this%j_lo, this%j_hi, this%j_hi_weight)
     end subroutine init_horizontal_transfer
 
 
@@ -109,33 +162,16 @@ contains
     end subroutine release_horizontal_transfer
 
 
-    pure subroutine build_axis_map(n_f, n_c, lo, hi, hi_weight)
-        integer, intent(in) :: n_f, n_c
+    pure subroutine build_axis_map(n_f, lo, hi, hi_weight)
+        integer, intent(in) :: n_f
         integer, intent(out) :: lo(n_f), hi(n_f)
         real(c_double), intent(out) :: hi_weight(n_f)
-        integer :: f, left_coordinate, right_coordinate
+        integer :: f, lo_zero, hi_zero
 
         do f = 1, n_f
-            if (f == n_f) then
-                lo(f) = n_c
-                hi(f) = n_c
-                hi_weight(f) = 0.0_c_double
-            else
-                lo(f) = (f - 1) / 2 + 1
-                hi(f) = min(lo(f) + 1, n_c)
-                left_coordinate = 2 * (lo(f) - 1)
-                if (hi(f) == n_c) then
-                    right_coordinate = n_f - 1
-                else
-                    right_coordinate = 2 * (hi(f) - 1)
-                endif
-                if (right_coordinate == left_coordinate) then
-                    hi_weight(f) = 0.0_c_double
-                else
-                    hi_weight(f) = real((f - 1) - left_coordinate, c_double) / &
-                                   real(right_coordinate - left_coordinate, c_double)
-                endif
-            endif
+            call horizontal_coarse_bracket(f-1, n_f, lo_zero, hi_zero, hi_weight(f))
+            lo(f) = lo_zero + 1
+            hi(f) = hi_zero + 1
         enddo
     end subroutine build_axis_map
 

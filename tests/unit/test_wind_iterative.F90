@@ -26,6 +26,7 @@ module test_wind_iterative
     use wind,               only : wind_var_request, init_winds, calc_divergence
     use wind_iterative,     only : calc_iter_winds, finalize_iter_winds
     use wind_multilevel,    only : horizontal_transfer_t, horizontal_coarse_extent, &
+                                    horizontal_coarse_coordinate, owned_coarse_interval, &
                                     galerkin_stencil_t, vertical_line_factor_t, assemble_colored_galerkin
     use advection,          only : adv_var_request
     use io_routines,        only : check_file_exists
@@ -234,10 +235,31 @@ contains
         real(c_double), allocatable :: fine_x(:,:,:), fine_y(:,:,:), fine_v(:,:,:), fine_a_x(:,:,:)
         real(c_double), allocatable :: fine_weight(:,:,:), free_fine(:,:,:)
         real(c_double) :: lhs, rhs, scale, boundary_max, constant_error, minimum_pivot
-        integer :: i, j, k, dk, line_status
+        integer :: i, j, k, dk, line_status, rank_case, coarse_first, coarse_count
+        integer :: owner_count(0:4)
+        integer, parameter :: partition_first(3) = [0, 2, 5]
+        integer, parameter :: partition_count(3) = [2, 3, 3]
 
         if (horizontal_coarse_extent(nx) /= 5 .or. horizontal_coarse_extent(ny) /= 4) then
             call test_failed(error, 'test_multilevel_transfer', 'coarse extent does not retain both boundaries')
+            return
+        endif
+
+        owner_count = 0
+        do rank_case = 1, size(partition_first)
+            call owned_coarse_interval(nx, partition_first(rank_case), partition_count(rank_case), &
+                                       coarse_first, coarse_count)
+            do i = coarse_first, coarse_first+coarse_count-1
+                if (horizontal_coarse_coordinate(i,nx) < partition_first(rank_case) .or. &
+                    horizontal_coarse_coordinate(i,nx) >= partition_first(rank_case)+partition_count(rank_case)) then
+                    call test_failed(error, 'test_multilevel_transfer', 'coarse point assigned outside owning fine tile')
+                    return
+                endif
+                owner_count(i) = owner_count(i) + 1
+            enddo
+        enddo
+        if (any(owner_count /= 1)) then
+            call test_failed(error, 'test_multilevel_transfer', 'distributed coarse ownership is not unique and complete')
             return
         endif
 
