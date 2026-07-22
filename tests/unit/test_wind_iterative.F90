@@ -115,6 +115,13 @@ contains
         domain%vars_3d(domain%var_indx(kVARS%density)%v)%data_3d    = 1.0
         domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d = 1.0
 
+        ! These tendency arrays are allocated locally by this fixture rather
+        ! than by the normal forcing reader.  The production reader enters
+        ! them into OpenACC data; mirror that contract before the correction
+        ! kernel's PRESENT clauses are evaluated.
+        !$acc enter data copyin(domain%vars_3d(domain%var_indx(kVARS%u)%v)%dqdt_3d, &
+        !$acc                       domain%vars_3d(domain%var_indx(kVARS%v)%v)%dqdt_3d)
+
         !$acc data copy(kVARS) copy(div)
         ! divergence of the seeded field
         call calc_divergence(div, domain, advect_density=.False., horz_only=.False., use_dqdt=.True.)
@@ -130,6 +137,8 @@ contains
         !$acc update host(div)
         div1_max = maxval(abs(div(its:ite, kms:kme, jts:jte)))
         !$acc end data
+        !$acc exit data delete(domain%vars_3d(domain%var_indx(kVARS%u)%v)%dqdt_3d, &
+        !$acc                      domain%vars_3d(domain%var_indx(kVARS%v)%v)%dqdt_3d)
 
         ! reduce to a global max so the assertion is decomposition-independent
         call MPI_Allreduce(div0_max, div0_max_g, 1, MPI_REAL, MPI_MAX, domain%compute_comms, ierr)
