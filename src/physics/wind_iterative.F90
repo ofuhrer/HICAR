@@ -2383,7 +2383,19 @@ contains
                 write(output_unit,'(A)') ' HICAR multilevel probe stage: fine solver halo'
                 flush(output_unit)
             endif
+            if (rap_apply_count == 1) then
+                write(output_unit,'(A,I0,A,4(L1,1X),A,4(I0,1X))') &
+                    ' HICAR multilevel fine halo enter rank=', solver_rank, &
+                    ' boundaries[E W N S]=', domain%east_boundary, domain%west_boundary, &
+                    domain%north_boundary, domain%south_boundary, &
+                    ' peers[E W N S]=', east_neighbor, west_neighbor, north_neighbor, south_neighbor
+                flush(output_unit)
+            endif
             call exchange_krylov_halos(x_sol, domain)
+            if (rap_apply_count == 1) then
+                write(output_unit,'(A,I0)') ' HICAR multilevel fine halo exit rank=', solver_rank
+                flush(output_unit)
+            endif
             if (solver_rank == 0) then
                 write(output_unit,'(A)') ' HICAR multilevel probe stage: fine operator'
                 flush(output_unit)
