@@ -95,10 +95,12 @@ module wind_iterative
     ! host FGMRES path this is an explicit GPU allocation, so the national
     ! decomposition has a predictable (2*(restart+1)) vector footprint.
     ! The 12-vector prototype made a valid first reduction but restarted into
-    ! stagnation on the 250 m calibrated operator.  Fifty is the established
-    ! convergent Krylov dimension for this operator; native GPU storage keeps
-    ! its 2*(50+1) vectors bounded at roughly 3 GB per Swiss GPU.
-    integer, parameter :: FGMRES_RESTART = 50
+    ! stagnation on the 250 m calibrated operator.  The national calibrated
+    ! operator retained too little information across a 50-vector restart and
+    ! stalled well above tolerance.  One hundred remains a bounded GPU-only
+    ! allocation while retaining enough long-wavelength Krylov information for
+    ! the Swiss decomposition.
+    integer, parameter :: FGMRES_RESTART = 100
 
     ! 15-point stencil coefficients (same names as AMGX module)
     real, allocatable, dimension(:,:,:) :: A_coef, B_coef, C_coef, D_coef, E_coef, F_coef, G_coef, &
@@ -1056,6 +1058,21 @@ contains
                 do i = 1, j
                     h(i,j) = h_local(i)
                     call vec_axpby_into(t_vec, -h(i,j), v_basis(:,:,:,i), 1.0_c_double, t_vec)
+                enddo
+                ! Reorthogonalize.  On the long, non-normal calibrated
+                ! operator a single classical Gram-Schmidt pass loses enough
+                ! orthogonality that a restarted solve can report no useful
+                ! progress after the first few cycles.  Accumulate the second
+                ! projection in the same Hessenberg column rather than
+                ! discarding it.
+                dots_local = 0.0_c_double
+                do i = 1, j
+                    call vec_dot_local(v_basis(:,:,:,i), t_vec, dots_local(i))
+                enddo
+                call MPI_Allreduce(dots_local, h_local, j, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+                do i = 1, j
+                    h(i,j) = h(i,j) + h_local(i)
+                    call vec_axpby_into(t_vec, -h_local(i), v_basis(:,:,:,i), 1.0_c_double, t_vec)
                 enddo
                 call vec_norm2_local(t_vec, h(j+1,j))
                 call MPI_Allreduce(MPI_IN_PLACE, h(j+1,j), 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
