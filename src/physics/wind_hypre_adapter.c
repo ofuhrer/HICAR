@@ -224,13 +224,10 @@ int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, i
   if (!ierr) { fprintf(stderr, "HICAR HYPRE rank %d: matrix retained on host\n", state.rank); fflush(stderr); }
   if (!ierr) ierr |= HYPRE_BoomerAMGCreate(&state.amg);
   /* The terrain-following projection operator is generally nonsymmetric.
-   * Use two AMG cycles per flexible preconditioning application.  On the
-   * 16-rank Swiss operator one cycle reduced the residual initially but then
-   * stagnated at 2.86e-2 after the first FGMRES restart; a second cycle is the
-   * smallest targeted strengthening of the same mathematically consistent
-   * preconditioner.  FGMRES still owns the outer convergence test. */
+   * Use AMG for one flexible preconditioning cycle, and let FGMRES own the
+   * outer convergence test rather than applying AMG as a stationary solver. */
   if (!ierr) ierr |= HYPRE_BoomerAMGSetTol(state.amg, 0.0);
-  if (!ierr) ierr |= HYPRE_BoomerAMGSetMaxIter(state.amg, 2);
+  if (!ierr) ierr |= HYPRE_BoomerAMGSetMaxIter(state.amg, 1);
   if (!ierr) ierr |= HYPRE_BoomerAMGSetPrintLevel(state.amg, 0);
   /* The default Falgout hierarchy is prohibitively expensive on the 3.75 M
    * cell Swiss operator.  HMIS plus extended+i interpolation is HYPRE's
@@ -251,7 +248,7 @@ int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, i
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetLogging(state.fgmres, fgmres_print_level ? 1 : 0);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetPrintLevel(state.fgmres, fgmres_print_level);
   /* The calibrated matrix has now been assembled with its true local
-   * coefficient bounds.  Use two BoomerAMG cycles as a flexible FGMRES
+   * coefficient bounds.  Use one BoomerAMG cycle as a flexible FGMRES
    * preconditioner; FGMRES retains responsibility for convergence. */
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetPrecond(state.fgmres,
       HYPRE_BoomerAMGSolve, HYPRE_BoomerAMGSetup, state.amg);
