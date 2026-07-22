@@ -335,7 +335,7 @@ contains
 
     subroutine prolong_horizontal_tile_device(this, coarse, fine)
         class(horizontal_tile_transfer_t), intent(in) :: this
-        real(c_double), intent(in) :: coarse(0:,:,0:)
+        real(c_double), intent(in) :: coarse(:,:,:)
         real(c_double), intent(out) :: fine(:,:,:)
         integer :: i, j, k, il, ih, jl, jh, gi, gj
         real(c_double) :: tx, ty
@@ -359,9 +359,9 @@ contains
                         il = this%i_lo(i); ih = this%i_hi(i); tx = this%i_hi_weight(i)
                         jl = this%j_lo(j); jh = this%j_hi(j); ty = this%j_hi_weight(j)
                         fine(i,k,j) = &
-                            (1.0_c_double-tx)*(1.0_c_double-ty)*coarse(il,k,jl) + &
-                            tx*(1.0_c_double-ty)*coarse(ih,k,jl) + &
-                            (1.0_c_double-tx)*ty*coarse(il,k,jh) + tx*ty*coarse(ih,k,jh)
+                            (1.0_c_double-tx)*(1.0_c_double-ty)*coarse(il+1,k,jl+1) + &
+                            tx*(1.0_c_double-ty)*coarse(ih+1,k,jl+1) + &
+                            (1.0_c_double-tx)*ty*coarse(il+1,k,jh+1) + tx*ty*coarse(ih+1,k,jh+1)
                     endif
                 enddo
             enddo
