@@ -35,14 +35,20 @@ module wind_multilevel
         integer :: ny_c_local = 0
         logical :: fix_lateral_boundaries = .true.
         logical :: fix_vertical_boundaries = .true.
+        logical :: device_uploaded = .false.
         integer, allocatable :: i_lo(:), i_hi(:), j_lo(:), j_hi(:)
         real(c_double), allocatable :: i_hi_weight(:), j_hi_weight(:)
     contains
         procedure :: init => init_horizontal_tile_transfer
         procedure :: release => release_horizontal_tile_transfer
+        procedure :: upload_device => upload_horizontal_tile_transfer
+        procedure :: delete_device => delete_horizontal_tile_transfer
         procedure :: prolong_owned => prolong_horizontal_tile
+        procedure :: prolong_owned_device => prolong_horizontal_tile_device
         procedure :: build_owned_coarse_weights
+        procedure :: build_owned_coarse_weights_device
         procedure :: restrict_owned_adjoint
+        procedure :: restrict_owned_adjoint_device
     end type horizontal_tile_transfer_t
 
     type, public :: galerkin_stencil_t
@@ -108,6 +114,7 @@ module wind_multilevel
 contains
 
     pure integer function horizontal_coarse_extent(n_f) result(n_c)
+        !$acc routine seq
         integer, intent(in) :: n_f
 
         if (n_f <= 1) then
@@ -122,6 +129,7 @@ contains
 
 
     pure integer function horizontal_coarse_coordinate(c, n_f) result(f)
+        !$acc routine seq
         integer, intent(in) :: c, n_f
 
         f = min(2*c, n_f-1)
@@ -129,6 +137,7 @@ contains
 
 
     pure subroutine horizontal_coarse_bracket(f, n_f, lo, hi, hi_weight)
+        !$acc routine seq
         integer, intent(in) :: f, n_f
         integer, intent(out) :: lo, hi
         real(c_double), intent(out) :: hi_weight
@@ -253,6 +262,7 @@ contains
     subroutine release_horizontal_tile_transfer(this)
         class(horizontal_tile_transfer_t), intent(inout) :: this
 
+        call this%delete_device()
         if (allocated(this%i_lo)) deallocate(this%i_lo, this%i_hi, this%i_hi_weight)
         if (allocated(this%j_lo)) deallocate(this%j_lo, this%j_hi, this%j_hi_weight)
         this%nx_f_global = 0; this%ny_f_global = 0
@@ -264,6 +274,26 @@ contains
         this%fix_lateral_boundaries = .true.
         this%fix_vertical_boundaries = .true.
     end subroutine release_horizontal_tile_transfer
+
+
+    subroutine upload_horizontal_tile_transfer(this)
+        class(horizontal_tile_transfer_t), intent(inout) :: this
+
+        if (this%device_uploaded) return
+        !$acc enter data copyin(this%i_lo, this%i_hi, this%i_hi_weight, &
+        !$acc                   this%j_lo, this%j_hi, this%j_hi_weight)
+        this%device_uploaded = .true.
+    end subroutine upload_horizontal_tile_transfer
+
+
+    subroutine delete_horizontal_tile_transfer(this)
+        class(horizontal_tile_transfer_t), intent(inout) :: this
+
+        if (.not. this%device_uploaded) return
+        !$acc exit data delete(this%i_lo, this%i_hi, this%i_hi_weight, &
+        !$acc                  this%j_lo, this%j_hi, this%j_hi_weight)
+        this%device_uploaded = .false.
+    end subroutine delete_horizontal_tile_transfer
 
 
     subroutine prolong_horizontal_tile(this, coarse, fine)
@@ -291,6 +321,42 @@ contains
             enddo
         enddo
     end subroutine prolong_horizontal_tile
+
+
+    subroutine prolong_horizontal_tile_device(this, coarse, fine)
+        class(horizontal_tile_transfer_t), intent(in) :: this
+        real(c_double), intent(in) :: coarse(0:,:,0:)
+        real(c_double), intent(out) :: fine(:,:,:)
+        integer :: i, j, k, il, ih, jl, jh, gi, gj
+        real(c_double) :: tx, ty
+
+        call require_tile_shapes(this, coarse, fine)
+        if (.not. this%device_uploaded) error stop 'tile transfer maps are not on the device'
+        !$acc parallel loop gang vector collapse(3) &
+        !$acc present(coarse, fine, this%i_lo, this%i_hi, this%i_hi_weight, &
+        !$acc         this%j_lo, this%j_hi, this%j_hi_weight) &
+        !$acc private(il,ih,jl,jh,gi,gj,tx,ty)
+        do j = 1, this%ny_f_local
+            do k = 1, size(fine,2)
+                do i = 1, this%nx_f_local
+                    gi = this%x_f_first+i-1
+                    gj = this%y_f_first+j-1
+                    if ((this%fix_lateral_boundaries .and. &
+                         (gi == 0 .or. gi == this%nx_f_global-1 .or. gj == 0 .or. gj == this%ny_f_global-1)) .or. &
+                        (this%fix_vertical_boundaries .and. (k == 1 .or. k == size(fine,2)))) then
+                        fine(i,k,j) = 0.0_c_double
+                    else
+                        il = this%i_lo(i); ih = this%i_hi(i); tx = this%i_hi_weight(i)
+                        jl = this%j_lo(j); jh = this%j_hi(j); ty = this%j_hi_weight(j)
+                        fine(i,k,j) = &
+                            (1.0_c_double-tx)*(1.0_c_double-ty)*coarse(il,k,jl) + &
+                            tx*(1.0_c_double-ty)*coarse(ih,k,jl) + &
+                            (1.0_c_double-tx)*ty*coarse(il,k,jh) + tx*ty*coarse(ih,k,jh)
+                    endif
+                enddo
+            enddo
+        enddo
+    end subroutine prolong_horizontal_tile_device
 
 
     subroutine build_owned_coarse_weights(this, fine_weight, coarse_weight)
@@ -332,6 +398,59 @@ contains
     end subroutine build_owned_coarse_weights
 
 
+    subroutine build_owned_coarse_weights_device(this, fine_weight, coarse_weight)
+        class(horizontal_tile_transfer_t), intent(in) :: this
+        real(c_double), intent(in) :: fine_weight(0:,:,0:)
+        real(c_double), intent(out) :: coarse_weight(:,:,:)
+        integer :: i, j, k, fi, fj, gi, gj, ci, cj, ilo, ihi, jlo, jhi
+        real(c_double) :: wx, wy, tx, ty, total
+
+        call require_tile_reverse_shapes(this, fine_weight, coarse_weight)
+        if (.not. this%device_uploaded) error stop 'tile transfer maps are not on the device'
+        !$acc parallel loop gang vector collapse(3) present(fine_weight, coarse_weight) &
+        !$acc private(fi,fj,gi,gj,ci,cj,ilo,ihi,jlo,jhi,wx,wy,tx,ty,total)
+        do j = 1, this%ny_c_local
+            do k = 1, size(coarse_weight,2)
+                do i = 1, this%nx_c_local
+                    ci = this%x_c_first+i-1
+                    cj = this%y_c_first+j-1
+                    if ((this%fix_lateral_boundaries .and. &
+                         (ci == 0 .or. ci == this%nx_c_global-1 .or. cj == 0 .or. cj == this%ny_c_global-1)) .or. &
+                        (this%fix_vertical_boundaries .and. (k == 1 .or. k == size(coarse_weight,2)))) then
+                        coarse_weight(i,k,j) = 1.0_c_double
+                        cycle
+                    endif
+                    total = 0.0_c_double
+                    do gj = max(0,horizontal_coarse_coordinate(cj,this%ny_f_global)-1), &
+                            min(this%ny_f_global-1,horizontal_coarse_coordinate(cj,this%ny_f_global)+1)
+                        call horizontal_coarse_bracket(gj,this%ny_f_global,jlo,jhi,ty)
+                        wy = 0.0_c_double
+                        if (cj == jlo) wy = wy + 1.0_c_double-ty
+                        if (cj == jhi) wy = wy + ty
+                        if (wy <= 0.0_c_double) cycle
+                        fj = gj-this%y_f_first+1
+                        do gi = max(0,horizontal_coarse_coordinate(ci,this%nx_f_global)-1), &
+                                min(this%nx_f_global-1,horizontal_coarse_coordinate(ci,this%nx_f_global)+1)
+                            call horizontal_coarse_bracket(gi,this%nx_f_global,ilo,ihi,tx)
+                            wx = 0.0_c_double
+                            if (ci == ilo) wx = wx + 1.0_c_double-tx
+                            if (ci == ihi) wx = wx + tx
+                            if (wx <= 0.0_c_double) cycle
+                            fi = gi-this%x_f_first+1
+                            if ((this%fix_lateral_boundaries .and. &
+                                 (gi == 0 .or. gi == this%nx_f_global-1 .or. gj == 0 .or. gj == this%ny_f_global-1)) .or. &
+                                (this%fix_vertical_boundaries .and. &
+                                 (k == 1 .or. k == size(coarse_weight,2)))) cycle
+                            total = total + wx*wy*fine_weight(fi,k,fj)
+                        enddo
+                    enddo
+                    coarse_weight(i,k,j) = total
+                enddo
+            enddo
+        enddo
+    end subroutine build_owned_coarse_weights_device
+
+
     subroutine restrict_owned_adjoint(this, fine, fine_weight, coarse_weight, coarse)
         class(horizontal_tile_transfer_t), intent(in) :: this
         real(c_double), intent(in) :: fine(0:,:,0:), fine_weight(0:,:,0:), coarse_weight(:,:,:)
@@ -367,6 +486,59 @@ contains
             enddo
         enddo
     end subroutine restrict_owned_adjoint
+
+
+    subroutine restrict_owned_adjoint_device(this, fine, fine_weight, coarse_weight, coarse)
+        class(horizontal_tile_transfer_t), intent(in) :: this
+        real(c_double), intent(in) :: fine(0:,:,0:), fine_weight(0:,:,0:), coarse_weight(:,:,:)
+        real(c_double), intent(out) :: coarse(:,:,:)
+        integer :: i, j, k, fi, fj, gi, gj, ci, cj, ilo, ihi, jlo, jhi
+        real(c_double) :: wx, wy, tx, ty, total
+
+        call require_tile_reverse_shapes(this, fine, coarse)
+        call require_tile_reverse_shapes(this, fine_weight, coarse_weight)
+        if (.not. this%device_uploaded) error stop 'tile transfer maps are not on the device'
+        !$acc parallel loop gang vector collapse(3) present(fine, fine_weight, coarse_weight, coarse) &
+        !$acc private(fi,fj,gi,gj,ci,cj,ilo,ihi,jlo,jhi,wx,wy,tx,ty,total)
+        do j = 1, this%ny_c_local
+            do k = 1, size(coarse,2)
+                do i = 1, this%nx_c_local
+                    ci = this%x_c_first+i-1
+                    cj = this%y_c_first+j-1
+                    if ((this%fix_lateral_boundaries .and. &
+                         (ci == 0 .or. ci == this%nx_c_global-1 .or. cj == 0 .or. cj == this%ny_c_global-1)) .or. &
+                        (this%fix_vertical_boundaries .and. (k == 1 .or. k == size(coarse,2)))) then
+                        coarse(i,k,j) = 0.0_c_double
+                        cycle
+                    endif
+                    total = 0.0_c_double
+                    do gj = max(0,horizontal_coarse_coordinate(cj,this%ny_f_global)-1), &
+                            min(this%ny_f_global-1,horizontal_coarse_coordinate(cj,this%ny_f_global)+1)
+                        call horizontal_coarse_bracket(gj,this%ny_f_global,jlo,jhi,ty)
+                        wy = 0.0_c_double
+                        if (cj == jlo) wy = wy + 1.0_c_double-ty
+                        if (cj == jhi) wy = wy + ty
+                        if (wy <= 0.0_c_double) cycle
+                        fj = gj-this%y_f_first+1
+                        do gi = max(0,horizontal_coarse_coordinate(ci,this%nx_f_global)-1), &
+                                min(this%nx_f_global-1,horizontal_coarse_coordinate(ci,this%nx_f_global)+1)
+                            call horizontal_coarse_bracket(gi,this%nx_f_global,ilo,ihi,tx)
+                            wx = 0.0_c_double
+                            if (ci == ilo) wx = wx + 1.0_c_double-tx
+                            if (ci == ihi) wx = wx + tx
+                            if (wx <= 0.0_c_double) cycle
+                            fi = gi-this%x_f_first+1
+                            if ((this%fix_lateral_boundaries .and. &
+                                 (gi == 0 .or. gi == this%nx_f_global-1 .or. gj == 0 .or. gj == this%ny_f_global-1)) .or. &
+                                (this%fix_vertical_boundaries .and. (k == 1 .or. k == size(coarse,2)))) cycle
+                            total = total + wx*wy*fine_weight(fi,k,fj)*fine(fi,k,fj)
+                        enddo
+                    enddo
+                    coarse(i,k,j) = total/coarse_weight(i,k,j)
+                enddo
+            enddo
+        enddo
+    end subroutine restrict_owned_adjoint_device
 
 
     pure subroutine build_axis_map(n_f, lo, hi, hi_weight)
