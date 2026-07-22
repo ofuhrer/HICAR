@@ -349,7 +349,7 @@ int hicar_hypre_solve(const double *rhs, double *x, int max_iter, double tol, in
     HICAR_HYPRE_STEP(17, HYPRE_ParCSRFlexGMRESSetup(state.fgmres,state.a,b,sol));
     state.solver_ready = 1;
     if (state.rank == 0) {
-      fprintf(stderr, "HICAR HYPRE: FGMRES/MGR-AMG setup complete in %.3f s\n", MPI_Wtime() - setup_start);
+      fprintf(stderr, "HICAR HYPRE: FGMRES/AMG setup complete in %.3f s\n", MPI_Wtime() - setup_start);
       fflush(stderr);
     }
   }
