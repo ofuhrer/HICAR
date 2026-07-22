@@ -668,14 +668,15 @@ contains
             error stop
         endif
 
-        ! Adaptive preconditioner retry: if the solver diverged/stagnated
-        ! (status non-zero AND residual didn't shrink by 100x), bump the
-        ! Block-Jacobi sweep count and retry. Each retry restarts from
-        ! x_sol = 0 (bicgstab_solve assumes x0=0 — see r_vec = rhs init).
+        ! Adaptive preconditioner retry: any non-converged solve must be
+        ! retried while a stronger configured sweep count remains.  Residual
+        ! reduction alone is not an acceptance criterion: a solve can shrink
+        ! by much more than 100x and still miss the requested tolerance.
+        ! Each retry restarts from x_sol = 0 (bicgstab_solve assumes x0=0 —
+        ! see r_vec = rhs init).
         ! Mirrors wind_iterative_amgx.F90's prec_max_iters retry.
-        if (status /= 0 .and. n_iters > 0 .and. res_final > 0.01_c_double * res0) then
-            do while (status /= 0 .and. res_final > 0.01_c_double * res0 &
-                      .and. precond_n_sweeps < MAX_PREC_SWEEPS)
+        if (status /= 0 .and. n_iters > 0) then
+            do while (status /= 0 .and. precond_n_sweeps < MAX_PREC_SWEEPS)
                 precond_n_sweeps = precond_n_sweeps + 1
                 if (STD_OUT_PE) write(*,*) ' Convergence unsatisfactory, retrying solve with precond_n_sweeps=', &
                                            precond_n_sweeps
