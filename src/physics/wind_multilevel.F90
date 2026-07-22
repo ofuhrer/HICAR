@@ -343,8 +343,7 @@ contains
         call require_tile_shapes(this, coarse, fine)
         if (.not. this%device_uploaded) error stop 'tile transfer maps are not on the device'
         !$acc parallel loop gang vector collapse(3) &
-        !$acc present(coarse, fine, this%i_lo, this%i_hi, this%i_hi_weight, &
-        !$acc         this%j_lo, this%j_hi, this%j_hi_weight) &
+        !$acc present(coarse, fine) &
         !$acc private(il,ih,jl,jh,gi,gj,tx,ty)
         do j = 1, this%ny_f_local
             do k = 1, size(fine,2)
@@ -356,8 +355,10 @@ contains
                         (this%fix_vertical_boundaries .and. (k == 1 .or. k == size(fine,2)))) then
                         fine(i,k,j) = 0.0_c_double
                     else
-                        il = this%i_lo(i); ih = this%i_hi(i); tx = this%i_hi_weight(i)
-                        jl = this%j_lo(j); jh = this%j_hi(j); ty = this%j_hi_weight(j)
+                        call horizontal_coarse_bracket(gi, this%nx_f_global, il, ih, tx)
+                        call horizontal_coarse_bracket(gj, this%ny_f_global, jl, jh, ty)
+                        il = il-this%x_c_first+1; ih = ih-this%x_c_first+1
+                        jl = jl-this%y_c_first+1; jh = jh-this%y_c_first+1
                         fine(i,k,j) = &
                             (1.0_c_double-tx)*(1.0_c_double-ty)*coarse(il+1,k,jl+1) + &
                             tx*(1.0_c_double-ty)*coarse(ih+1,k,jl+1) + &
