@@ -2407,9 +2407,12 @@ contains
         implicit none
         real(c_double), dimension(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), intent(in) :: in_vec
         real(c_double), dimension(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), intent(inout) :: out_vec
-        integer :: i, j, k, sweep
+        integer :: i, j, k, sweep, nxc, nyc
         real(c_double), parameter :: coarse_omega = 0.8_c_double
         real(c_double), parameter :: post_omega = 0.8_c_double
+
+        nxc = ml_transfer%nx_c_local
+        nyc = ml_transfer%ny_c_local
 
         !$acc parallel loop gang vector collapse(3) present(out_vec)
         do j = j_s-1, j_e+1
@@ -2437,9 +2440,9 @@ contains
         call ml_line_factor%apply_device(ml_coarse_b, ml_coarse_x)
         do sweep = 2, 4
             !$acc parallel loop gang vector collapse(3) present(ml_coarse_halo_x,ml_coarse_x)
-            do j = 1, ml_transfer%ny_c_local
+            do j = 1, nyc
                 do k = 1, mz
-                    do i = 1, ml_transfer%nx_c_local
+                    do i = 1, nxc
                         ml_coarse_halo_x(i,k,j) = ml_coarse_x(i,k,j)
                     enddo
                 enddo
@@ -2447,27 +2450,27 @@ contains
             call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
             call ml_stencil%apply_owned_device(ml_coarse_halo_x, ml_coarse_ax)
             !$acc parallel loop gang vector collapse(3) present(ml_coarse_b,ml_coarse_ax,ml_coarse_r)
-            do j = 1, ml_transfer%ny_c_local
+            do j = 1, nyc
                 do k = 1, mz
-                    do i = 1, ml_transfer%nx_c_local
+                    do i = 1, nxc
                         ml_coarse_r(i,k,j) = ml_coarse_b(i,k,j)-ml_coarse_ax(i,k,j)
                     enddo
                 enddo
             enddo
             call ml_line_factor%apply_device(ml_coarse_r, ml_coarse_correction)
             !$acc parallel loop gang vector collapse(3) present(ml_coarse_x,ml_coarse_correction)
-            do j = 1, ml_transfer%ny_c_local
+            do j = 1, nyc
                 do k = 1, mz
-                    do i = 1, ml_transfer%nx_c_local
+                    do i = 1, nxc
                         ml_coarse_x(i,k,j) = ml_coarse_x(i,k,j)+coarse_omega*ml_coarse_correction(i,k,j)
                     enddo
                 enddo
             enddo
         enddo
         !$acc parallel loop gang vector collapse(3) present(ml_coarse_halo_x,ml_coarse_x)
-        do j = 1, ml_transfer%ny_c_local
+        do j = 1, nyc
             do k = 1, mz
-                do i = 1, ml_transfer%nx_c_local
+                do i = 1, nxc
                     ml_coarse_halo_x(i,k,j) = ml_coarse_x(i,k,j)
                 enddo
             enddo
