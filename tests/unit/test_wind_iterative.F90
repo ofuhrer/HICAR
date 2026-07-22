@@ -50,6 +50,7 @@ contains
         testsuite = [ &
             new_unittest("multilevel_transfer", test_multilevel_transfer), &
             new_unittest("multilevel_device", test_multilevel_device), &
+            new_unittest("multilevel_device_offset", test_multilevel_device_offset), &
             new_unittest("multilevel_halo", test_multilevel_halo), &
             new_unittest("iter_wind_solve_decomp", test_iter_wind_solve) &
             ]
@@ -708,6 +709,48 @@ contains
         call transfer%release()
 #endif
     end subroutine test_multilevel_device
+
+
+    subroutine test_multilevel_device_offset(error)
+        type(error_type), allocatable, intent(out) :: error
+#ifdef _OPENACC
+        integer, parameter :: nx_global = 166, ny_global = 144
+        integer, parameter :: x_first = 83, nx_local = 83
+        integer, parameter :: y_first = 72, ny_local = 72, nz = 5
+        type(horizontal_tile_transfer_t) :: transfer
+        real(c_double), allocatable :: coarse_halo(:,:,:), fine(:,:,:), reference(:,:,:)
+        real(c_double) :: scale
+        integer :: i, j, k, ci, cj
+
+        ! Exercise a nonzero tile origin.  These maps require the west coarse
+        ! halo (local index zero), which is the case that exposed an NVHPC
+        ! device-kernel stall in the distributed hierarchy setup.
+        call transfer%init(nx_global, ny_global, x_first, nx_local, y_first, ny_local, &
+                           fix_lateral_boundaries=.true., fix_vertical_boundaries=.true.)
+        allocate(coarse_halo(0:transfer%nx_c_local+1,nz,0:transfer%ny_c_local+1), &
+                 fine(nx_local,nz,ny_local), reference(nx_local,nz,ny_local))
+        do j = 0, transfer%ny_c_local+1
+            cj = transfer%y_c_first+j-1
+            do k = 1, nz
+                do i = 0, transfer%nx_c_local+1
+                    ci = transfer%x_c_first+i-1
+                    coarse_halo(i,k,j) = sin(0.031_c_double*real(3*ci+5*k+7*cj,c_double))
+                enddo
+            enddo
+        enddo
+        call transfer%prolong_owned(coarse_halo, reference)
+        call transfer%upload_device()
+        !$acc enter data copyin(coarse_halo) create(fine)
+        call transfer%prolong_owned_device(coarse_halo, fine)
+        !$acc update self(fine)
+        !$acc exit data delete(coarse_halo, fine)
+        scale = max(1.0_c_double, maxval(abs(reference)))
+        if (maxval(abs(fine-reference)) > 5.0e-13_c_double*scale) &
+            call test_failed(error, 'test_multilevel_device_offset', 'offset device prolongation differs from host')
+        call transfer%release()
+        deallocate(coarse_halo, fine, reference)
+#endif
+    end subroutine test_multilevel_device_offset
 
 
     subroutine test_multilevel_halo(error)
