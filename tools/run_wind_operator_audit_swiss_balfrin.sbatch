@@ -3,7 +3,7 @@
 # at one restart-100 Arnoldi cycle: failure is expected, but the structural and
 # Krylov audit artifacts must be complete before the batch job is accepted.
 #SBATCH --job-name=hicar-wind-audit-swiss
-#SBATCH --partition=normal
+#SBATCH --partition=debug
 #SBATCH --nodes=4
 #SBATCH --ntasks-per-node=5
 #SBATCH --cpus-per-task=1
