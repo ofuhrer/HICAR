@@ -73,10 +73,14 @@ module wind_multilevel
         integer :: nz = 0
         logical :: fix_lateral_boundaries = .true.
         logical :: fix_vertical_boundaries = .true.
+        logical :: device_uploaded = .false.
         real(c_double), allocatable :: value(:,:,:,:,:,:)
     contains
         procedure :: release => release_galerkin_tile_stencil
+        procedure :: upload_device => upload_galerkin_tile_stencil
+        procedure :: delete_device => delete_galerkin_tile_stencil
         procedure :: apply_owned => apply_galerkin_tile_stencil
+        procedure :: apply_owned_device => apply_galerkin_tile_stencil_device
     end type galerkin_tile_stencil_t
 
     type, public :: vertical_line_factor_t
@@ -84,13 +88,19 @@ module wind_multilevel
         integer :: ny = 0
         integer :: nz = 0
         logical :: ready = .false.
+        logical :: device_uploaded = .false.
         real(c_double), allocatable :: diagonal_inverse(:,:,:)
         real(c_double), allocatable :: upper_prime(:,:,:)
         real(c_double), allocatable :: lower_coefficient(:,:,:)
     contains
-        procedure :: factorize => factorize_vertical_lines
+        procedure, private :: factorize_global => factorize_vertical_lines
+        procedure, private :: factorize_tile => factorize_vertical_tile_lines
+        generic :: factorize => factorize_global, factorize_tile
         procedure :: release => release_vertical_line_factor
+        procedure :: upload_device => upload_vertical_line_factor
+        procedure :: delete_device => delete_vertical_line_factor
         procedure :: apply => apply_vertical_line_factor
+        procedure :: apply_device => apply_vertical_line_factor_device
     end type vertical_line_factor_t
 
     abstract interface
@@ -864,6 +874,7 @@ contains
     subroutine release_galerkin_tile_stencil(this)
         class(galerkin_tile_stencil_t), intent(inout) :: this
 
+        call this%delete_device()
         if (allocated(this%value)) deallocate(this%value)
         this%nx_global = 0; this%ny_global = 0
         this%x_first = 0; this%y_first = 0
@@ -871,6 +882,24 @@ contains
         this%fix_lateral_boundaries = .true.
         this%fix_vertical_boundaries = .true.
     end subroutine release_galerkin_tile_stencil
+
+
+    subroutine upload_galerkin_tile_stencil(this)
+        class(galerkin_tile_stencil_t), intent(inout) :: this
+
+        if (this%device_uploaded) return
+        !$acc enter data copyin(this%value)
+        this%device_uploaded = .true.
+    end subroutine upload_galerkin_tile_stencil
+
+
+    subroutine delete_galerkin_tile_stencil(this)
+        class(galerkin_tile_stencil_t), intent(inout) :: this
+
+        if (.not. this%device_uploaded) return
+        !$acc exit data delete(this%value)
+        this%device_uploaded = .false.
+    end subroutine delete_galerkin_tile_stencil
 
 
     subroutine apply_galerkin_tile_stencil(this, x, ax)
@@ -905,6 +934,45 @@ contains
             enddo
         enddo
     end subroutine apply_galerkin_tile_stencil
+
+
+    subroutine apply_galerkin_tile_stencil_device(this, x, ax)
+        class(galerkin_tile_stencil_t), intent(in) :: this
+        real(c_double), intent(in) :: x(0:,:,0:)
+        real(c_double), intent(out) :: ax(:,:,:)
+        integer :: i, j, k, di, dj, dk, gi, gj
+
+        if (size(x,1) /= this%nx+2 .or. size(x,2) /= this%nz .or. size(x,3) /= this%ny+2) &
+            error stop 'tile Galerkin input must include one horizontal halo'
+        if (size(ax,1) /= this%nx .or. size(ax,2) /= this%nz .or. size(ax,3) /= this%ny) &
+            error stop 'tile Galerkin output shape mismatch'
+        if (.not. this%device_uploaded) error stop 'tile Galerkin stencil is not on the device'
+        !$acc parallel loop gang vector collapse(3) present(x,ax,this%value) &
+        !$acc private(gi,gj,di,dj,dk)
+        do j = 1, this%ny
+            do k = 1, this%nz
+                do i = 1, this%nx
+                    gi = this%x_first+i-1
+                    gj = this%y_first+j-1
+                    if ((this%fix_lateral_boundaries .and. &
+                         (gi == 0 .or. gi == this%nx_global-1 .or. gj == 0 .or. gj == this%ny_global-1)) .or. &
+                        (this%fix_vertical_boundaries .and. (k == 1 .or. k == this%nz))) then
+                        ax(i,k,j) = x(i,k,j)
+                    else
+                        ax(i,k,j) = 0.0_c_double
+                        do dj = -1, 1
+                            do dk = -1, 1
+                                if (k+dk < 1 .or. k+dk > this%nz) cycle
+                                do di = -1, 1
+                                    ax(i,k,j) = ax(i,k,j) + this%value(di,dk,dj,i,k,j)*x(i+di,k+dk,j+dj)
+                                enddo
+                            enddo
+                        enddo
+                    endif
+                enddo
+            enddo
+        enddo
+    end subroutine apply_galerkin_tile_stencil_device
 
 
     subroutine apply_galerkin_stencil(this, x, ax)
@@ -998,9 +1066,63 @@ contains
     end subroutine factorize_vertical_lines
 
 
+    subroutine factorize_vertical_tile_lines(this, stencil, status, minimum_pivot)
+        class(vertical_line_factor_t), intent(inout) :: this
+        type(galerkin_tile_stencil_t), intent(in) :: stencil
+        integer, intent(out) :: status
+        real(c_double), intent(out), optional :: minimum_pivot
+        real(c_double), parameter :: pivot_floor = 1.0e-28_c_double
+        real(c_double) :: diagonal, lower, upper, pivot, min_pivot
+        integer :: i, j, k
+
+        call this%release()
+        this%nx = stencil%nx
+        this%ny = stencil%ny
+        this%nz = stencil%nz
+        allocate(this%diagonal_inverse(this%nx,this%nz,this%ny), &
+                 this%upper_prime(this%nx,this%nz,this%ny), &
+                 this%lower_coefficient(this%nx,this%nz,this%ny))
+        this%diagonal_inverse = 0.0_c_double
+        this%upper_prime = 0.0_c_double
+        this%lower_coefficient = 0.0_c_double
+        min_pivot = huge(1.0_c_double)
+        status = 0
+        do j = 1, this%ny
+            do i = 1, this%nx
+                diagonal = stencil%value(0,0,0,i,1,j)
+                upper = stencil%value(0,1,0,i,1,j)
+                min_pivot = min(min_pivot,abs(diagonal))
+                if (abs(diagonal) <= pivot_floor) then
+                    status = 1
+                    cycle
+                endif
+                this%diagonal_inverse(i,1,j) = 1.0_c_double/diagonal
+                this%upper_prime(i,1,j) = upper*this%diagonal_inverse(i,1,j)
+                do k = 2, this%nz
+                    lower = stencil%value(0,-1,0,i,k,j)
+                    diagonal = stencil%value(0,0,0,i,k,j)
+                    upper = stencil%value(0,1,0,i,k,j)
+                    pivot = diagonal-lower*this%upper_prime(i,k-1,j)
+                    min_pivot = min(min_pivot,abs(pivot))
+                    if (abs(pivot) <= pivot_floor) then
+                        status = 1
+                        exit
+                    endif
+                    this%diagonal_inverse(i,k,j) = 1.0_c_double/pivot
+                    this%upper_prime(i,k,j) = upper*this%diagonal_inverse(i,k,j)
+                    this%lower_coefficient(i,k,j) = lower
+                enddo
+            enddo
+        enddo
+        this%ready = (status == 0)
+        if (present(minimum_pivot)) minimum_pivot = min_pivot
+    end subroutine factorize_vertical_tile_lines
+
+
     subroutine release_vertical_line_factor(this)
         class(vertical_line_factor_t), intent(inout) :: this
 
+        call this%delete_device()
         if (allocated(this%diagonal_inverse)) deallocate(this%diagonal_inverse)
         if (allocated(this%upper_prime)) deallocate(this%upper_prime)
         if (allocated(this%lower_coefficient)) deallocate(this%lower_coefficient)
@@ -1009,6 +1131,25 @@ contains
         this%nz = 0
         this%ready = .false.
     end subroutine release_vertical_line_factor
+
+
+    subroutine upload_vertical_line_factor(this)
+        class(vertical_line_factor_t), intent(inout) :: this
+
+        if (this%device_uploaded) return
+        if (.not. this%ready) error stop 'cannot upload an invalid vertical line factor'
+        !$acc enter data copyin(this%diagonal_inverse, this%upper_prime, this%lower_coefficient)
+        this%device_uploaded = .true.
+    end subroutine upload_vertical_line_factor
+
+
+    subroutine delete_vertical_line_factor(this)
+        class(vertical_line_factor_t), intent(inout) :: this
+
+        if (.not. this%device_uploaded) return
+        !$acc exit data delete(this%diagonal_inverse, this%upper_prime, this%lower_coefficient)
+        this%device_uploaded = .false.
+    end subroutine delete_vertical_line_factor
 
 
     subroutine apply_vertical_line_factor(this, rhs, x)
@@ -1035,6 +1176,34 @@ contains
             enddo
         enddo
     end subroutine apply_vertical_line_factor
+
+
+    subroutine apply_vertical_line_factor_device(this, rhs, x)
+        class(vertical_line_factor_t), intent(in) :: this
+        real(c_double), intent(in) :: rhs(:,:,:)
+        real(c_double), intent(out) :: x(:,:,:)
+        integer :: i, j, k
+
+        if (.not. this%ready .or. .not. this%device_uploaded) &
+            error stop 'device vertical line factor is not ready'
+        if (size(rhs,1) /= this%nx .or. size(rhs,2) /= this%nz .or. size(rhs,3) /= this%ny) &
+            error stop 'vertical line right-hand side shape mismatch'
+        if (any(shape(x) /= shape(rhs))) error stop 'vertical line output shape mismatch'
+        !$acc parallel loop gang vector collapse(2) &
+        !$acc present(rhs,x,this%diagonal_inverse,this%upper_prime,this%lower_coefficient)
+        do j = 1, this%ny
+            do i = 1, this%nx
+                x(i,1,j) = this%diagonal_inverse(i,1,j)*rhs(i,1,j)
+                do k = 2, this%nz
+                    x(i,k,j) = this%diagonal_inverse(i,k,j)* &
+                        (rhs(i,k,j)-this%lower_coefficient(i,k,j)*x(i,k-1,j))
+                enddo
+                do k = this%nz-1, 1, -1
+                    x(i,k,j) = x(i,k,j)-this%upper_prime(i,k,j)*x(i,k+1,j)
+                enddo
+            enddo
+        enddo
+    end subroutine apply_vertical_line_factor_device
 
 
     subroutine relax_with_vertical_lines(stencil, line_factor, rhs, x, residual, correction, n_sweeps, omega)
