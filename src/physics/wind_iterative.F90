@@ -60,6 +60,15 @@ module wind_iterative
     ! Check its action once per probe, then avoid an extra distributed SpMV
     ! and a line of stdout for every physical time step.
     logical :: hypre_operator_verified = .false.
+    ! Opt-in structural diagnostics for the calibrated projection operator.
+    ! The audit is enabled only when HICAR_WIND_OPERATOR_AUDIT is set to a
+    ! non-zero value, and runs once per calibrated nest.  It never changes
+    ! the solver tolerance or acceptance path.
+    logical :: operator_audit_enabled = .false.
+    logical :: operator_audit_done = .false.
+    logical :: krylov_audit_written = .false.
+    logical :: bootstrap_rhs_saved = .false.
+    character(len=512) :: operator_audit_file = 'hicar_wind_operator_audit.csv'
 
 
     real, parameter :: deg2rad = 0.017453293
@@ -97,9 +106,10 @@ module wind_iterative
     ! The 12-vector prototype made a valid first reduction but restarted into
     ! stagnation on the 250 m calibrated operator.  The national calibrated
     ! operator retained too little information across a 50-vector restart and
-    ! stalled well above tolerance.  One hundred remains a bounded GPU-only
-    ! allocation while retaining enough long-wavelength Krylov information for
-    ! the Swiss decomposition.
+    ! stalled well above tolerance.  Restart 100 plus reorthogonalization also
+    ! failed the Swiss gate at 2500 iterations and materially increased memory.
+    ! Do not increase this value further; it remains here only while the audit
+    ! identifies the bounded recycled subspace that will replace it.
     integer, parameter :: FGMRES_RESTART = 100
 
     ! 15-point stencil coefficients (same names as AMGX module)
@@ -173,6 +183,10 @@ module wind_iterative
         ! Flags
         logical :: structure_uploaded = .false.   ! default-init: read at restore_from_cache
         logical :: operator_probed = .false.
+        logical :: operator_audit_enabled = .false.
+        logical :: operator_audit_done = .false.
+        logical :: krylov_audit_written = .false.
+        logical :: bootstrap_rhs_saved = .false.
         integer :: wind_solver_max_iters
         integer :: precond_n_sweeps = BASE_PREC_SWEEPS
         ! Geometry (single precision, owned-range allocations)
@@ -241,6 +255,9 @@ contains
         integer :: nprocs, device_num
         integer :: target_nest
         integer :: my_rank_in_comm
+        integer :: env_status, env_length
+        character(len=32) :: audit_env
+        character(len=512) :: audit_file_env
 #ifdef USE_NCCL
         integer(c_int) :: nccl_rc
 #endif
@@ -291,6 +308,22 @@ contains
         south_neighbor = solver_rank - domain%grid%ximages
 
         wind_solver_max_iters = options%wind%wind_solver_iterations
+
+        audit_env = ''
+        call get_environment_variable('HICAR_WIND_OPERATOR_AUDIT', audit_env, &
+                                      length=env_length, status=env_status)
+        operator_audit_enabled = env_status == 0 .and. env_length > 0 .and. &
+                                 trim(adjustl(audit_env)) /= '0'
+        operator_audit_done = .false.
+        krylov_audit_written = .false.
+        bootstrap_rhs_saved = .false.
+        operator_audit_file = 'hicar_wind_operator_audit.csv'
+        audit_file_env = ''
+        call get_environment_variable('HICAR_WIND_OPERATOR_AUDIT_FILE', audit_file_env, &
+                                      length=env_length, status=env_status)
+        if (env_status == 0 .and. env_length > 0) then
+            operator_audit_file = trim(audit_file_env(:min(env_length, len(audit_file_env))))
+        endif
 
         verbose_solver = options%general%debug .or. &
                          (options%physics%windtype == kITERATIVE_WINDS)
@@ -456,6 +489,11 @@ contains
 
         ! Build RHS on GPU (3D layout: rhs(i,k,j) = -2*div for interior, 0 at BCs)
         call compute_rhs_3d()
+
+        if (operator_probed .and. operator_audit_enabled .and. .not. operator_audit_done) then
+            call audit_operator_structure(domain)
+            operator_audit_done = .true.
+        endif
 
         ! Initial guess: warm-start from the previous solve's lambda.
         ! bicgstab_solve computes r0 = b - A*x0 properly and the
@@ -657,6 +695,15 @@ contains
         if (status /= 0) then
             if (STD_OUT_PE) write(*,'(A,I0)') ' HICAR wind solve rejected after acceptance gate: status=', status
             stop
+        endif
+
+        ! Preserve the accepted analytic-bootstrap RHS in an existing Krylov
+        ! work vector.  The calibrated FGMRES path does not otherwise use
+        ! r_hat, so this costs no additional national-scale allocation and
+        ! lets the audit compare the bootstrap and failing calibrated RHSs.
+        if (.not. operator_probed .and. operator_audit_enabled) then
+            call vec_copy(r_hat, rhs)
+            bootstrap_rhs_saved = .true.
         endif
 
         call calc_updated_winds(domain, adv_den)
@@ -1012,6 +1059,7 @@ contains
         real(c_double), intent(out) :: res0_out, res_final_out
         real(c_double), allocatable :: v_basis(:,:,:,:), z_basis(:,:,:,:)
         real(c_double) :: h(FGMRES_RESTART+1,FGMRES_RESTART), h_local(FGMRES_RESTART+1)
+        real(c_double) :: h_raw(FGMRES_RESTART+1,FGMRES_RESTART)
         real(c_double) :: cs(FGMRES_RESTART), sn(FGMRES_RESTART), g(FGMRES_RESTART+1)
         real(c_double) :: ycoef(FGMRES_RESTART), dots_local(FGMRES_RESTART)
         real(c_double) :: beta, bnorm2, target_norm, tmp, denom
@@ -1044,7 +1092,8 @@ contains
         do cycle = 1, max(1, (max_iters + FGMRES_RESTART - 1) / FGMRES_RESTART)
             if (total >= max_iters) exit
             call vec_axpby_into(v_basis(:,:,:,1), 1.0_c_double/beta, r_vec, 0.0_c_double, r_vec)
-            h = 0.0_c_double; cs = 0.0_c_double; sn = 0.0_c_double; g = 0.0_c_double; g(1) = beta
+            h = 0.0_c_double; h_raw = 0.0_c_double
+            cs = 0.0_c_double; sn = 0.0_c_double; g = 0.0_c_double; g(1) = beta
             used = min(FGMRES_RESTART, max_iters-total)
             do j = 1, used
                 call apply_precond(v_basis(:,:,:,j), z_basis(:,:,:,j))
@@ -1077,6 +1126,7 @@ contains
                 call vec_norm2_local(t_vec, h(j+1,j))
                 call MPI_Allreduce(MPI_IN_PLACE, h(j+1,j), 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
                 h(j+1,j) = sqrt(max(h(j+1,j), 0.0_c_double))
+                h_raw(1:j+1,j) = h(1:j+1,j)
                 if (h(j+1,j) > breakdown_eps .and. j < FGMRES_RESTART+1) then
                     call vec_axpby_into(v_basis(:,:,:,j+1), 1.0_c_double/h(j+1,j), t_vec, 0.0_c_double, t_vec)
                 endif
@@ -1099,6 +1149,10 @@ contains
                 endif
                 if (res_final_out <= target_norm) then; used = j; exit; endif
             enddo
+            if (operator_audit_enabled .and. .not. krylov_audit_written) then
+                call write_krylov_audit(h_raw, used, v_basis, r_vec)
+                krylov_audit_written = .true.
+            endif
             ycoef = 0.0_c_double
             do i = used, 1, -1
                 ycoef(i) = g(i)
@@ -1565,6 +1619,8 @@ contains
         implicit none
         real, intent(in) :: max_leak
         operator_probed = .true.
+        operator_audit_done = .false.
+        krylov_audit_written = .false.
         hypre_selection_reported = .false.
         hypre_operator_verified = .false.
         call wind_hypre_invalidate()
@@ -1651,6 +1707,293 @@ contains
         endif
         call vec_zero(x_sol)
     end subroutine probe_compare_operator
+
+
+    !> Measure structural properties of the calibrated A = 2 D o G operator.
+    !! Three deterministic vector pairs are tested in the Euclidean,
+    !! Jacobian-weighted, and inverse-Jacobian-weighted inner products.  All
+    !! trial vectors vanish on the solver's identity boundary rows, so the
+    !! reported Rayleigh quotients describe the physical projection block.
+    subroutine audit_operator_structure(domain)
+        implicit none
+        type(domain_t), intent(in) :: domain
+        integer, parameter :: N_WEIGHTS = 3, N_SAMPLES = 3
+        integer :: sample, weight_kind, i, j, k, ierr
+        real(c_double) :: defect, rayleigh_x, rayleigh_y, cosine_xy
+        real(c_double) :: symmetry_defect(N_WEIGHTS)
+        real(c_double) :: rayleigh_min(N_WEIGHTS), rayleigh_max(N_WEIGHTS)
+        real(c_double) :: rhs_defect(N_WEIGHTS), rhs_rayleigh_bootstrap(N_WEIGHTS)
+        real(c_double) :: rhs_rayleigh_current(N_WEIGHTS), rhs_cosine(N_WEIGHTS)
+        real(c_double) :: local_constant(4), global_constant(4)
+        logical :: is_boundary
+
+        symmetry_defect = 0.0_c_double
+        rayleigh_min = huge(1.0_c_double)
+        rayleigh_max = -huge(1.0_c_double)
+        rhs_defect = 0.0_c_double
+        rhs_rayleigh_bootstrap = 0.0_c_double
+        rhs_rayleigh_current = 0.0_c_double
+        rhs_cosine = 0.0_c_double
+
+        do sample = 1, N_SAMPLES
+            call fill_audit_vector(p_vec, sample, 0)
+            call fill_audit_vector(v_vec, sample, 1)
+            call exchange_krylov_halos(p_vec, domain)
+            call spmv(p_vec, p_hat)
+            call exchange_krylov_halos(v_vec, domain)
+            call spmv(v_vec, s_hat)
+
+            do weight_kind = 1, N_WEIGHTS
+                call audit_weighted_pair(p_vec, p_hat, v_vec, s_hat, weight_kind, &
+                                         defect, rayleigh_x, rayleigh_y, cosine_xy)
+                symmetry_defect(weight_kind) = max(symmetry_defect(weight_kind), defect)
+                rayleigh_min(weight_kind) = min(rayleigh_min(weight_kind), rayleigh_x, rayleigh_y)
+                rayleigh_max(weight_kind) = max(rayleigh_max(weight_kind), rayleigh_x, rayleigh_y)
+            enddo
+        enddo
+
+        ! A constant-vector response diagnoses row sums and the boundary
+        ! identity constraints.  The physical response is normalized by the
+        ! diagonal Frobenius scale to remain meaningful across resolutions.
+        !$acc parallel loop gang vector collapse(3) present(p_vec)
+        do j = j_s-1, j_e+1
+            do k = k_s-1, k_e+1
+                do i = i_s-1, i_e+1
+                    if (i >= xs .and. i <= xs+xm-1 .and. &
+                        k >= zs .and. k <= zs+zm-1 .and. &
+                        j >= ys .and. j <= ys+ym-1) then
+                        p_vec(i,k,j) = 1.0_c_double
+                    else
+                        p_vec(i,k,j) = 0.0_c_double
+                    endif
+                enddo
+            enddo
+        enddo
+        call exchange_krylov_halos(p_vec, domain)
+        call spmv(p_vec, p_hat)
+        local_constant = 0.0_c_double
+        !$acc parallel loop gang vector collapse(3) &
+        !$acc reduction(+:local_constant(1),local_constant(2),local_constant(3)) &
+        !$acc reduction(max:local_constant(4)) present(p_hat, A_coef) private(is_boundary)
+        do j = ys, ys + ym - 1
+            do k = zs, zs + zm - 1
+                do i = xs, xs + xm - 1
+                    is_boundary = i <= 0 .or. i >= mx-1 .or. j <= 0 .or. j >= my-1 .or. &
+                                  k <= 0 .or. k >= mz-1
+                    if (is_boundary) then
+                        local_constant(4) = max(local_constant(4), abs(p_hat(i,k,j)-1.0_c_double))
+                    else
+                        local_constant(1) = local_constant(1) + p_hat(i,k,j)*p_hat(i,k,j)
+                        local_constant(2) = local_constant(2) + &
+                                            real(A_coef(i,k,j),c_double)**2
+                        local_constant(3) = local_constant(3) + 1.0_c_double
+                    endif
+                enddo
+            enddo
+        enddo
+        call MPI_Allreduce(local_constant, global_constant, 3, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(local_constant(4), global_constant(4), 1, MPI_DOUBLE_PRECISION, MPI_MAX, solver_comm, ierr)
+
+        if (bootstrap_rhs_saved) then
+            call exchange_krylov_halos(r_hat, domain)
+            call spmv(r_hat, p_hat)
+            call exchange_krylov_halos(rhs, domain)
+            call spmv(rhs, s_hat)
+            do weight_kind = 1, N_WEIGHTS
+                call audit_weighted_pair(r_hat, p_hat, rhs, s_hat, weight_kind, &
+                                         rhs_defect(weight_kind), &
+                                         rhs_rayleigh_bootstrap(weight_kind), &
+                                         rhs_rayleigh_current(weight_kind), &
+                                         rhs_cosine(weight_kind))
+            enddo
+        endif
+
+        if (STD_OUT_PE) then
+            write(output_unit,'(A)') ' HICAR calibrated wind operator structural audit:'
+            do weight_kind = 1, N_WEIGHTS
+                write(output_unit,'(A,A,A,ES12.4,A,ES12.4,A,ES12.4)') &
+                    '   inner_product=', trim(audit_weight_name(weight_kind)), &
+                    ' symmetry_defect=', symmetry_defect(weight_kind), &
+                    ' sampled_rayleigh_min=', rayleigh_min(weight_kind), &
+                    ' sampled_rayleigh_max=', rayleigh_max(weight_kind)
+            enddo
+            write(output_unit,'(A,ES12.4,A,ES12.4,A,ES12.4)') &
+                '   constant_response_relative_diagonal=', &
+                sqrt(global_constant(1)/max(global_constant(2),tiny(1.0_c_double))), &
+                ' constant_response_rms=', &
+                sqrt(global_constant(1)/max(global_constant(3),1.0_c_double)), &
+                ' boundary_identity_max_error=', global_constant(4)
+            if (bootstrap_rhs_saved) then
+                do weight_kind = 1, N_WEIGHTS
+                    write(output_unit,'(A,A,A,ES12.4,A,ES12.4,A,ES12.4,A,ES12.4)') &
+                        '   rhs_inner_product=', trim(audit_weight_name(weight_kind)), &
+                        ' adjoint_defect=', rhs_defect(weight_kind), &
+                        ' bootstrap_rayleigh=', rhs_rayleigh_bootstrap(weight_kind), &
+                        ' calibrated_rayleigh=', rhs_rayleigh_current(weight_kind), &
+                        ' rhs_cosine=', rhs_cosine(weight_kind)
+                enddo
+            else
+                write(output_unit,'(A)') '   bootstrap RHS unavailable; RHS comparison skipped.'
+            endif
+            flush(output_unit)
+        endif
+    end subroutine audit_operator_structure
+
+
+    !> Deterministic smooth-plus-oscillatory trial field for distributed
+    !! bilinear-form tests.  Boundary rows and halos are zero by construction.
+    subroutine fill_audit_vector(v, sample, family)
+        implicit none
+        real(c_double), dimension(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1), intent(inout) :: v
+        integer, intent(in) :: sample, family
+        integer :: i, j, k
+        real(c_double) :: phase
+
+        phase = real(7*sample + 13*family, c_double)
+        !$acc parallel loop gang vector collapse(3) present(v)
+        do j = j_s-1, j_e+1
+            do k = k_s-1, k_e+1
+                do i = i_s-1, i_e+1
+                    if (i >= 1 .and. i <= mx-2 .and. k >= 1 .and. k <= mz-2 .and. &
+                        j >= 1 .and. j <= my-2) then
+                        v(i,k,j) = sin((0.011_c_double + 0.001_c_double*sample) * real(i,c_double) + &
+                                       (0.037_c_double + 0.002_c_double*family) * real(k,c_double) + &
+                                       (0.017_c_double + 0.001_c_double*sample) * real(j,c_double) + phase) + &
+                                     0.25_c_double*cos(0.173_c_double*real(i,c_double) - &
+                                                           0.119_c_double*real(k,c_double) + &
+                                                           0.071_c_double*real(j,c_double) + 0.5_c_double*phase)
+                    else
+                        v(i,k,j) = 0.0_c_double
+                    endif
+                enddo
+            enddo
+        enddo
+    end subroutine fill_audit_vector
+
+
+    !> Bilinear symmetry, Rayleigh, and correlation statistics under a chosen
+    !! diagonal scalar-space weight.  weight_kind 1/2/3 selects I/J/J^{-1}.
+    subroutine audit_weighted_pair(x, ax, y, ay, weight_kind, defect, rayleigh_x, rayleigh_y, cosine_xy)
+        implicit none
+        real(c_double), dimension(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1), intent(in) :: x, ax, y, ay
+        integer, intent(in) :: weight_kind
+        real(c_double), intent(out) :: defect, rayleigh_x, rayleigh_y, cosine_xy
+        real(c_double) :: local_stats(9), global_stats(9), weight
+        real(c_double) :: denom
+        integer :: i, j, k, ierr
+
+        local_stats = 0.0_c_double
+        !$acc parallel loop gang vector collapse(3) &
+        !$acc reduction(+:local_stats(1),local_stats(2),local_stats(3),local_stats(4), &
+        !$acc             local_stats(5),local_stats(6),local_stats(7),local_stats(8),local_stats(9)) &
+        !$acc present(x, ax, y, ay, jaco) private(weight)
+        do j = max(ys,1), min(ys+ym-1,my-2)
+            do k = 1, mz - 2
+                do i = max(xs,1), min(xs+xm-1,mx-2)
+                    select case (weight_kind)
+                    case (2)
+                        weight = max(abs(real(jaco(i,k,j),c_double)), tiny(1.0_c_double))
+                    case (3)
+                        weight = 1.0_c_double / max(abs(real(jaco(i,k,j),c_double)), tiny(1.0_c_double))
+                    case default
+                        weight = 1.0_c_double
+                    end select
+                    local_stats(1) = local_stats(1) + weight*x(i,k,j)*ay(i,k,j)
+                    local_stats(2) = local_stats(2) + weight*ax(i,k,j)*y(i,k,j)
+                    local_stats(3) = local_stats(3) + weight*x(i,k,j)*x(i,k,j)
+                    local_stats(4) = local_stats(4) + weight*y(i,k,j)*y(i,k,j)
+                    local_stats(5) = local_stats(5) + weight*ax(i,k,j)*ax(i,k,j)
+                    local_stats(6) = local_stats(6) + weight*ay(i,k,j)*ay(i,k,j)
+                    local_stats(7) = local_stats(7) + weight*x(i,k,j)*ax(i,k,j)
+                    local_stats(8) = local_stats(8) + weight*y(i,k,j)*ay(i,k,j)
+                    local_stats(9) = local_stats(9) + weight*x(i,k,j)*y(i,k,j)
+                enddo
+            enddo
+        enddo
+        call MPI_Allreduce(local_stats, global_stats, 9, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        denom = sqrt(max(global_stats(3)*global_stats(6),0.0_c_double)) + &
+                sqrt(max(global_stats(5)*global_stats(4),0.0_c_double))
+        defect = abs(global_stats(1)-global_stats(2)) / max(denom,tiny(1.0_c_double))
+        rayleigh_x = global_stats(7) / max(global_stats(3),tiny(1.0_c_double))
+        rayleigh_y = global_stats(8) / max(global_stats(4),tiny(1.0_c_double))
+        cosine_xy = global_stats(9) / &
+                    max(sqrt(max(global_stats(3)*global_stats(4),0.0_c_double)),tiny(1.0_c_double))
+    end subroutine audit_weighted_pair
+
+
+    !> Export the first calibrated Arnoldi relation and RHS projections.  The
+    !! small CSV is written by rank zero only; all vector inner products are
+    !! globally reduced first.  H_raw represents the right-preconditioned
+    !! operator A M^{-1}, which is the operator whose restart behaviour the
+    !! recycling solver must address.
+    subroutine write_krylov_audit(h_raw, used, v_basis, current_residual)
+        implicit none
+        real(c_double), intent(in) :: h_raw(FGMRES_RESTART+1,FGMRES_RESTART)
+        integer, intent(in) :: used
+        real(c_double), dimension(i_s-1:, k_s-1:, j_s-1:, :), &
+            intent(in) :: v_basis
+        real(c_double), dimension(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1), &
+            intent(in) :: current_residual
+        real(c_double) :: bootstrap_local(FGMRES_RESTART), bootstrap_global(FGMRES_RESTART)
+        real(c_double) :: current_local(FGMRES_RESTART), current_global(FGMRES_RESTART)
+        integer :: i, j, ierr, audit_unit, io_status
+
+        bootstrap_local = 0.0_c_double
+        bootstrap_global = 0.0_c_double
+        current_local = 0.0_c_double
+        current_global = 0.0_c_double
+        do i = 1, used
+            if (bootstrap_rhs_saved) then
+                call vec_dot_local(v_basis(:,:,:,i), r_hat, bootstrap_local(i))
+            endif
+            call vec_dot_local(v_basis(:,:,:,i), current_residual, current_local(i))
+        enddo
+        call MPI_Allreduce(bootstrap_local, bootstrap_global, used, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(current_local, current_global, used, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+
+        if (solver_rank == 0) then
+            open(newunit=audit_unit, file=trim(operator_audit_file), status='replace', &
+                 action='write', iostat=io_status)
+            if (io_status /= 0) then
+                write(output_unit,'(A,A,A,I0)') ' HICAR wind audit could not open ', &
+                    trim(operator_audit_file), ' iostat=', io_status
+                flush(output_unit)
+                return
+            endif
+            write(audit_unit,'(A)') 'record,name,index_i,index_j,value'
+            write(audit_unit,'(A,I0)') 'metadata,arnoldi_dimension,,,', used
+            write(audit_unit,'(A,I0)') 'metadata,restart,,,', FGMRES_RESTART
+            write(audit_unit,'(A,I0)') 'metadata,bootstrap_rhs_saved,,,', merge(1,0,bootstrap_rhs_saved)
+            do j = 1, used
+                do i = 1, j+1
+                    write(audit_unit,'(A,I0,A,I0,A,ES24.16)') 'hessenberg,H,', i, ',', j, ',', h_raw(i,j)
+                enddo
+            enddo
+            do i = 1, used
+                write(audit_unit,'(A,I0,A,ES24.16)') 'projection,bootstrap,', i, ',,', bootstrap_global(i)
+                write(audit_unit,'(A,I0,A,ES24.16)') 'projection,current,', i, ',,', current_global(i)
+            enddo
+            close(audit_unit)
+            write(output_unit,'(A,A,A,I0)') ' HICAR wind Krylov audit written to ', &
+                trim(operator_audit_file), ' with Arnoldi dimension ', used
+            flush(output_unit)
+        endif
+    end subroutine write_krylov_audit
+
+
+    function audit_weight_name(weight_kind) result(name)
+        implicit none
+        integer, intent(in) :: weight_kind
+        character(len=16) :: name
+        select case (weight_kind)
+        case (2)
+            name = 'jacobian'
+        case (3)
+            name = 'inverse_jacobian'
+        case default
+            name = 'euclidean'
+        end select
+    end function audit_weight_name
 
 
     !>------------------------------------------------------------
@@ -3090,6 +3433,10 @@ contains
         domain_cache(slot)%solver_comm    = solver_comm
         domain_cache(slot)%structure_uploaded   = structure_uploaded
         domain_cache(slot)%operator_probed           = operator_probed
+        domain_cache(slot)%operator_audit_enabled    = operator_audit_enabled
+        domain_cache(slot)%operator_audit_done       = operator_audit_done
+        domain_cache(slot)%krylov_audit_written      = krylov_audit_written
+        domain_cache(slot)%bootstrap_rhs_saved       = bootstrap_rhs_saved
         domain_cache(slot)%wind_solver_max_iters = wind_solver_max_iters
         domain_cache(slot)%precond_n_sweeps      = precond_n_sweeps
 
@@ -3218,6 +3565,10 @@ contains
         solver_comm    = domain_cache(slot)%solver_comm
         structure_uploaded   = domain_cache(slot)%structure_uploaded
         operator_probed          = domain_cache(slot)%operator_probed
+        operator_audit_enabled   = domain_cache(slot)%operator_audit_enabled
+        operator_audit_done      = domain_cache(slot)%operator_audit_done
+        krylov_audit_written     = domain_cache(slot)%krylov_audit_written
+        bootstrap_rhs_saved      = domain_cache(slot)%bootstrap_rhs_saved
         wind_solver_max_iters = domain_cache(slot)%wind_solver_max_iters
         precond_n_sweeps      = domain_cache(slot)%precond_n_sweeps
 
