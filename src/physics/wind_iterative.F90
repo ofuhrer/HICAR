@@ -68,6 +68,7 @@ module wind_iterative
     logical :: operator_audit_done = .false.
     logical :: krylov_audit_written = .false.
     logical :: bootstrap_rhs_saved = .false.
+    integer :: operator_audit_max_iters = 0
     character(len=512) :: operator_audit_file = 'hicar_wind_operator_audit.csv'
 
 
@@ -256,8 +257,9 @@ contains
         integer :: target_nest
         integer :: my_rank_in_comm
         integer :: env_status, env_length
-        character(len=32) :: audit_env
+        character(len=32) :: audit_env, audit_max_iters_env
         character(len=512) :: audit_file_env
+        integer :: audit_read_status
 #ifdef USE_NCCL
         integer(c_int) :: nccl_rc
 #endif
@@ -317,6 +319,20 @@ contains
         operator_audit_done = .false.
         krylov_audit_written = .false.
         bootstrap_rhs_saved = .false.
+        operator_audit_max_iters = 0
+        audit_max_iters_env = ''
+        call get_environment_variable('HICAR_WIND_OPERATOR_AUDIT_MAX_ITERS', &
+                                      audit_max_iters_env, length=env_length, status=env_status)
+        if (operator_audit_enabled .and. env_status == 0 .and. env_length > 0) then
+            read(audit_max_iters_env(:min(env_length, len(audit_max_iters_env))), *, &
+                 iostat=audit_read_status) operator_audit_max_iters
+            if (audit_read_status /= 0 .or. operator_audit_max_iters < 0) then
+                if (STD_OUT_PE) write(output_unit,'(A,A)') &
+                    ' Invalid HICAR_WIND_OPERATOR_AUDIT_MAX_ITERS: ', &
+                    trim(audit_max_iters_env)
+                error stop
+            endif
+        endif
         operator_audit_file = 'hicar_wind_operator_audit.csv'
         audit_file_env = ''
         call get_environment_variable('HICAR_WIND_OPERATOR_AUDIT_FILE', audit_file_env, &
@@ -355,7 +371,7 @@ contains
         integer :: i, j, k
         real    :: alpha_min, alpha_max
         logical :: varying_alpha
-        integer :: status, n_iters, apply_status
+        integer :: status, n_iters, apply_status, calibrated_max_iters
         integer :: nan_count
         real(c_double) :: res0, res_final, local_norm2, global_norm2, target_norm, max_x_global
         real(c_double) :: local_apply_stats(2), global_apply_stats(2), operator_error
@@ -515,7 +531,16 @@ contains
             hypre_selection_reported = .true.
         endif
         if (operator_probed) then
-            call fgmres_line_solve(domain, wind_solver_max_iters, status, n_iters, res0, res_final)
+            calibrated_max_iters = wind_solver_max_iters
+            if (operator_audit_enabled .and. operator_audit_max_iters > 0) then
+                calibrated_max_iters = min(calibrated_max_iters, operator_audit_max_iters)
+                if (STD_OUT_PE) then
+                    write(output_unit,'(A,I0)') &
+                        ' HICAR operator audit calibrated-solve iteration cap=', calibrated_max_iters
+                    flush(output_unit)
+                endif
+            endif
+            call fgmres_line_solve(domain, calibrated_max_iters, status, n_iters, res0, res_final)
             if (status == 0) then
                 call verify_true_residual(domain, res_final, max_x_global)
                 ! FGMRES, like the existing BiCGStab implementation, uses

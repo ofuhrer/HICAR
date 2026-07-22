@@ -47,7 +47,6 @@ test -s "$forcing_list"
 sed -e "/^[[:space:]]*restart_folder[[:space:]]*=/c\  restart_folder = '$run/restart/'" \
     -e "/^[[:space:]]*output_folder[[:space:]]*=/c\  output_folder = '$run/output/'" \
     -e "/^[[:space:]]*forcing_file_list[[:space:]]*=/c\  forcing_file_list = '$forcing_list'" \
-    -e "/^[[:space:]]*wind_solver_iterations[[:space:]]*=/c\  wind_solver_iterations = 100" \
     "$nml_src" > "$run/input.nml"
 for asset in NoahmpTable.TBL rrtmgp_support mp_support; do cp -a "$root/run/$asset" "$run/"; done
 
@@ -60,6 +59,7 @@ done < "$forcing_list"
 
 export HICAR_WIND_OPERATOR_AUDIT=1
 export HICAR_WIND_OPERATOR_AUDIT_FILE="$run/operator_audit.csv"
+export HICAR_WIND_OPERATOR_AUDIT_MAX_ITERS=100
 cd "$run"
 set +e
 srun --distribution=block:block --cpu-bind=none "$wrapper" "$exe" "$run/input.nml" 2>&1 | tee "$run/model.out"
