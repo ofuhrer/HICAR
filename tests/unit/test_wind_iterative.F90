@@ -29,6 +29,7 @@ module test_wind_iterative
                                     horizontal_coarse_coordinate, owned_coarse_interval, &
                                     galerkin_stencil_t, vertical_line_factor_t, assemble_colored_galerkin, &
                                     relax_with_vertical_lines
+    use wind_multilevel_mpi, only : horizontal_halo_exchange_t
     use advection,          only : adv_var_request
     use io_routines,        only : check_file_exists
     implicit none
@@ -46,6 +47,7 @@ contains
 
         testsuite = [ &
             new_unittest("multilevel_transfer", test_multilevel_transfer), &
+            new_unittest("multilevel_halo", test_multilevel_halo), &
             new_unittest("iter_wind_solve_decomp", test_iter_wind_solve) &
             ]
     end subroutine collect_wind_iterative_suite
@@ -512,5 +514,62 @@ contains
         end subroutine apply_test_operator
 
     end subroutine test_multilevel_transfer
+
+
+    subroutine test_multilevel_halo(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: nx_global = 8, ny_global = 8, nz = 3
+        integer, parameter :: nx_local = 4, ny_local = 4
+        type(horizontal_halo_exchange_t) :: halo
+        real(c_double), allocatable :: field(:,:,:)
+        real(c_double) :: expected
+        integer :: rank, nprocs, ierr, rx, ry, west, east, south, north
+        integer :: i, j, k, gi, gj
+
+        call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
+        call MPI_Comm_size(MPI_COMM_WORLD, nprocs, ierr)
+        if (nprocs /= 4) return
+
+        rx = modulo(rank,2)
+        ry = rank/2
+        west = merge(rank-1, MPI_PROC_NULL, rx > 0)
+        east = merge(rank+1, MPI_PROC_NULL, rx < 1)
+        south = merge(rank-2, MPI_PROC_NULL, ry > 0)
+        north = merge(rank+2, MPI_PROC_NULL, ry < 1)
+        call halo%init(nx_local, ny_local, nz, MPI_COMM_WORLD, west, east, south, north)
+        allocate(field(0:nx_local+1,nz,0:ny_local+1))
+        field = 0.0_c_double
+        do j = 1, ny_local
+            gj = ry*ny_local+j-1
+            do k = 1, nz
+                do i = 1, nx_local
+                    gi = rx*nx_local+i-1
+                    field(i,k,j) = real(1000*k+100*gj+gi,c_double)
+                enddo
+            enddo
+        enddo
+        call halo%exchange(field)
+
+        do j = 0, ny_local+1
+            do k = 1, nz
+                do i = 0, nx_local+1
+                    if (i >= 1 .and. i <= nx_local .and. j >= 1 .and. j <= ny_local) cycle
+                    gi = rx*nx_local+i-1
+                    gj = ry*ny_local+j-1
+                    if (gi < 0 .or. gi >= nx_global .or. gj < 0 .or. gj >= ny_global) then
+                        expected = 0.0_c_double
+                    else
+                        expected = real(1000*k+100*gj+gi,c_double)
+                    endif
+                    if (field(i,k,j) /= expected) then
+                        call test_failed(error, 'test_multilevel_halo', 'two-stage halo or corner value is incorrect')
+                        call halo%release()
+                        return
+                    endif
+                enddo
+            enddo
+        enddo
+        call halo%release()
+    end subroutine test_multilevel_halo
 
 end module test_wind_iterative
