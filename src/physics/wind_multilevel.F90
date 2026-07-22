@@ -81,7 +81,7 @@ module wind_multilevel
 
     public :: horizontal_coarse_extent, horizontal_coarse_coordinate
     public :: horizontal_coarse_bracket, owned_coarse_interval
-    public :: assemble_colored_galerkin
+    public :: assemble_colored_galerkin, relax_with_vertical_lines
 
 contains
 
@@ -726,6 +726,31 @@ contains
             enddo
         enddo
     end subroutine apply_vertical_line_factor
+
+
+    subroutine relax_with_vertical_lines(stencil, line_factor, rhs, x, residual, correction, n_sweeps, omega)
+        type(galerkin_stencil_t), intent(in) :: stencil
+        type(vertical_line_factor_t), intent(in) :: line_factor
+        real(c_double), intent(in) :: rhs(:,:,:)
+        real(c_double), intent(inout) :: x(:,:,:)
+        real(c_double), intent(inout) :: residual(:,:,:), correction(:,:,:)
+        integer, intent(in) :: n_sweeps
+        real(c_double), intent(in) :: omega
+        integer :: sweep
+
+        if (n_sweeps < 0) error stop 'vertical-line relaxation sweep count must be nonnegative'
+        if (omega <= 0.0_c_double .or. omega > 1.0_c_double) &
+            error stop 'vertical-line relaxation omega must be in (0,1]'
+        if (any(shape(rhs) /= shape(x)) .or. any(shape(rhs) /= shape(residual)) .or. &
+            any(shape(rhs) /= shape(correction))) error stop 'vertical-line relaxation shape mismatch'
+
+        do sweep = 1, n_sweeps
+            call stencil%apply(x, residual)
+            residual = rhs - residual
+            call line_factor%apply(residual, correction)
+            x = x + omega*correction
+        enddo
+    end subroutine relax_with_vertical_lines
 
 
     pure logical function is_fixed_coarse_point(transfer, i, k, j, nz) result(fixed)

@@ -27,7 +27,8 @@ module test_wind_iterative
     use wind_iterative,     only : calc_iter_winds, finalize_iter_winds
     use wind_multilevel,    only : horizontal_transfer_t, horizontal_tile_transfer_t, horizontal_coarse_extent, &
                                     horizontal_coarse_coordinate, owned_coarse_interval, &
-                                    galerkin_stencil_t, vertical_line_factor_t, assemble_colored_galerkin
+                                    galerkin_stencil_t, vertical_line_factor_t, assemble_colored_galerkin, &
+                                    relax_with_vertical_lines
     use advection,          only : adv_var_request
     use io_routines,        only : check_file_exists
     implicit none
@@ -441,6 +442,19 @@ contains
         scale = max(1.0_c_double, maxval(abs(line_rhs)))
         if (maxval(abs(line_ax-line_rhs)) > 2.0e-12_c_double*scale) then
             call test_failed(error, 'test_multilevel_transfer', 'exact coarse vertical line solve failed')
+            call line_factor%release()
+            call stencil%release()
+            call transfer%release()
+            return
+        endif
+        line_x = 0.0_c_double
+        call relax_with_vertical_lines(stencil, line_factor, line_rhs, line_x, line_ax, coarse_stencil, &
+                                       n_sweeps=4, omega=0.7_c_double)
+        call stencil%apply(line_x, line_ax)
+        lhs = sqrt(sum((line_rhs-line_ax)**2))
+        rhs = sqrt(sum(line_rhs**2))
+        if (lhs >= 0.5_c_double*rhs) then
+            call test_failed(error, 'test_multilevel_transfer', 'vertical-line relaxation did not reduce residual')
             call line_factor%release()
             call stencil%release()
             call transfer%release()
