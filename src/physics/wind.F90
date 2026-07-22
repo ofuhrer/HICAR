@@ -15,9 +15,7 @@ module wind
                                   probe_lambda_pattern, probe_zero_corrections, &
                                   probe_apply_corrections, probe_record, probe_finalize, &
                                   probe_random_pattern, probe_compare_operator
-    use iso_c_binding, only : c_double
     use iso_fortran_env, only : output_unit
-    use mpi
     use icar_constants
     use domain_interface,  only : domain_t
     use options_interface, only : options_t
@@ -1016,18 +1014,9 @@ contains
         type(options_t),intent(in)    :: options
         real,           intent(inout) :: div(ims:ime,kms:kme,jms:jme)
 
-        integer :: ca, cb, cc, i, j, k, env_length, env_status
+        integer :: ca, cb, cc, i, j, k
         real :: max_leak
         real, allocatable :: us(:,:,:), vs(:,:,:), ws(:,:,:)
-        real, allocatable :: gu(:,:,:), gv(:,:,:), gw(:,:,:)
-        logical :: audit_enabled
-        character(len=32) :: audit_env
-
-        audit_env = ''
-        call get_environment_variable('HICAR_WIND_OPERATOR_AUDIT', audit_env, &
-                                      length=env_length, status=env_status)
-        audit_enabled = env_status == 0 .and. env_length > 0 .and. &
-                        trim(adjustl(audit_env)) /= '0'
 
         allocate(us(ims:ime+1,kms:kme,jms:jme))
         allocate(vs(ims:ime,kms:kme,jms:jme+1))
@@ -1092,42 +1081,6 @@ contains
         !$acc update host(div)
         call probe_compare_operator(domain, div)
 
-        if (audit_enabled) then
-            allocate(gu(ims:ime+1,kms:kme,jms:jme))
-            allocate(gv(ims:ime,kms:kme,jms:jme+1))
-            allocate(gw(ims:ime,kms:kme,jms:jme))
-            !$acc enter data create(gu, gv, gw)
-            !$acc parallel default(present)
-            !$acc loop gang vector collapse(3)
-            do j = jms, jme
-                do k = kms, kme
-                    do i = ims, ime+1
-                        gu(i,k,j) = u_dqdt(i,k,j)
-                    enddo
-                enddo
-            enddo
-            !$acc loop gang vector collapse(3)
-            do j = jms, jme+1
-                do k = kms, kme
-                    do i = ims, ime
-                        gv(i,k,j) = v_dqdt(i,k,j)
-                    enddo
-                enddo
-            enddo
-            !$acc loop gang vector collapse(3)
-            do j = jms, jme
-                do k = kms, kme
-                    do i = ims, ime
-                        gw(i,k,j) = w_dqdt(i,k,j)
-                    enddo
-                enddo
-            enddo
-            !$acc end parallel
-            call audit_divergence_gradient_adjointness(domain, options, div, gu, gv, gw)
-            !$acc exit data delete(gu, gv, gw)
-            deallocate(gu, gv, gw)
-        endif
-
         !$acc parallel default(present)
         !$acc loop gang vector collapse(3)
         do j = jms, jme
@@ -1158,181 +1111,6 @@ contains
         !$acc exit data delete(us, vs, ws)
         deallocate(us, vs, ws)
     end subroutine calibrate_projection_operator
-
-
-    !> Direct bilinear audit of the model divergence D and correction gradient
-    !! G.  The correction has a built-in factor 1/2, so formal adjointness is
-    !! <lambda,Dq> = -2 <G lambda,q>.  The raw pairing is diagnostic; the
-    !! diagonal-mass pairing includes the finite-volume cell/face weights but
-    !! deliberately does not invent an unverified terrain cross-metric.
-    subroutine audit_divergence_gradient_adjointness(domain, options, div, gu, gv, gw)
-        implicit none
-        type(domain_t), intent(inout) :: domain
-        type(options_t), intent(in) :: options
-        real, intent(inout) :: div(ims:ime,kms:kme,jms:jme)
-        real, intent(in) :: gu(ims:ime+1,kms:kme,jms:jme)
-        real, intent(in) :: gv(ims:ime,kms:kme,jms:jme+1)
-        real, intent(in) :: gw(ims:ime,kms:kme,jms:jme)
-
-        integer :: i, j, k, sample, ierr
-        real(c_double) :: local_stats(4), global_stats(4)
-        real(c_double) :: lambda_value, q_value, cell_weight, face_weight
-        real(c_double) :: rho_face, dz_face, raw_defect, mass_defect
-        real(c_double) :: phase
-
-        associate(u_q => domain%vars_3d(domain%var_indx(kVARS%u)%v)%dqdt_3d, &
-                  v_q => domain%vars_3d(domain%var_indx(kVARS%v)%v)%dqdt_3d, &
-                  w_q => domain%vars_3d(domain%var_indx(kVARS%w)%v)%dqdt_3d, &
-                  rho => domain%vars_3d(domain%var_indx(kVARS%density)%v)%data_3d, &
-                  dz => domain%vars_3d(domain%var_indx(kVARS%advection_dz)%v)%data_3d, &
-                  jaco => domain%vars_3d(domain%var_indx(kVARS%jacobian)%v)%data_3d, &
-                  jaco_u => domain%vars_3d(domain%var_indx(kVARS%jacobian_u)%v)%data_3d, &
-                  jaco_v => domain%vars_3d(domain%var_indx(kVARS%jacobian_v)%v)%data_3d, &
-                  jaco_w => domain%vars_3d(domain%var_indx(kVARS%jacobian_w)%v)%data_3d, &
-                  alpha => domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d, &
-                  mf_mx_u => domain%mapfac_mx_u, mf_my_u => domain%mapfac_my_u, &
-                  mf_mx_v => domain%mapfac_mx_v, mf_my_v => domain%mapfac_my_v, &
-                  mf_mxy => domain%mapfac_mxy)
-
-        do sample = 1, 3
-            phase = real(17*sample, c_double)
-            !$acc parallel default(present)
-            !$acc loop gang vector collapse(3) private(q_value)
-            do j = jms, jme
-                do k = kms, kme
-                    do i = ims, ime+1
-                        q_value = sin(0.019_c_double*real(i,c_double) + &
-                                      0.031_c_double*real(k,c_double) + &
-                                      0.023_c_double*real(j,c_double) + phase) + &
-                                  0.2_c_double*cos(0.071_c_double*real(i,c_double) - &
-                                      0.043_c_double*real(k,c_double) + 0.037_c_double*real(j,c_double))
-                        if (i == ids .or. i == ide+1) q_value = 0.0_c_double
-                        u_q(i,k,j) = real(q_value)
-                    enddo
-                enddo
-            enddo
-            !$acc loop gang vector collapse(3) private(q_value)
-            do j = jms, jme+1
-                do k = kms, kme
-                    do i = ims, ime
-                        q_value = sin(0.029_c_double*real(i,c_double) + &
-                                      0.017_c_double*real(k,c_double) + &
-                                      0.041_c_double*real(j,c_double) + 1.3_c_double*phase) + &
-                                  0.2_c_double*cos(0.053_c_double*real(i,c_double) + &
-                                      0.067_c_double*real(k,c_double) - 0.031_c_double*real(j,c_double))
-                        if (j == jds .or. j == jde+1) q_value = 0.0_c_double
-                        v_q(i,k,j) = real(q_value)
-                    enddo
-                enddo
-            enddo
-            !$acc loop gang vector collapse(3) private(q_value)
-            do j = jms, jme
-                do k = kms, kme
-                    do i = ims, ime
-                        q_value = sin(0.037_c_double*real(i,c_double) + &
-                                      0.047_c_double*real(k,c_double) + &
-                                      0.013_c_double*real(j,c_double) + 0.7_c_double*phase) + &
-                                  0.2_c_double*cos(0.061_c_double*real(i,c_double) - &
-                                      0.029_c_double*real(k,c_double) + 0.059_c_double*real(j,c_double))
-                        if (k == kme) q_value = 0.0_c_double
-                        w_q(i,k,j) = real(q_value)
-                    enddo
-                enddo
-            enddo
-            !$acc end parallel
-
-            call calc_divergence(div, domain, advect_density=options%adv%advect_density, &
-                                 horz_only=.False., use_dqdt=.True.)
-
-            local_stats = 0.0_c_double
-            !$acc parallel loop gang vector collapse(3) &
-            !$acc reduction(+:local_stats(1),local_stats(3)) &
-            !$acc private(lambda_value,cell_weight) present(div,jaco,dz,mf_mxy)
-            do j = jts, jte
-                do k = kts, kte
-                    do i = its, ite
-                        lambda_value = real(real(sin(12.9898_c_double*real(i,c_double) + &
-                            78.233_c_double*real(k,c_double) + 37.719_c_double*real(j,c_double))),c_double)
-                        cell_weight = real(jaco(i,k,j),c_double) * real(dz(i,k,j),c_double) / &
-                                      max(real(mf_mxy(i,j),c_double),tiny(1.0_c_double))
-                        local_stats(1) = local_stats(1) + lambda_value*real(div(i,k,j),c_double)
-                        local_stats(3) = local_stats(3) + cell_weight*lambda_value*real(div(i,k,j),c_double)
-                    enddo
-                enddo
-            enddo
-
-            !$acc parallel loop gang vector collapse(3) &
-            !$acc reduction(+:local_stats(2),local_stats(4)) &
-            !$acc private(rho_face,dz_face,face_weight) &
-            !$acc present(u_q,gu,rho,dz,jaco_u,mf_mx_u,mf_my_u)
-            do j = jts, jte
-                do k = kts, kte
-                    do i = its, min(ite,ide-1)
-                        rho_face = 0.5_c_double*(real(rho(i,k,j),c_double)+real(rho(i+1,k,j),c_double))
-                        dz_face = 0.5_c_double*(real(dz(i,k,j),c_double)+real(dz(i+1,k,j),c_double))
-                        face_weight = rho_face*real(jaco_u(i+1,k,j),c_double)*dz_face / &
-                            max(real(mf_mx_u(i+1,j),c_double)*real(mf_my_u(i+1,j),c_double),tiny(1.0_c_double))
-                        local_stats(2) = local_stats(2) + real(u_q(i+1,k,j),c_double)*real(gu(i+1,k,j),c_double)
-                        local_stats(4) = local_stats(4) + face_weight*real(u_q(i+1,k,j),c_double)* &
-                            real(gu(i+1,k,j),c_double)
-                    enddo
-                enddo
-            enddo
-
-            !$acc parallel loop gang vector collapse(3) &
-            !$acc reduction(+:local_stats(2),local_stats(4)) &
-            !$acc private(rho_face,dz_face,face_weight) &
-            !$acc present(v_q,gv,rho,dz,jaco_v,mf_mx_v,mf_my_v)
-            do j = jts, min(jte,jde-1)
-                do k = kts, kte
-                    do i = its, ite
-                        rho_face = 0.5_c_double*(real(rho(i,k,j),c_double)+real(rho(i,k,j+1),c_double))
-                        dz_face = 0.5_c_double*(real(dz(i,k,j),c_double)+real(dz(i,k,j+1),c_double))
-                        face_weight = rho_face*real(jaco_v(i,k,j+1),c_double)*dz_face / &
-                            max(real(mf_mx_v(i,j+1),c_double)*real(mf_my_v(i,j+1),c_double),tiny(1.0_c_double))
-                        local_stats(2) = local_stats(2) + real(v_q(i,k,j+1),c_double)*real(gv(i,k,j+1),c_double)
-                        local_stats(4) = local_stats(4) + face_weight*real(v_q(i,k,j+1),c_double)* &
-                            real(gv(i,k,j+1),c_double)
-                    enddo
-                enddo
-            enddo
-
-            !$acc parallel loop gang vector collapse(3) &
-            !$acc reduction(+:local_stats(2),local_stats(4)) &
-            !$acc private(rho_face,face_weight) present(w_q,gw,rho,dz,jaco_w,alpha,mf_mxy)
-            do j = jts, jte
-                do k = kts, kte-1
-                    do i = its, ite
-                        rho_face = (real(rho(i,k,j),c_double)*real(dz(i,k+1,j),c_double) + &
-                                    real(rho(i,k+1,j),c_double)*real(dz(i,k,j),c_double)) / &
-                                   max(real(dz(i,k,j)+dz(i,k+1,j),c_double),tiny(1.0_c_double))
-                        face_weight = rho_face*real(jaco_w(i,k,j),c_double) / &
-                            max(real(alpha(i,k,j),c_double)**2*real(mf_mxy(i,j),c_double),tiny(1.0_c_double))
-                        local_stats(2) = local_stats(2) + real(w_q(i,k,j),c_double)*real(gw(i,k,j),c_double)
-                        local_stats(4) = local_stats(4) + face_weight*real(w_q(i,k,j),c_double)* &
-                            real(gw(i,k,j),c_double)
-                    enddo
-                enddo
-            enddo
-
-            call MPI_Allreduce(local_stats, global_stats, 4, MPI_DOUBLE_PRECISION, MPI_SUM, &
-                               domain%compute_comms, ierr)
-            raw_defect = abs(global_stats(1)+2.0_c_double*global_stats(2)) / &
-                max(abs(global_stats(1))+2.0_c_double*abs(global_stats(2)),tiny(1.0_c_double))
-            mass_defect = abs(global_stats(3)+2.0_c_double*global_stats(4)) / &
-                max(abs(global_stats(3))+2.0_c_double*abs(global_stats(4)),tiny(1.0_c_double))
-            if (STD_OUT_PE) then
-                write(output_unit,'(A,I0,A,ES12.4,A,ES12.4,A,ES12.4)') &
-                    ' HICAR D/G adjoint audit: sample=', sample, ' raw_defect=', raw_defect, &
-                    ' scalar_form=', global_stats(1), ' gradient_form=', 2.0_c_double*global_stats(2)
-                write(output_unit,'(A,I0,A,ES12.4,A,ES12.4,A,ES12.4)') &
-                    ' HICAR D/G diagonal-mass audit: sample=', sample, ' defect=', mass_defect, &
-                    ' scalar_form=', global_stats(3), ' gradient_form=', 2.0_c_double*global_stats(4)
-                flush(output_unit)
-            endif
-        enddo
-        end associate
-    end subroutine audit_divergence_gradient_adjointness
 
 
     subroutine calc_alpha(alpha, froude)
