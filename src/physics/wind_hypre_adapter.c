@@ -31,10 +31,8 @@ typedef struct {
   HYPRE_BigInt first, last;
   hicar_block_t *blocks;
   unsigned char *zero_rows;
-  HYPRE_Int *mgr_point_marker;
   HYPRE_IJMatrix ij_a;
   HYPRE_ParCSRMatrix a;
-  HYPRE_Solver mgr;
   HYPRE_Solver amg;
   HYPRE_Solver fgmres;
   int solver_ready;
@@ -67,12 +65,10 @@ int hicar_hypre_initialize(void)
 static void clear_state(void)
 {
   if (state.fgmres) HYPRE_ParCSRFlexGMRESDestroy(state.fgmres);
-  if (state.mgr) HYPRE_MGRDestroy(state.mgr);
   if (state.amg) HYPRE_BoomerAMGDestroy(state.amg);
   if (state.ij_a) HYPRE_IJMatrixDestroy(state.ij_a);
   free(state.blocks);
   free(state.zero_rows);
-  free(state.mgr_point_marker);
   memset(&state, 0, sizeof(state));
 }
 
@@ -118,8 +114,6 @@ int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, i
                       const float *m, const float *n, const float *o)
 {
   int meta[6], *allmeta = NULL, r, ierr = 0, fgmres_print_level = 0;
-  HYPRE_Int mgr_num_cpoints[1] = {1}, mgr_cpoint = 0;
-  HYPRE_Int *mgr_cpoints[1] = {&mgr_cpoint};
   int local_bad_diag = 0, global_bad_diag = 0;
   int local_zero_rows = 0, global_zero_rows = 0;
   int local_zero_diag_offdiag = 0, global_zero_diag_offdiag = 0;
@@ -228,33 +222,6 @@ int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, i
   if (!ierr) { fprintf(stderr, "HICAR HYPRE rank %d: matrix assembled\n", state.rank); fflush(stderr); }
   if (!ierr) ierr |= HYPRE_IJMatrixGetObject(state.ij_a, (void **)&state.a);
   if (!ierr) { fprintf(stderr, "HICAR HYPRE rank %d: matrix retained on host\n", state.rank); fflush(stderr); }
-  /* Use an explicit 2x2x2 spatial C/F split before algebraic coarsening.
-   * This supplies a distributed geometric coarse space to the nonsymmetric
-   * projection operator, instead of asking a local smoother to represent its
-   * long horizontal modes.  Markers use HYPRE's scalar block id 0 for C and
-   * -1 for F, and are retained until MGR is destroyed. */
-  state.mgr_point_marker = calloc((size_t)nlocal, sizeof(*state.mgr_point_marker));
-  if (!state.mgr_point_marker) ierr = -6;
-  if (!ierr) {
-    for (lj=0; lj<ym; ++lj) for (lk=0; lk<zm; ++lk) for (li=0; li<xm; ++li) {
-      int i=xs+li, k=zs+lk, j=ys+lj;
-      HYPRE_BigInt qmark=((HYPRE_BigInt)lj*zm + lk)*xm + li;
-      state.mgr_point_marker[qmark] = ((i & 1) == 0 && (j & 1) == 0 && (k & 1) == 0) ? 0 : -1;
-    }
-  }
-  if (!ierr) ierr |= HYPRE_MGRCreate(&state.mgr);
-  if (!ierr) ierr |= HYPRE_MGRSetCpointsByPointMarkerArray(state.mgr, 1, 1,
-      mgr_num_cpoints, mgr_cpoints, state.mgr_point_marker);
-  if (!ierr) ierr |= HYPRE_MGRSetNonCpointsToFpoints(state.mgr, 1);
-  if (!ierr) ierr |= HYPRE_MGRSetMaxCoarseLevels(state.mgr, 1);
-  if (!ierr) ierr |= HYPRE_MGRSetRelaxType(state.mgr, 18);
-  if (!ierr) ierr |= HYPRE_MGRSetFRelaxMethod(state.mgr, 0);
-  if (!ierr) ierr |= HYPRE_MGRSetNumRelaxSweeps(state.mgr, 1);
-  if (!ierr) ierr |= HYPRE_MGRSetRestrictType(state.mgr, 3);
-  if (!ierr) ierr |= HYPRE_MGRSetInterpType(state.mgr, 3);
-  if (!ierr) ierr |= HYPRE_MGRSetMaxIter(state.mgr, 1);
-  if (!ierr) ierr |= HYPRE_MGRSetTol(state.mgr, 0.0);
-  if (!ierr) ierr |= HYPRE_MGRSetPrintLevel(state.mgr, 0);
   if (!ierr) ierr |= HYPRE_BoomerAMGCreate(&state.amg);
   /* The terrain-following projection operator is generally nonsymmetric.
    * Use AMG for one flexible preconditioning cycle, and let FGMRES own the
@@ -270,8 +237,6 @@ int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, i
   if (!ierr) ierr |= HYPRE_BoomerAMGSetInterpType(state.amg, 6);
   if (!ierr) ierr |= HYPRE_BoomerAMGSetPMaxElmts(state.amg, 4);
   if (!ierr) ierr |= HYPRE_BoomerAMGSetStrongThreshold(state.amg, 0.25);
-  if (!ierr) ierr |= HYPRE_MGRSetCoarseSolver(state.mgr,
-      HYPRE_BoomerAMGSolve, HYPRE_BoomerAMGSetup, state.amg);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESCreate(state.comm, &state.fgmres);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetKDim(state.fgmres, 50);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetTol(state.fgmres, 1.0e-5);
@@ -283,10 +248,10 @@ int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, i
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetLogging(state.fgmres, fgmres_print_level ? 1 : 0);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetPrintLevel(state.fgmres, fgmres_print_level);
   /* The calibrated matrix has now been assembled with its true local
-   * coefficient bounds.  Apply MGR's explicit spatial coarse correction and
-   * its HMIS AMG coarse solve through flexible FGMRES. */
+   * coefficient bounds.  Use one BoomerAMG cycle as a flexible FGMRES
+   * preconditioner; FGMRES retains responsibility for convergence. */
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetPrecond(state.fgmres,
-      HYPRE_MGRSolve, HYPRE_MGRSetup, state.mgr);
+      HYPRE_BoomerAMGSolve, HYPRE_BoomerAMGSetup, state.amg);
   free(ncols); free(rows); free(cols); free(vals);
   if (ierr) { clear_state(); return ierr; }
   state.valid=1;
