@@ -20,6 +20,31 @@ module wind_multilevel
         procedure :: restrict_adjoint
     end type horizontal_transfer_t
 
+    type, public :: horizontal_tile_transfer_t
+        integer :: nx_f_global = 0
+        integer :: ny_f_global = 0
+        integer :: nx_c_global = 0
+        integer :: ny_c_global = 0
+        integer :: x_f_first = 0
+        integer :: y_f_first = 0
+        integer :: nx_f_local = 0
+        integer :: ny_f_local = 0
+        integer :: x_c_first = 0
+        integer :: y_c_first = 0
+        integer :: nx_c_local = 0
+        integer :: ny_c_local = 0
+        logical :: fix_lateral_boundaries = .true.
+        logical :: fix_vertical_boundaries = .true.
+        integer, allocatable :: i_lo(:), i_hi(:), j_lo(:), j_hi(:)
+        real(c_double), allocatable :: i_hi_weight(:), j_hi_weight(:)
+    contains
+        procedure :: init => init_horizontal_tile_transfer
+        procedure :: release => release_horizontal_tile_transfer
+        procedure :: prolong_owned => prolong_horizontal_tile
+        procedure :: build_owned_coarse_weights
+        procedure :: restrict_owned_adjoint
+    end type horizontal_tile_transfer_t
+
     type, public :: galerkin_stencil_t
         integer :: nx = 0
         integer :: ny = 0
@@ -160,6 +185,166 @@ contains
         this%fix_lateral_boundaries = .true.
         this%fix_vertical_boundaries = .true.
     end subroutine release_horizontal_transfer
+
+
+    subroutine init_horizontal_tile_transfer(this, nx_global, ny_global, x_first, nx_local, y_first, ny_local, &
+                                             fix_lateral_boundaries, fix_vertical_boundaries)
+        class(horizontal_tile_transfer_t), intent(inout) :: this
+        integer, intent(in) :: nx_global, ny_global, x_first, nx_local, y_first, ny_local
+        logical, intent(in), optional :: fix_lateral_boundaries, fix_vertical_boundaries
+        integer :: i, lo_global, hi_global
+
+        if (nx_global < 2 .or. ny_global < 2) error stop 'tile transfer requires at least 2x2 global points'
+        if (nx_local < 1 .or. ny_local < 1) error stop 'tile transfer requires a nonempty fine tile'
+
+        call this%release()
+        this%nx_f_global = nx_global
+        this%ny_f_global = ny_global
+        this%nx_c_global = horizontal_coarse_extent(nx_global)
+        this%ny_c_global = horizontal_coarse_extent(ny_global)
+        this%x_f_first = x_first
+        this%y_f_first = y_first
+        this%nx_f_local = nx_local
+        this%ny_f_local = ny_local
+        call owned_coarse_interval(nx_global, x_first, nx_local, this%x_c_first, this%nx_c_local)
+        call owned_coarse_interval(ny_global, y_first, ny_local, this%y_c_first, this%ny_c_local)
+        if (this%nx_c_local < 1 .or. this%ny_c_local < 1) &
+            error stop 'tile must be agglomerated before it loses all coarse points'
+        if (present(fix_lateral_boundaries)) this%fix_lateral_boundaries = fix_lateral_boundaries
+        if (present(fix_vertical_boundaries)) this%fix_vertical_boundaries = fix_vertical_boundaries
+
+        allocate(this%i_lo(nx_local), this%i_hi(nx_local), this%i_hi_weight(nx_local))
+        allocate(this%j_lo(ny_local), this%j_hi(ny_local), this%j_hi_weight(ny_local))
+        do i = 1, nx_local
+            call horizontal_coarse_bracket(x_first+i-1, nx_global, lo_global, hi_global, this%i_hi_weight(i))
+            this%i_lo(i) = lo_global - this%x_c_first + 1
+            this%i_hi(i) = hi_global - this%x_c_first + 1
+        enddo
+        do i = 1, ny_local
+            call horizontal_coarse_bracket(y_first+i-1, ny_global, lo_global, hi_global, this%j_hi_weight(i))
+            this%j_lo(i) = lo_global - this%y_c_first + 1
+            this%j_hi(i) = hi_global - this%y_c_first + 1
+        enddo
+    end subroutine init_horizontal_tile_transfer
+
+
+    subroutine release_horizontal_tile_transfer(this)
+        class(horizontal_tile_transfer_t), intent(inout) :: this
+
+        if (allocated(this%i_lo)) deallocate(this%i_lo, this%i_hi, this%i_hi_weight)
+        if (allocated(this%j_lo)) deallocate(this%j_lo, this%j_hi, this%j_hi_weight)
+        this%nx_f_global = 0; this%ny_f_global = 0
+        this%nx_c_global = 0; this%ny_c_global = 0
+        this%x_f_first = 0; this%y_f_first = 0
+        this%nx_f_local = 0; this%ny_f_local = 0
+        this%x_c_first = 0; this%y_c_first = 0
+        this%nx_c_local = 0; this%ny_c_local = 0
+        this%fix_lateral_boundaries = .true.
+        this%fix_vertical_boundaries = .true.
+    end subroutine release_horizontal_tile_transfer
+
+
+    subroutine prolong_horizontal_tile(this, coarse, fine)
+        class(horizontal_tile_transfer_t), intent(in) :: this
+        real(c_double), intent(in) :: coarse(0:,:,0:)
+        real(c_double), intent(out) :: fine(:,:,:)
+        integer :: i, j, k, il, ih, jl, jh
+        real(c_double) :: tx, ty
+
+        call require_tile_shapes(this, coarse, fine)
+        do j = 1, this%ny_f_local
+            jl = this%j_lo(j); jh = this%j_hi(j); ty = this%j_hi_weight(j)
+            do k = 1, size(fine,2)
+                do i = 1, this%nx_f_local
+                    if (is_fixed_global_fine_point(this, this%x_f_first+i-1, k, this%y_f_first+j-1, size(fine,2))) then
+                        fine(i,k,j) = 0.0_c_double
+                    else
+                        il = this%i_lo(i); ih = this%i_hi(i); tx = this%i_hi_weight(i)
+                        fine(i,k,j) = &
+                            (1.0_c_double-tx)*(1.0_c_double-ty)*coarse(il,k,jl) + &
+                            tx*(1.0_c_double-ty)*coarse(ih,k,jl) + &
+                            (1.0_c_double-tx)*ty*coarse(il,k,jh) + tx*ty*coarse(ih,k,jh)
+                    endif
+                enddo
+            enddo
+        enddo
+    end subroutine prolong_horizontal_tile
+
+
+    subroutine build_owned_coarse_weights(this, fine_weight, coarse_weight)
+        class(horizontal_tile_transfer_t), intent(in) :: this
+        real(c_double), intent(in) :: fine_weight(0:,:,0:)
+        real(c_double), intent(out) :: coarse_weight(:,:,:)
+        integer :: i, j, k, fi, fj, gi, gj, ci, cj
+        real(c_double) :: wx, wy
+
+        call require_tile_reverse_shapes(this, fine_weight, coarse_weight)
+        coarse_weight = 0.0_c_double
+        do j = 1, this%ny_c_local
+            cj = this%y_c_first+j-1
+            do k = 1, size(coarse_weight,2)
+                do i = 1, this%nx_c_local
+                    ci = this%x_c_first+i-1
+                    if (is_fixed_global_coarse_point(this, ci, k, cj, size(coarse_weight,2))) then
+                        coarse_weight(i,k,j) = 1.0_c_double
+                        cycle
+                    endif
+                    do gj = max(0,horizontal_coarse_coordinate(cj,this%ny_f_global)-1), &
+                            min(this%ny_f_global-1,horizontal_coarse_coordinate(cj,this%ny_f_global)+1)
+                        wy = horizontal_basis_weight(gj, this%ny_f_global, cj)
+                        if (wy <= 0.0_c_double) cycle
+                        fj = gj-this%y_f_first+1
+                        do gi = max(0,horizontal_coarse_coordinate(ci,this%nx_f_global)-1), &
+                                min(this%nx_f_global-1,horizontal_coarse_coordinate(ci,this%nx_f_global)+1)
+                            wx = horizontal_basis_weight(gi, this%nx_f_global, ci)
+                            if (wx <= 0.0_c_double) cycle
+                            fi = gi-this%x_f_first+1
+                            if (is_fixed_global_fine_point(this, gi, k, gj, size(coarse_weight,2))) cycle
+                            coarse_weight(i,k,j) = coarse_weight(i,k,j) + wx*wy*fine_weight(fi,k,fj)
+                        enddo
+                    enddo
+                enddo
+            enddo
+        enddo
+        if (any(coarse_weight <= 0.0_c_double)) error stop 'owned coarse transfer weight is not positive'
+    end subroutine build_owned_coarse_weights
+
+
+    subroutine restrict_owned_adjoint(this, fine, fine_weight, coarse_weight, coarse)
+        class(horizontal_tile_transfer_t), intent(in) :: this
+        real(c_double), intent(in) :: fine(0:,:,0:), fine_weight(0:,:,0:), coarse_weight(:,:,:)
+        real(c_double), intent(out) :: coarse(:,:,:)
+        integer :: i, j, k, fi, fj, gi, gj, ci, cj
+        real(c_double) :: wx, wy
+
+        call require_tile_reverse_shapes(this, fine, coarse)
+        call require_tile_reverse_shapes(this, fine_weight, coarse_weight)
+        coarse = 0.0_c_double
+        do j = 1, this%ny_c_local
+            cj = this%y_c_first+j-1
+            do k = 1, size(coarse,2)
+                do i = 1, this%nx_c_local
+                    ci = this%x_c_first+i-1
+                    if (is_fixed_global_coarse_point(this, ci, k, cj, size(coarse,2))) cycle
+                    do gj = max(0,horizontal_coarse_coordinate(cj,this%ny_f_global)-1), &
+                            min(this%ny_f_global-1,horizontal_coarse_coordinate(cj,this%ny_f_global)+1)
+                        wy = horizontal_basis_weight(gj, this%ny_f_global, cj)
+                        if (wy <= 0.0_c_double) cycle
+                        fj = gj-this%y_f_first+1
+                        do gi = max(0,horizontal_coarse_coordinate(ci,this%nx_f_global)-1), &
+                                min(this%nx_f_global-1,horizontal_coarse_coordinate(ci,this%nx_f_global)+1)
+                            wx = horizontal_basis_weight(gi, this%nx_f_global, ci)
+                            if (wx <= 0.0_c_double) cycle
+                            fi = gi-this%x_f_first+1
+                            if (is_fixed_global_fine_point(this, gi, k, gj, size(coarse,2))) cycle
+                            coarse(i,k,j) = coarse(i,k,j) + wx*wy*fine_weight(fi,k,fj)*fine(fi,k,fj)
+                        enddo
+                    enddo
+                    coarse(i,k,j) = coarse(i,k,j) / coarse_weight(i,k,j)
+                enddo
+            enddo
+        enddo
+    end subroutine restrict_owned_adjoint
 
 
     pure subroutine build_axis_map(n_f, lo, hi, hi_weight)
@@ -561,5 +746,61 @@ contains
                  (i == 1 .or. i == stencil%nx .or. j == 1 .or. j == stencil%ny)) .or. &
                 (stencil%fix_vertical_boundaries .and. (k == 1 .or. k == stencil%nz))
     end function is_fixed_stencil_point
+
+
+    pure real(c_double) function horizontal_basis_weight(f, n_f, c) result(weight)
+        integer, intent(in) :: f, n_f, c
+        integer :: lo, hi
+        real(c_double) :: hi_weight
+
+        call horizontal_coarse_bracket(f, n_f, lo, hi, hi_weight)
+        weight = 0.0_c_double
+        if (c == lo) weight = weight + 1.0_c_double-hi_weight
+        if (c == hi) weight = weight + hi_weight
+    end function horizontal_basis_weight
+
+
+    pure logical function is_fixed_global_fine_point(this, i, k, j, nz) result(fixed)
+        class(horizontal_tile_transfer_t), intent(in) :: this
+        integer, intent(in) :: i, k, j, nz
+
+        fixed = (this%fix_lateral_boundaries .and. &
+                 (i == 0 .or. i == this%nx_f_global-1 .or. j == 0 .or. j == this%ny_f_global-1)) .or. &
+                (this%fix_vertical_boundaries .and. (k == 1 .or. k == nz))
+    end function is_fixed_global_fine_point
+
+
+    pure logical function is_fixed_global_coarse_point(this, i, k, j, nz) result(fixed)
+        class(horizontal_tile_transfer_t), intent(in) :: this
+        integer, intent(in) :: i, k, j, nz
+
+        fixed = (this%fix_lateral_boundaries .and. &
+                 (i == 0 .or. i == this%nx_c_global-1 .or. j == 0 .or. j == this%ny_c_global-1)) .or. &
+                (this%fix_vertical_boundaries .and. (k == 1 .or. k == nz))
+    end function is_fixed_global_coarse_point
+
+
+    subroutine require_tile_shapes(this, coarse, fine)
+        class(horizontal_tile_transfer_t), intent(in) :: this
+        real(c_double), intent(in) :: coarse(0:,:,0:), fine(:,:,:)
+
+        if (size(coarse,1) /= this%nx_c_local+2 .or. size(coarse,3) /= this%ny_c_local+2) &
+            error stop 'coarse tile does not include one halo'
+        if (size(fine,1) /= this%nx_f_local .or. size(fine,3) /= this%ny_f_local) &
+            error stop 'owned fine tile shape mismatch'
+        if (size(coarse,2) /= size(fine,2)) error stop 'tile transfer cannot coarsen vertically'
+    end subroutine require_tile_shapes
+
+
+    subroutine require_tile_reverse_shapes(this, fine, coarse)
+        class(horizontal_tile_transfer_t), intent(in) :: this
+        real(c_double), intent(in) :: fine(0:,:,0:), coarse(:,:,:)
+
+        if (size(fine,1) /= this%nx_f_local+2 .or. size(fine,3) /= this%ny_f_local+2) &
+            error stop 'fine tile does not include one halo'
+        if (size(coarse,1) /= this%nx_c_local .or. size(coarse,3) /= this%ny_c_local) &
+            error stop 'owned coarse tile shape mismatch'
+        if (size(fine,2) /= size(coarse,2)) error stop 'tile transfer cannot coarsen vertically'
+    end subroutine require_tile_reverse_shapes
 
 end module wind_multilevel

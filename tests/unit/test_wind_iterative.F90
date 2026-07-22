@@ -25,7 +25,7 @@ module test_wind_iterative
     use options_interface,  only : options_t
     use wind,               only : wind_var_request, init_winds, calc_divergence
     use wind_iterative,     only : calc_iter_winds, finalize_iter_winds
-    use wind_multilevel,    only : horizontal_transfer_t, horizontal_coarse_extent, &
+    use wind_multilevel,    only : horizontal_transfer_t, horizontal_tile_transfer_t, horizontal_coarse_extent, &
                                     horizontal_coarse_coordinate, owned_coarse_interval, &
                                     galerkin_stencil_t, vertical_line_factor_t, assemble_colored_galerkin
     use advection,          only : adv_var_request
@@ -227,6 +227,7 @@ contains
         type(error_type), allocatable, intent(out) :: error
         integer, parameter :: nx = 8, ny = 7, nz = 5
         type(horizontal_transfer_t) :: transfer, free_transfer
+        type(horizontal_tile_transfer_t) :: tile_transfer
         type(galerkin_stencil_t) :: stencil
         type(vertical_line_factor_t) :: line_factor
         real(c_double), allocatable :: coarse_x(:,:,:), coarse_y(:,:,:), coarse_r(:,:,:), coarse_stencil(:,:,:)
@@ -234,8 +235,11 @@ contains
         real(c_double), allocatable :: coarse_weight(:,:,:), free_weight(:,:,:), free_coarse(:,:,:)
         real(c_double), allocatable :: fine_x(:,:,:), fine_y(:,:,:), fine_v(:,:,:), fine_a_x(:,:,:)
         real(c_double), allocatable :: fine_weight(:,:,:), free_fine(:,:,:)
+        real(c_double), allocatable :: tile_coarse_halo(:,:,:), tile_fine_halo(:,:,:), tile_weight_halo(:,:,:)
+        real(c_double), allocatable :: tile_fine(:,:,:), tile_coarse_weight(:,:,:), tile_coarse_r(:,:,:)
         real(c_double) :: lhs, rhs, scale, boundary_max, constant_error, minimum_pivot
         integer :: i, j, k, dk, line_status, rank_case, coarse_first, coarse_count
+        integer :: gi, gj, gc_i, gc_j
         integer :: owner_count(0:4)
         integer, parameter :: partition_first(3) = [0, 2, 5]
         integer, parameter :: partition_count(3) = [2, 3, 3]
@@ -308,6 +312,69 @@ contains
             call transfer%release()
             return
         endif
+
+        ! Decompose the same transfer into three uneven x tiles.  Halo-filled
+        ! local P and R must reproduce the global result exactly and every
+        ! coarse row must be formed only by its unique owner.
+        do rank_case = 1, size(partition_first)
+            call tile_transfer%init(nx, ny, partition_first(rank_case), partition_count(rank_case), 0, ny, &
+                                    fix_lateral_boundaries=.true., fix_vertical_boundaries=.true.)
+            allocate(tile_coarse_halo(0:tile_transfer%nx_c_local+1,nz,0:tile_transfer%ny_c_local+1), &
+                     tile_fine_halo(0:tile_transfer%nx_f_local+1,nz,0:tile_transfer%ny_f_local+1), &
+                     tile_weight_halo(0:tile_transfer%nx_f_local+1,nz,0:tile_transfer%ny_f_local+1), &
+                     tile_fine(tile_transfer%nx_f_local,nz,tile_transfer%ny_f_local), &
+                     tile_coarse_weight(tile_transfer%nx_c_local,nz,tile_transfer%ny_c_local), &
+                     tile_coarse_r(tile_transfer%nx_c_local,nz,tile_transfer%ny_c_local))
+            tile_coarse_halo = 0.0_c_double
+            do j = 0, tile_transfer%ny_c_local+1
+                gc_j = tile_transfer%y_c_first+j-1
+                if (gc_j < 0 .or. gc_j >= transfer%ny_c) cycle
+                do i = 0, tile_transfer%nx_c_local+1
+                    gc_i = tile_transfer%x_c_first+i-1
+                    if (gc_i < 0 .or. gc_i >= transfer%nx_c) cycle
+                    tile_coarse_halo(i,:,j) = coarse_x(gc_i+1,:,gc_j+1)
+                enddo
+            enddo
+            call tile_transfer%prolong_owned(tile_coarse_halo, tile_fine)
+            scale = max(1.0_c_double, maxval(abs(fine_x(partition_first(rank_case)+1: &
+                        partition_first(rank_case)+partition_count(rank_case),:,:))))
+            if (maxval(abs(tile_fine-fine_x(partition_first(rank_case)+1: &
+                    partition_first(rank_case)+partition_count(rank_case),:,:))) > 5.0e-14_c_double*scale) then
+                call test_failed(error, 'test_multilevel_transfer', 'tile prolongation differs from global prolongation')
+                call tile_transfer%release()
+                return
+            endif
+
+            tile_fine_halo = 0.0_c_double
+            tile_weight_halo = 1.0_c_double
+            do j = 0, tile_transfer%ny_f_local+1
+                gj = tile_transfer%y_f_first+j-1
+                if (gj < 0 .or. gj >= ny) cycle
+                do i = 0, tile_transfer%nx_f_local+1
+                    gi = tile_transfer%x_f_first+i-1
+                    if (gi < 0 .or. gi >= nx) cycle
+                    tile_fine_halo(i,:,j) = fine_v(gi+1,:,gj+1)
+                    tile_weight_halo(i,:,j) = fine_weight(gi+1,:,gj+1)
+                enddo
+            enddo
+            call tile_transfer%build_owned_coarse_weights(tile_weight_halo, tile_coarse_weight)
+            call tile_transfer%restrict_owned_adjoint(tile_fine_halo, tile_weight_halo, tile_coarse_weight, tile_coarse_r)
+            do j = 1, tile_transfer%ny_c_local
+                gc_j = tile_transfer%y_c_first+j
+                do i = 1, tile_transfer%nx_c_local
+                    gc_i = tile_transfer%x_c_first+i
+                    if (maxval(abs(tile_coarse_weight(i,:,j)-coarse_weight(gc_i,:,gc_j))) > 5.0e-14_c_double .or. &
+                        maxval(abs(tile_coarse_r(i,:,j)-coarse_r(gc_i,:,gc_j))) > 5.0e-14_c_double) then
+                        call test_failed(error, 'test_multilevel_transfer', 'tile restriction differs from global adjoint')
+                        call tile_transfer%release()
+                        return
+                    endif
+                enddo
+            enddo
+            deallocate(tile_coarse_halo, tile_fine_halo, tile_weight_halo, tile_fine, &
+                       tile_coarse_weight, tile_coarse_r)
+            call tile_transfer%release()
+        enddo
 
         boundary_max = max(maxval(abs(fine_x(1,:,:))), maxval(abs(fine_x(nx,:,:))), &
                            maxval(abs(fine_x(:,:,1))), maxval(abs(fine_x(:,:,ny))), &
