@@ -26,6 +26,7 @@ test -x "$tester"
 export OMP_NUM_THREADS=1
 export MPICH_GPU_SUPPORT_ENABLED=0
 export MPICH_GPU_MANAGED_MEMORY_SUPPORT_ENABLED=0
+export HICAR_WIND_MULTILEVEL=1
 
 srun -N1 -n4 --ntasks-per-node=4 --gres=gpu:4 --distribution=block:block --cpu-bind=none \
   bash -c 'export ACC_DEVICE_TYPE=nvidia ACC_DEVICE_NUM=0 CUDA_VISIBLE_DEVICES=$SLURM_LOCALID; cd "$1"; exec ./tests/HICAR-tester wind_iterative' _ "$build" \

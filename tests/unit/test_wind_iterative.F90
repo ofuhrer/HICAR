@@ -24,7 +24,8 @@ module test_wind_iterative
     use domain_interface,   only : domain_t
     use options_interface,  only : options_t
     use wind,               only : wind_var_request, init_winds, calc_divergence
-    use wind_iterative,     only : calc_iter_winds, finalize_iter_winds
+    use wind_iterative,     only : calc_iter_winds, finalize_iter_winds, probe_finalize, &
+                                   multilevel_preconditioner_is_ready
     use wind_multilevel,    only : horizontal_transfer_t, horizontal_tile_transfer_t, horizontal_coarse_extent, &
                                     horizontal_coarse_coordinate, owned_coarse_interval, &
                                     galerkin_stencil_t, galerkin_tile_stencil_t, vertical_line_factor_t, &
@@ -66,8 +67,10 @@ contains
         real, allocatable :: div(:,:,:)
         real    :: div0_max, div1_max, div0_max_g, div1_max_g
         integer :: ierr
+        integer :: env_status, env_length
         integer :: ims, ime, jms, jme, kms, kme, its, ite, jts, jte
-        logical :: ok
+        logical :: ok, multilevel_test, multilevel_ready_ok
+        character(len=16) :: multilevel_env
         character(len=256) :: msg
 
         STD_OUT_PE = .False.
@@ -103,6 +106,12 @@ contains
         call wind_var_request(options)             ! wind_alpha / w_real
         call domain%init(options, 1)
         call init_winds(domain, options)           ! -> init_iter_winds: solver state + neighbours
+        multilevel_env = ''
+        call get_environment_variable('HICAR_WIND_MULTILEVEL', multilevel_env, &
+                                      length=env_length, status=env_status)
+        multilevel_test = env_status == 0 .and. env_length > 0 .and. &
+                          trim(adjustl(multilevel_env)) /= '0'
+        multilevel_ready_ok = .true.
 
         ims = domain%ims; ime = domain%ime; jms = domain%jms; jme = domain%jme
         kms = domain%kms; kme = domain%kme
@@ -141,6 +150,17 @@ contains
         ! THE solve: drives bicgstab_solve -> exchange_krylov_halos on every iteration
         call calc_iter_winds(domain, &
             domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d, div, .False.)
+        if (multilevel_test) then
+            ! The fixture bypasses wind.F90's physical D o G calibration.
+            ! Its first analytic solve allocates the solver structure; now
+            ! mark that stencil as calibrated and polish once through the
+            ! feature-gated hierarchy.  The exact R A P gate is unchanged.
+            call probe_finalize(0.0)
+            call calc_divergence(div, domain, advect_density=.False., horz_only=.False., use_dqdt=.True.)
+            call calc_iter_winds(domain, &
+                domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d, div, .False.)
+            multilevel_ready_ok = multilevel_preconditioner_is_ready()
+        endif
 
         ! divergence of the corrected field
         call calc_divergence(div, domain, advect_density=.False., horz_only=.False., use_dqdt=.True.)
@@ -156,7 +176,10 @@ contains
 
         ! --- evaluate BEFORE tearing down (so cleanup always runs) -------------------
         ok = .True.; msg = ''
-        if (div1_max_g /= div1_max_g) then                       ! NaN
+        if (.not. multilevel_ready_ok) then
+            ok = .False.
+            msg = 'feature-gated multilevel hierarchy did not pass its R A P setup gate'
+        else if (div1_max_g /= div1_max_g) then                  ! NaN
             ok = .False.
             msg = 'corrected wind divergence is NaN'
         else if (.not. (div1_max_g < div0_max_g)) then

@@ -28,6 +28,9 @@ module wind_iterative
     use string,        only : str
     use debug_module,  only : domain_check_winds
     use wind_hypre,    only : wind_hypre_available, wind_hypre_invalidate, wind_hypre_solve, wind_hypre_apply
+    use wind_multilevel, only : horizontal_tile_transfer_t, galerkin_tile_stencil_t, &
+                                vertical_line_factor_t, assemble_colored_tile_galerkin
+    use wind_multilevel_mpi, only : horizontal_halo_exchange_t
 #ifdef USE_NCCL
     use nccl_interface, only : nccl_comm_init, nccl_comm_destroy, &
                                nccl_group_start, nccl_group_end, &
@@ -40,6 +43,7 @@ module wind_iterative
     public :: init_iter_winds, calc_iter_winds, finalize_iter_winds
     public :: probe_lambda_pattern, probe_zero_corrections, probe_apply_corrections, &
               probe_record, probe_finalize, probe_random_pattern, probe_compare_operator
+    public :: multilevel_preconditioner_is_ready
 
     logical :: initialized_iter_winds = .false.
     logical :: structure_uploaded = .false.
@@ -68,6 +72,10 @@ module wind_iterative
     logical :: operator_audit_done = .false.
     logical :: krylov_audit_written = .false.
     logical :: bootstrap_rhs_saved = .false.
+    logical :: multilevel_requested = .false.
+    logical :: multilevel_setup_attempted = .false.
+    logical :: multilevel_ready = .false.
+    logical :: multilevel_arrays_uploaded = .false.
     integer :: operator_audit_max_iters = 0
     character(len=512) :: operator_audit_file = 'hicar_wind_operator_audit.csv'
 
@@ -170,6 +178,22 @@ module wind_iterative
     integer :: solver_rank = -1
     integer :: east_neighbor = -1, west_neighbor = -1, north_neighbor = -1, south_neighbor = -1
 
+    ! Feature-gated, distributed Petrov-Galerkin V-cycle.  These arrays use
+    ! uniform local indexing rather than aliasing the solver vectors, whose
+    ! physical-edge bounds differ by rank.  The separation is deliberate:
+    ! it keeps transfer and coarse-grid halo ownership decomposition-exact.
+    type(horizontal_tile_transfer_t) :: ml_transfer
+    type(galerkin_tile_stencil_t) :: ml_stencil
+    type(vertical_line_factor_t) :: ml_line_factor
+    type(horizontal_halo_exchange_t) :: ml_fine_halo, ml_coarse_halo
+    real(c_double), allocatable :: ml_fine_owned(:,:,:)
+    real(c_double), allocatable :: ml_fine_residual(:,:,:), ml_fine_weight(:,:,:)
+    real(c_double), allocatable :: ml_solver_x(:,:,:), ml_solver_ax(:,:,:)
+    real(c_double), allocatable :: ml_coarse_halo_x(:,:,:)
+    real(c_double), allocatable :: ml_coarse_weight(:,:,:), ml_coarse_b(:,:,:)
+    real(c_double), allocatable :: ml_coarse_x(:,:,:), ml_coarse_ax(:,:,:)
+    real(c_double), allocatable :: ml_coarse_r(:,:,:), ml_coarse_correction(:,:,:)
+
     ! Multi-nest cache: each nest's full state lives in its own slot. On nest
     ! context switch (nest_manager.F90:switch_nest_context), init_iter_winds
     ! saves the active state and restores the target. O(1) switching once each
@@ -195,6 +219,7 @@ module wind_iterative
         logical :: operator_audit_done = .false.
         logical :: krylov_audit_written = .false.
         logical :: bootstrap_rhs_saved = .false.
+        logical :: multilevel_requested = .false.
         integer :: wind_solver_max_iters
         integer :: precond_n_sweeps = BASE_PREC_SWEEPS
         ! Geometry (single precision, owned-range allocations)
@@ -249,6 +274,10 @@ module wind_iterative
 
 contains
 
+    logical function multilevel_preconditioner_is_ready()
+        multilevel_preconditioner_is_ready = multilevel_ready
+    end function multilevel_preconditioner_is_ready
+
     !>------------------------------------------------------------
     !! Per-nest initialisation — called once per nest at startup.
     !! Phase 1: no multi-nest cache, so this just allocates state
@@ -264,7 +293,7 @@ contains
         integer :: target_nest
         integer :: my_rank_in_comm
         integer :: env_status, env_length
-        character(len=32) :: audit_env, audit_max_iters_env
+        character(len=32) :: audit_env, audit_max_iters_env, multilevel_env
         character(len=512) :: audit_file_env
         integer :: audit_read_status
 #ifdef USE_NCCL
@@ -350,6 +379,14 @@ contains
 
         verbose_solver = options%general%debug .or. &
                          (options%physics%windtype == kITERATIVE_WINDS)
+
+        multilevel_env = ''
+        call get_environment_variable('HICAR_WIND_MULTILEVEL', multilevel_env, &
+                                      length=env_length, status=env_status)
+        multilevel_requested = env_status == 0 .and. env_length > 0 .and. &
+                               trim(adjustl(multilevel_env)) /= '0'
+        multilevel_setup_attempted = .false.
+        multilevel_ready = .false.
 
         call init_module_vars(domain)
 
@@ -509,6 +546,8 @@ contains
         ! Build / refresh the vertical-line block-Jacobi preconditioner from
         ! the current coefficients.
         call build_line_preconditioner()
+        if (multilevel_requested .and. operator_probed .and. .not. multilevel_setup_attempted) &
+            call setup_multilevel_preconditioner()
 
         ! Build RHS on GPU (3D layout: rhs(i,k,j) = -2*div for interior, 0 at BCs)
         call compute_rhs_3d()
@@ -2113,6 +2152,358 @@ contains
     end function audit_weight_name
 
 
+    subroutine setup_multilevel_preconditioner()
+        implicit none
+        real(c_double), allocatable :: test_x(:,:,:), direct_ax(:,:,:)
+        real(c_double) :: local_error, global_error, local_reference, global_reference
+        real(c_double) :: relative_error, minimum_pivot
+        integer :: i, j, k, gi, gj, gk, ierr, line_status
+        integer :: west, east, south, north
+
+        call release_multilevel_preconditioner()
+        multilevel_setup_attempted = .true.
+        if (.not. multilevel_requested .or. .not. operator_probed) return
+
+        call ml_transfer%init(mx, my, xs, xm, ys, ym, &
+                              fix_lateral_boundaries=.true., fix_vertical_boundaries=.true.)
+        west  = merge(west_neighbor,  MPI_PROC_NULL, xs > 0)
+        east  = merge(east_neighbor,  MPI_PROC_NULL, xs+xm < mx)
+        south = merge(south_neighbor, MPI_PROC_NULL, ys > 0)
+        north = merge(north_neighbor, MPI_PROC_NULL, ys+ym < my)
+        call ml_fine_halo%init(xm, ym, mz, solver_comm, west, east, south, north)
+        call ml_coarse_halo%init(ml_transfer%nx_c_local, ml_transfer%ny_c_local, mz, &
+                                 solver_comm, west, east, south, north)
+
+        allocate(ml_fine_owned(xm,mz,ym), &
+                 ml_fine_residual(0:xm+1,mz,0:ym+1), &
+                 ml_fine_weight(0:xm+1,mz,0:ym+1), &
+                 ml_solver_x(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), &
+                 ml_solver_ax(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), &
+                 ml_coarse_halo_x(0:ml_transfer%nx_c_local+1,mz,0:ml_transfer%ny_c_local+1), &
+                 ml_coarse_weight(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local), &
+                 ml_coarse_b(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local), &
+                 ml_coarse_x(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local), &
+                 ml_coarse_ax(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local), &
+                 ml_coarse_r(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local), &
+                 ml_coarse_correction(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local))
+        ml_fine_owned = 0.0_c_double
+        ml_fine_residual = 0.0_c_double
+        ml_fine_weight = 0.0_c_double
+        do j = 1, ym
+            gj = ys+j-1
+            do k = 1, mz
+                gk = zs+k-1
+                do i = 1, xm
+                    gi = xs+i-1
+                    if (gi <= 0 .or. gi >= mx-1 .or. gj <= 0 .or. gj >= my-1 .or. &
+                        gk <= 0 .or. gk >= mz-1) then
+                        ml_fine_weight(i,k,j) = 1.0_c_double
+                    else
+                        ml_fine_weight(i,k,j) = 1.0_c_double / &
+                            max(abs(real(jaco(gi,gk,gj),c_double)), 1.0e-12_c_double)
+                    endif
+                enddo
+            enddo
+        enddo
+        call ml_fine_halo%exchange(ml_fine_weight)
+        ml_solver_x = 0.0_c_double
+        ml_solver_ax = 0.0_c_double
+        ml_coarse_halo_x = 0.0_c_double
+        ml_coarse_weight = 0.0_c_double
+        ml_coarse_b = 0.0_c_double
+        ml_coarse_x = 0.0_c_double
+        ml_coarse_ax = 0.0_c_double
+        ml_coarse_r = 0.0_c_double
+        ml_coarse_correction = 0.0_c_double
+
+        !$acc enter data copyin(ml_fine_weight) &
+        !$acc            create(ml_fine_owned, ml_fine_residual, ml_solver_x, ml_solver_ax, &
+        !$acc                   ml_coarse_halo_x, ml_coarse_weight, ml_coarse_b, ml_coarse_x, &
+        !$acc                   ml_coarse_ax, ml_coarse_r, ml_coarse_correction)
+        multilevel_arrays_uploaded = .true.
+        call ml_transfer%upload_device()
+        call ml_fine_halo%upload_device()
+        call ml_coarse_halo%upload_device()
+        call ml_transfer%build_owned_coarse_weights_device(ml_fine_weight, ml_coarse_weight)
+        !$acc update self(ml_coarse_weight)
+
+        call assemble_colored_tile_galerkin(ml_transfer%nx_c_global, ml_transfer%ny_c_global, &
+            ml_transfer%x_c_first, ml_transfer%y_c_first, ml_transfer%nx_c_local, &
+            ml_transfer%ny_c_local, mz, .true., .true., apply_coarse_rap, ml_stencil)
+        call ml_line_factor%factorize(ml_stencil, line_status, minimum_pivot)
+        if (line_status /= 0) then
+            if (STD_OUT_PE) write(output_unit,'(A,ES12.4)') &
+                ' HICAR multilevel rejected: singular coarse vertical line, pivot=', minimum_pivot
+            call release_multilevel_preconditioner()
+            multilevel_setup_attempted = .true.
+            return
+        endif
+        call ml_stencil%upload_device()
+        call ml_line_factor%upload_device()
+
+        allocate(test_x(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local), &
+                 direct_ax(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local))
+        do j = 1, ml_transfer%ny_c_local
+            do k = 1, mz
+                do i = 1, ml_transfer%nx_c_local
+                    test_x(i,k,j) = sin(0.173_c_double*real( &
+                        3*(ml_transfer%x_c_first+i-1)+5*(k-1)+7*(ml_transfer%y_c_first+j-1),c_double))
+                    if (ml_transfer%x_c_first+i-1 == 0 .or. &
+                        ml_transfer%x_c_first+i-1 == ml_transfer%nx_c_global-1 .or. &
+                        ml_transfer%y_c_first+j-1 == 0 .or. &
+                        ml_transfer%y_c_first+j-1 == ml_transfer%ny_c_global-1 .or. &
+                        k == 1 .or. k == mz) test_x(i,k,j) = 0.0_c_double
+                enddo
+            enddo
+        enddo
+        call apply_coarse_rap(test_x, direct_ax)
+        ml_coarse_halo_x = 0.0_c_double
+        ml_coarse_halo_x(1:ml_transfer%nx_c_local,:,1:ml_transfer%ny_c_local) = test_x
+        !$acc update device(ml_coarse_halo_x)
+        call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
+        call ml_stencil%apply_owned_device(ml_coarse_halo_x, ml_coarse_ax)
+        !$acc update self(ml_coarse_ax)
+        local_error = sum((ml_coarse_ax-direct_ax)**2)
+        local_reference = sum(direct_ax**2)
+        call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(local_reference, global_reference, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        relative_error = sqrt(global_error/max(global_reference,tiny(1.0_c_double)))
+        deallocate(test_x, direct_ax)
+        if (relative_error > 2.0e-11_c_double) then
+            if (STD_OUT_PE) write(output_unit,'(A,ES12.4)') &
+                ' HICAR multilevel rejected: coarse operator is not R A P, relative error=', relative_error
+            call release_multilevel_preconditioner()
+            multilevel_setup_attempted = .true.
+            return
+        endif
+
+        multilevel_ready = .true.
+        if (STD_OUT_PE) then
+            write(output_unit,'(A,I0,A,I0,A,ES12.4,A,ES12.4)') &
+                ' HICAR Petrov-Galerkin level ready: global coarse=', ml_transfer%nx_c_global, 'x', &
+                ml_transfer%ny_c_global, ' RAP_error=', relative_error, ' min_line_pivot=', minimum_pivot
+            flush(output_unit)
+        endif
+
+    contains
+
+        subroutine apply_coarse_rap(coarse, coarse_ax)
+            real(c_double), intent(in) :: coarse(:,:,:)
+            real(c_double), intent(out) :: coarse_ax(:,:,:)
+            integer :: ii, jj, kk
+
+            ml_coarse_halo_x = 0.0_c_double
+            ml_coarse_halo_x(1:ml_transfer%nx_c_local,:,1:ml_transfer%ny_c_local) = coarse
+            !$acc update device(ml_coarse_halo_x)
+            call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
+            call ml_transfer%prolong_owned_device(ml_coarse_halo_x, ml_fine_owned)
+            !$acc parallel loop gang vector collapse(3) present(ml_solver_x)
+            do jj = j_s-1, j_e+1
+                do kk = k_s-1, k_e+1
+                    do ii = i_s-1, i_e+1
+                        ml_solver_x(ii,kk,jj) = 0.0_c_double
+                    enddo
+                enddo
+            enddo
+            !$acc parallel loop gang vector collapse(3) present(ml_solver_x,ml_fine_owned)
+            do jj = ys, ys+ym-1
+                do kk = zs, zs+zm-1
+                    do ii = xs, xs+xm-1
+                        ml_solver_x(ii,kk,jj) = ml_fine_owned(ii-xs+1,kk-zs+1,jj-ys+1)
+                    enddo
+                enddo
+            enddo
+            call exchange_multilevel_solver_halos(ml_solver_x)
+            call spmv(ml_solver_x, ml_solver_ax)
+            !$acc parallel loop gang vector collapse(3) present(ml_fine_residual)
+            do jj = 0, ym+1
+                do kk = 1, mz
+                    do ii = 0, xm+1
+                        ml_fine_residual(ii,kk,jj) = 0.0_c_double
+                    enddo
+                enddo
+            enddo
+            !$acc parallel loop gang vector collapse(3) present(ml_fine_residual,ml_solver_ax)
+            do jj = ys, ys+ym-1
+                do kk = zs, zs+zm-1
+                    do ii = xs, xs+xm-1
+                        ml_fine_residual(ii-xs+1,kk-zs+1,jj-ys+1) = ml_solver_ax(ii,kk,jj)
+                    enddo
+                enddo
+            enddo
+            call ml_fine_halo%exchange_device(ml_fine_residual)
+            call ml_transfer%restrict_owned_adjoint_device(ml_fine_residual, ml_fine_weight, &
+                                                            ml_coarse_weight, ml_coarse_r)
+            !$acc update self(ml_coarse_r)
+            coarse_ax = ml_coarse_r
+        end subroutine apply_coarse_rap
+
+    end subroutine setup_multilevel_preconditioner
+
+
+    subroutine release_multilevel_preconditioner()
+        implicit none
+
+        if (multilevel_arrays_uploaded) then
+            !$acc exit data delete(ml_fine_owned, ml_fine_residual, ml_fine_weight, &
+            !$acc                  ml_solver_x, ml_solver_ax, ml_coarse_halo_x, ml_coarse_weight, &
+            !$acc                  ml_coarse_b, ml_coarse_x, ml_coarse_ax, ml_coarse_r, &
+            !$acc                  ml_coarse_correction)
+        endif
+        multilevel_arrays_uploaded = .false.
+        call ml_line_factor%release()
+        call ml_stencil%release()
+        call ml_transfer%release()
+        call ml_fine_halo%release()
+        call ml_coarse_halo%release()
+        if (allocated(ml_fine_owned)) deallocate(ml_fine_owned)
+        if (allocated(ml_fine_residual)) deallocate(ml_fine_residual)
+        if (allocated(ml_fine_weight)) deallocate(ml_fine_weight)
+        if (allocated(ml_solver_x)) deallocate(ml_solver_x)
+        if (allocated(ml_solver_ax)) deallocate(ml_solver_ax)
+        if (allocated(ml_coarse_halo_x)) deallocate(ml_coarse_halo_x)
+        if (allocated(ml_coarse_weight)) deallocate(ml_coarse_weight)
+        if (allocated(ml_coarse_b)) deallocate(ml_coarse_b)
+        if (allocated(ml_coarse_x)) deallocate(ml_coarse_x)
+        if (allocated(ml_coarse_ax)) deallocate(ml_coarse_ax)
+        if (allocated(ml_coarse_r)) deallocate(ml_coarse_r)
+        if (allocated(ml_coarse_correction)) deallocate(ml_coarse_correction)
+        multilevel_ready = .false.
+    end subroutine release_multilevel_preconditioner
+
+
+    subroutine exchange_multilevel_solver_halos(vec)
+        implicit none
+        real(c_double), dimension(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), intent(inout) :: vec
+        integer :: i, j, k, gi, gj, gk
+
+        !$acc parallel loop gang vector collapse(3) present(vec,ml_fine_residual)
+        do j = 1, ym
+            do k = 1, mz
+                do i = 1, xm
+                    ml_fine_residual(i,k,j) = vec(xs+i-1,zs+k-1,ys+j-1)
+                enddo
+            enddo
+        enddo
+        call ml_fine_halo%exchange_device(ml_fine_residual)
+        !$acc parallel loop gang vector collapse(3) present(vec,ml_fine_residual) private(gi,gj,gk)
+        do j = 0, ym+1
+            do k = 1, mz
+                do i = 0, xm+1
+                    gi = xs+i-1
+                    gk = zs+k-1
+                    gj = ys+j-1
+                    if (gi >= i_s-1 .and. gi <= i_e+1 .and. &
+                        gk >= k_s-1 .and. gk <= k_e+1 .and. &
+                        gj >= j_s-1 .and. gj <= j_e+1) &
+                        vec(gi,gk,gj) = ml_fine_residual(i,k,j)
+                enddo
+            enddo
+        enddo
+    end subroutine exchange_multilevel_solver_halos
+
+
+    subroutine apply_multilevel_preconditioner(in_vec, out_vec)
+        implicit none
+        real(c_double), dimension(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), intent(in) :: in_vec
+        real(c_double), dimension(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), intent(inout) :: out_vec
+        integer :: i, j, k, sweep
+        real(c_double), parameter :: coarse_omega = 0.8_c_double
+        real(c_double), parameter :: post_omega = 0.8_c_double
+
+        !$acc parallel loop gang vector collapse(3) present(out_vec)
+        do j = j_s-1, j_e+1
+            do k = k_s-1, k_e+1
+                do i = i_s-1, i_e+1
+                    out_vec(i,k,j) = 0.0_c_double
+                enddo
+            enddo
+        enddo
+        call apply_vertical_lines(in_vec, out_vec)
+        call exchange_multilevel_solver_halos(out_vec)
+        call spmv(out_vec, prec_res)
+        !$acc parallel loop gang vector collapse(3) present(in_vec,prec_res,ml_fine_residual)
+        do j = ys, ys+ym-1
+            do k = zs, zs+zm-1
+                do i = xs, xs+xm-1
+                    prec_res(i,k,j) = in_vec(i,k,j)-prec_res(i,k,j)
+                    ml_fine_residual(i-xs+1,k-zs+1,j-ys+1) = prec_res(i,k,j)
+                enddo
+            enddo
+        enddo
+        call ml_fine_halo%exchange_device(ml_fine_residual)
+        call ml_transfer%restrict_owned_adjoint_device(ml_fine_residual, ml_fine_weight, &
+                                                        ml_coarse_weight, ml_coarse_b)
+        call ml_line_factor%apply_device(ml_coarse_b, ml_coarse_x)
+        do sweep = 2, 4
+            !$acc parallel loop gang vector collapse(3) present(ml_coarse_halo_x,ml_coarse_x)
+            do j = 1, ml_transfer%ny_c_local
+                do k = 1, mz
+                    do i = 1, ml_transfer%nx_c_local
+                        ml_coarse_halo_x(i,k,j) = ml_coarse_x(i,k,j)
+                    enddo
+                enddo
+            enddo
+            call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
+            call ml_stencil%apply_owned_device(ml_coarse_halo_x, ml_coarse_ax)
+            !$acc parallel loop gang vector collapse(3) present(ml_coarse_b,ml_coarse_ax,ml_coarse_r)
+            do j = 1, ml_transfer%ny_c_local
+                do k = 1, mz
+                    do i = 1, ml_transfer%nx_c_local
+                        ml_coarse_r(i,k,j) = ml_coarse_b(i,k,j)-ml_coarse_ax(i,k,j)
+                    enddo
+                enddo
+            enddo
+            call ml_line_factor%apply_device(ml_coarse_r, ml_coarse_correction)
+            !$acc parallel loop gang vector collapse(3) present(ml_coarse_x,ml_coarse_correction)
+            do j = 1, ml_transfer%ny_c_local
+                do k = 1, mz
+                    do i = 1, ml_transfer%nx_c_local
+                        ml_coarse_x(i,k,j) = ml_coarse_x(i,k,j)+coarse_omega*ml_coarse_correction(i,k,j)
+                    enddo
+                enddo
+            enddo
+        enddo
+        !$acc parallel loop gang vector collapse(3) present(ml_coarse_halo_x,ml_coarse_x)
+        do j = 1, ml_transfer%ny_c_local
+            do k = 1, mz
+                do i = 1, ml_transfer%nx_c_local
+                    ml_coarse_halo_x(i,k,j) = ml_coarse_x(i,k,j)
+                enddo
+            enddo
+        enddo
+        call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
+        call ml_transfer%prolong_owned_device(ml_coarse_halo_x, ml_fine_owned)
+        !$acc parallel loop gang vector collapse(3) present(out_vec,ml_fine_owned)
+        do j = ys, ys+ym-1
+            do k = zs, zs+zm-1
+                do i = xs, xs+xm-1
+                    out_vec(i,k,j) = out_vec(i,k,j)+ml_fine_owned(i-xs+1,k-zs+1,j-ys+1)
+                enddo
+            enddo
+        enddo
+        call exchange_multilevel_solver_halos(out_vec)
+        call spmv(out_vec, prec_res)
+        !$acc parallel loop gang vector collapse(3) present(in_vec,prec_res)
+        do j = ys, ys+ym-1
+            do k = zs, zs+zm-1
+                do i = xs, xs+xm-1
+                    prec_res(i,k,j) = in_vec(i,k,j)-prec_res(i,k,j)
+                enddo
+            enddo
+        enddo
+        call apply_vertical_lines(prec_res, t_vec)
+        !$acc parallel loop gang vector collapse(3) present(out_vec,t_vec)
+        do j = ys, ys+ym-1
+            do k = zs, zs+zm-1
+                do i = xs, xs+xm-1
+                    out_vec(i,k,j) = out_vec(i,k,j)+post_omega*t_vec(i,k,j)
+                enddo
+            enddo
+        enddo
+    end subroutine apply_multilevel_preconditioner
+
+
     !>------------------------------------------------------------
     !! Vertical-line block-Jacobi preconditioner apply with multi-sweep Richardson.
     !!
@@ -2136,6 +2527,11 @@ contains
         real(c_double), dimension(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1), intent(in)    :: in_vec
         real(c_double), dimension(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1), intent(inout) :: out_vec
         integer :: i, j, k, sweep
+
+        if (multilevel_ready) then
+            call apply_multilevel_preconditioner(in_vec, out_vec)
+            return
+        endif
 
         ! Zero entire out_vec INCLUDING halo cells before sweeps. The inner SpMV
         ! in sweep 2+ reads out_vec at halo positions; for block-Jacobi convention
@@ -2213,8 +2609,12 @@ contains
                 do k = 1, mz - 1
                     if (i <= 0 .or. j <= 0 .or. i >= mx-1 .or. j >= my-1) then
                         lower = 0.0_c_double
-                    else if (k == mz-1 .and. .not. operator_probed) then
-                        lower = -1.0_c_double / real(dz_if(i,k,j), c_double)
+                    else if (k == mz-1) then
+                        if (operator_probed) then
+                            lower = 0.0_c_double
+                        else
+                            lower = -1.0_c_double / real(dz_if(i,k,j), c_double)
+                        endif
                     else
                         lower = real(C_coef(i,k,j), c_double)
                     endif
@@ -3094,6 +3494,8 @@ contains
     subroutine finalize_active_state()
         implicit none
 
+        call release_multilevel_preconditioner()
+
         if (structure_uploaded) then
             !$acc exit data delete(x_sol, r_vec, r_hat, p_vec, p_hat, v_vec, &
             !$acc                  s_vec, s_hat, t_vec, rhs, D_inv, line_cprime, prec_res, &
@@ -3528,6 +3930,11 @@ contains
         implicit none
         integer, intent(in) :: slot
 
+        ! The hierarchy is derived state.  Rebuild it from the cached exact
+        ! operator when this nest becomes active again instead of moving
+        ! device-attached derived types through host cache slots.
+        call release_multilevel_preconditioner()
+
         ! Grid scalars
         domain_cache(slot)%i_s = i_s; domain_cache(slot)%i_e = i_e
         domain_cache(slot)%k_s = k_s; domain_cache(slot)%k_e = k_e
@@ -3554,6 +3961,7 @@ contains
         domain_cache(slot)%operator_audit_done       = operator_audit_done
         domain_cache(slot)%krylov_audit_written      = krylov_audit_written
         domain_cache(slot)%bootstrap_rhs_saved       = bootstrap_rhs_saved
+        domain_cache(slot)%multilevel_requested      = multilevel_requested
         domain_cache(slot)%wind_solver_max_iters = wind_solver_max_iters
         domain_cache(slot)%precond_n_sweeps      = precond_n_sweeps
 
@@ -3686,6 +4094,9 @@ contains
         operator_audit_done      = domain_cache(slot)%operator_audit_done
         krylov_audit_written     = domain_cache(slot)%krylov_audit_written
         bootstrap_rhs_saved      = domain_cache(slot)%bootstrap_rhs_saved
+        multilevel_requested     = domain_cache(slot)%multilevel_requested
+        multilevel_setup_attempted = .false.
+        multilevel_ready = .false.
         wind_solver_max_iters = domain_cache(slot)%wind_solver_max_iters
         precond_n_sweeps      = domain_cache(slot)%precond_n_sweeps
 
