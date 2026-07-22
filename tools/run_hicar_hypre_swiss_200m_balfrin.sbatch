@@ -30,6 +30,9 @@ run="$root/revalidation/hypre_swiss_${SLURM_JOB_ID:?}"
 
 test -x "$exe" && test -x "$tester" && test -f "$nml_src" && test -x "$wrapper"
 export OMP_NUM_THREADS=1 MPICH_GPU_SUPPORT_ENABLED=0 MPICH_GPU_MANAGED_MEMORY_SUPPORT_ENABLED=0
+# HYPRE level 2 provides rank-0 Krylov residual progress for this expensive
+# national diagnostic; regular 250 m regressions retain the silent default.
+export HICAR_HYPRE_PRINT_LEVEL="${HICAR_HYPRE_PRINT_LEVEL:-2}"
 
 # Retain the independent four-GPU halo gate alongside the national solve.
 srun -N1 -n4 --ntasks-per-node=4 --gres=gpu:4 --distribution=block:block --cpu-bind=none \

@@ -113,7 +113,7 @@ int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, i
                       const float *ii, const float *jj, const float *kcoef, const float *l,
                       const float *m, const float *n, const float *o)
 {
-  int meta[6], *allmeta = NULL, r, ierr = 0;
+  int meta[6], *allmeta = NULL, r, ierr = 0, fgmres_print_level = 0;
   int local_bad_diag = 0, global_bad_diag = 0;
   int local_zero_rows = 0, global_zero_rows = 0;
   int local_zero_diag_offdiag = 0, global_zero_diag_offdiag = 0;
@@ -126,6 +126,7 @@ int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, i
   HYPRE_Real *vals = NULL;
   HYPRE_BigInt q = 0, entry = 0;
   int li, lk, lj;
+  const char *print_level_env;
   /* Match wind_iterative::spmv exactly: A, B, C, D, E, F, G, H, I,
    * J, K, L, M, N, O.  The final four terms are mixed j/k neighbors,
    * not i/j/k corner neighbors. */
@@ -240,7 +241,12 @@ int hicar_hypre_build(MPI_Fint comm_f, int xs, int ys, int zs, int xm, int ym, i
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetKDim(state.fgmres, 50);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetTol(state.fgmres, 1.0e-5);
   if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetMaxIter(state.fgmres, 1000);
-  if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetPrintLevel(state.fgmres, 0);
+  print_level_env = getenv("HICAR_HYPRE_PRINT_LEVEL");
+  if (print_level_env) fgmres_print_level = atoi(print_level_env);
+  if (fgmres_print_level < 0) fgmres_print_level = 0;
+  if (fgmres_print_level > 2) fgmres_print_level = 2;
+  if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetLogging(state.fgmres, fgmres_print_level ? 1 : 0);
+  if (!ierr) ierr |= HYPRE_ParCSRFlexGMRESSetPrintLevel(state.fgmres, fgmres_print_level);
   /* The calibrated matrix has now been assembled with its true local
    * coefficient bounds.  Use one BoomerAMG cycle as a flexible FGMRES
    * preconditioner; FGMRES retains responsibility for convergence. */
