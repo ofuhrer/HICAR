@@ -38,13 +38,20 @@ srun -N1 -n4 --ntasks-per-node=4 --gres=gpu:4 --distribution=block:block --cpu-b
 grep -q 'PASSED' "$run.halo.out"
 
 mkdir -p "$run/output" "$run/restart"
+forcing_list_src=$(awk -F"'" '/^[[:space:]]*forcing_file_list[[:space:]]*=/{print $2; exit}' "$nml_src")
+test -f "$forcing_list_src"
+# HICAR reads this list with Fortran list-directed input: slash-containing
+# absolute paths must be quoted, otherwise it can wait for a corrupt filename.
+forcing_list="$run/forcing_files.txt"
+awk 'NF && $1 !~ /^#/ {gsub(/^"|"$/, "", $0); printf "\"%s\"\n", $0}' "$forcing_list_src" > "$forcing_list"
+test -s "$forcing_list"
 sed -e "/^[[:space:]]*restart_folder[[:space:]]*=/c\  restart_folder = '$run/restart/'" \
     -e "/^[[:space:]]*output_folder[[:space:]]*=/c\  output_folder = '$run/output/'" \
+    -e "/^[[:space:]]*forcing_file_list[[:space:]]*=/c\  forcing_file_list = '$forcing_list'" \
     "$nml_src" > "$run/input.nml"
 for asset in NoahmpTable.TBL rrtmgp_support mp_support; do cp -a "$root/run/$asset" "$run/"; done
 
 static_file=$(awk -F"'" '/^[[:space:]]*init_conditions_file[[:space:]]*=/{print $2; exit}' "$run/input.nml")
-forcing_list=$(awk -F"'" '/^[[:space:]]*forcing_file_list[[:space:]]*=/{print $2; exit}' "$run/input.nml")
 test -f "$static_file" && test -f "$static_file.ready" && test -f "$forcing_list"
 while IFS= read -r forcing; do
   forcing=${forcing#\"}; forcing=${forcing%\"}
