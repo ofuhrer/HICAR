@@ -1271,9 +1271,9 @@ contains
         real(c_double) :: recycle_dot(FGMRES_MAX_RECYCLE)
         real(c_double) :: recycle_gamma(FGMRES_MAX_RECYCLE)
         real(c_double) :: recycle_eta(FGMRES_MAX_RECYCLE)
-        real(c_double) :: gram(FGMRES_RESTART,FGMRES_RESTART)
-        real(c_double) :: eigenvectors(FGMRES_RESTART,FGMRES_RESTART)
-        real(c_double) :: eigenvalues(FGMRES_RESTART), singular_values(FGMRES_MAX_RECYCLE)
+        real(c_double) :: right_vectors(FGMRES_RESTART,FGMRES_RESTART)
+        real(c_double) :: h_times_right(FGMRES_RESTART+1,FGMRES_RESTART)
+        real(c_double) :: singular_all(FGMRES_RESTART), singular_values(FGMRES_MAX_RECYCLE)
         real(c_double) :: beta, bnorm2, target_norm, tmp, denom, coefficient, recycle_norm2
         real(c_double) :: recycle_relation_error
         integer :: ierr, cycle, j, i, used, total, p, q, l, eig_index
@@ -1452,22 +1452,14 @@ contains
             ! reorthogonalised and U receives the identical transformations.
             if (.not. recycle_ready .and. fgmres_recycle_requested > 0 .and. &
                 used > fgmres_recycle_requested) then
-                gram = 0.0_c_double
-                do j = 1, used
-                    do i = 1, used
-                        do l = 1, used+1
-                            gram(i,j) = gram(i,j) + h_raw(l,i) * h_raw(l,j)
-                        enddo
-                    enddo
-                enddo
-                call small_symmetric_eigensystem(gram, used, eigenvalues, eigenvectors)
+                call small_one_sided_svd(h_raw, used, singular_all, right_vectors, h_times_right)
                 do i = 1, used
                     eigen_order(i) = i
                 enddo
                 do i = 1, used-1
                     eig_index = i
                     do j = i+1, used
-                        if (eigenvalues(eigen_order(j)) < eigenvalues(eigen_order(eig_index))) eig_index = j
+                        if (singular_all(eigen_order(j)) < singular_all(eigen_order(eig_index))) eig_index = j
                     enddo
                     order_tmp = eigen_order(i)
                     eigen_order(i) = eigen_order(eig_index)
@@ -1476,18 +1468,14 @@ contains
                 recycle_dim = min(fgmres_recycle_requested, used-1)
                 do q = 1, recycle_dim
                     eig_index = eigen_order(q)
-                    singular_values(q) = sqrt(max(eigenvalues(eig_index), breakdown_eps))
+                    singular_values(q) = max(singular_all(eig_index), breakdown_eps)
                     call vec_zero(recycle_u(:,:,:,q))
                     call vec_zero(recycle_c(:,:,:,q))
                     do i = 1, used
-                        call vec_axpy(recycle_u(:,:,:,q), eigenvectors(i,eig_index), z_basis(:,:,:,i))
+                        call vec_axpy(recycle_u(:,:,:,q), right_vectors(i,eig_index), z_basis(:,:,:,i))
                     enddo
                     do l = 1, used+1
-                        coefficient = 0.0_c_double
-                        do i = 1, used
-                            coefficient = coefficient + h_raw(l,i) * eigenvectors(i,eig_index)
-                        enddo
-                        coefficient = coefficient / singular_values(q)
+                        coefficient = h_times_right(l,eig_index) / singular_values(q)
                         call vec_axpy(recycle_c(:,:,:,q), coefficient, v_basis(:,:,:,l))
                     enddo
                     do p = 1, q-1
@@ -1543,70 +1531,69 @@ contains
     end subroutine fgmres_line_solve
 
 
-    !> Jacobi eigensolver for the tiny symmetric Hbar^T*Hbar matrix used by
-    !! the opt-in recycle-space construction.  Every rank has the same
-    !! allreduced Hessenberg matrix, so this requires no communication and no
-    !! external dense-linear-algebra dependency.
-    subroutine small_symmetric_eigensystem(matrix_in, n, eigenvalues, eigenvectors)
+    !> One-sided Jacobi SVD for the tiny (restart+1)-by-restart Hessenberg
+    !! matrix.  Forming Hbar^T*Hbar would square a national-case condition
+    !! number exceeding 1e10 and erase exactly the small singular directions
+    !! needed for deflation.  Orthogonalising Hbar's columns directly avoids
+    !! those normal equations.  Every rank owns the same allreduced Hbar, so
+    !! this needs neither communication nor an external dense library.
+    subroutine small_one_sided_svd(hbar, n, singular_values, right_vectors, h_times_right)
         implicit none
-        real(c_double), intent(in) :: matrix_in(FGMRES_RESTART,FGMRES_RESTART)
+        real(c_double), intent(in) :: hbar(FGMRES_RESTART+1,FGMRES_RESTART)
         integer, intent(in) :: n
-        real(c_double), intent(out) :: eigenvalues(FGMRES_RESTART)
-        real(c_double), intent(out) :: eigenvectors(FGMRES_RESTART,FGMRES_RESTART)
-        real(c_double) :: matrix(FGMRES_RESTART,FGMRES_RESTART)
-        real(c_double) :: app, aqq, apq, akp, akq, vkp, vkq
-        real(c_double) :: tau, tangent, cosine, sine, offdiag_max, matrix_scale
+        real(c_double), intent(out) :: singular_values(FGMRES_RESTART)
+        real(c_double), intent(out) :: right_vectors(FGMRES_RESTART,FGMRES_RESTART)
+        real(c_double), intent(out) :: h_times_right(FGMRES_RESTART+1,FGMRES_RESTART)
+        real(c_double) :: alpha_norm2, beta_norm2, cross_dot
+        real(c_double) :: old_p, old_q, zeta, tangent, cosine, sine
+        real(c_double) :: max_correlation
         integer :: i, p, q, sweep
 
-        matrix = 0.0_c_double
-        matrix(1:n,1:n) = matrix_in(1:n,1:n)
-        eigenvectors = 0.0_c_double
+        h_times_right = 0.0_c_double
+        h_times_right(1:n+1,1:n) = hbar(1:n+1,1:n)
+        right_vectors = 0.0_c_double
         do i = 1, n
-            eigenvectors(i,i) = 1.0_c_double
+            right_vectors(i,i) = 1.0_c_double
         enddo
-        matrix_scale = max(1.0_c_double, maxval(abs(matrix(1:n,1:n))))
 
         do sweep = 1, 100
-            offdiag_max = 0.0_c_double
+            max_correlation = 0.0_c_double
             do p = 1, n-1
                 do q = p+1, n
-                    offdiag_max = max(offdiag_max, abs(matrix(p,q)))
-                    apq = matrix(p,q)
-                    if (abs(apq) <= 1.0e-15_c_double * matrix_scale) cycle
-                    app = matrix(p,p); aqq = matrix(q,q)
-                    tau = (aqq-app) / (2.0_c_double*apq)
-                    if (tau >= 0.0_c_double) then
-                        tangent = 1.0_c_double / (tau + sqrt(1.0_c_double+tau*tau))
+                    alpha_norm2 = sum(h_times_right(1:n+1,p)**2)
+                    beta_norm2 = sum(h_times_right(1:n+1,q)**2)
+                    cross_dot = sum(h_times_right(1:n+1,p) * h_times_right(1:n+1,q))
+                    if (alpha_norm2 <= breakdown_eps .or. beta_norm2 <= breakdown_eps) cycle
+                    max_correlation = max(max_correlation, &
+                        abs(cross_dot) / sqrt(alpha_norm2*beta_norm2))
+                    if (abs(cross_dot) <= 1.0e-14_c_double*sqrt(alpha_norm2*beta_norm2)) cycle
+                    zeta = (beta_norm2-alpha_norm2) / (2.0_c_double*cross_dot)
+                    if (zeta >= 0.0_c_double) then
+                        tangent = 1.0_c_double / (zeta + sqrt(1.0_c_double+zeta*zeta))
                     else
-                        tangent = -1.0_c_double / (-tau + sqrt(1.0_c_double+tau*tau))
+                        tangent = -1.0_c_double / (-zeta + sqrt(1.0_c_double+zeta*zeta))
                     endif
                     cosine = 1.0_c_double / sqrt(1.0_c_double+tangent*tangent)
                     sine = tangent*cosine
-                    do i = 1, n
-                        if (i == p .or. i == q) cycle
-                        akp = matrix(i,p); akq = matrix(i,q)
-                        matrix(i,p) = cosine*akp - sine*akq
-                        matrix(p,i) = matrix(i,p)
-                        matrix(i,q) = sine*akp + cosine*akq
-                        matrix(q,i) = matrix(i,q)
+                    do i = 1, n+1
+                        old_p = h_times_right(i,p); old_q = h_times_right(i,q)
+                        h_times_right(i,p) = cosine*old_p - sine*old_q
+                        h_times_right(i,q) = sine*old_p + cosine*old_q
                     enddo
-                    matrix(p,p) = app - tangent*apq
-                    matrix(q,q) = aqq + tangent*apq
-                    matrix(p,q) = 0.0_c_double; matrix(q,p) = 0.0_c_double
                     do i = 1, n
-                        vkp = eigenvectors(i,p); vkq = eigenvectors(i,q)
-                        eigenvectors(i,p) = cosine*vkp - sine*vkq
-                        eigenvectors(i,q) = sine*vkp + cosine*vkq
+                        old_p = right_vectors(i,p); old_q = right_vectors(i,q)
+                        right_vectors(i,p) = cosine*old_p - sine*old_q
+                        right_vectors(i,q) = sine*old_p + cosine*old_q
                     enddo
                 enddo
             enddo
-            if (offdiag_max <= 1.0e-13_c_double * matrix_scale) exit
+            if (max_correlation <= 1.0e-12_c_double) exit
         enddo
-        eigenvalues = 0.0_c_double
+        singular_values = 0.0_c_double
         do i = 1, n
-            eigenvalues(i) = max(matrix(i,i), 0.0_c_double)
+            singular_values(i) = sqrt(max(sum(h_times_right(1:n+1,i)**2), 0.0_c_double))
         enddo
-    end subroutine small_symmetric_eigensystem
+    end subroutine small_one_sided_svd
 
     subroutine spmv(x, y)
         implicit none
