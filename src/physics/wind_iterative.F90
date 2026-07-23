@@ -2189,6 +2189,7 @@ contains
         real(c_double), allocatable :: host_halo_reference(:,:,:)
         real(c_double) :: local_error, global_error, local_reference, global_reference
         real(c_double) :: relative_error, host_relative_error, halo_relative_error, minimum_pivot
+        real(c_double) :: host_owned_sum, device_owned_sum, global_host_owned_sum, global_device_owned_sum
         integer :: i, j, k, gi, gj, gk, ierr, line_status, rap_apply_count, print_rank, nprocs
         integer :: west, east, south, north
 
@@ -2321,6 +2322,24 @@ contains
         call MPI_Allreduce(local_reference, global_reference, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
         host_relative_error = sqrt(global_error/max(global_reference,tiny(1.0_c_double)))
         !$acc update device(ml_coarse_halo_x)
+        host_owned_sum = sum(abs(test_x))
+        device_owned_sum = 0.0_c_double
+        !$acc parallel loop gang vector collapse(3) reduction(+:device_owned_sum) present(ml_coarse_halo_x)
+        do j = 1, ml_transfer%ny_c_local
+            do k = 1, mz
+                do i = 1, ml_transfer%nx_c_local
+                    device_owned_sum = device_owned_sum+abs(ml_coarse_halo_x(i,k,j))
+                enddo
+            enddo
+        enddo
+        call MPI_Allreduce(host_owned_sum, global_host_owned_sum, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(device_owned_sum, global_device_owned_sum, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        if (solver_rank == 0) then
+            write(output_unit,'(A,ES14.6,A,ES14.6)') &
+                ' HICAR coarse halo owned checksum: host=', global_host_owned_sum, &
+                ' device=', global_device_owned_sum
+            flush(output_unit)
+        endif
         call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
         !$acc update self(ml_coarse_halo_x)
         mismatch_search: do j = 0, ml_transfer%ny_c_local+1
