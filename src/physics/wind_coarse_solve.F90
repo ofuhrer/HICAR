@@ -5,6 +5,8 @@ module wind_coarse_solve
     ! MGS GMRES.  Vertical-line right preconditioning preserves the strong
     ! column coupling without imposing symmetry on the coarse operator.
     use, intrinsic :: iso_c_binding, only : c_double
+    use, intrinsic :: iso_fortran_env, only : output_unit
+    use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
     use mpi
     use wind_multilevel, only : galerkin_tile_stencil_t
     implicit none
@@ -255,7 +257,13 @@ contains
             do p = 1, this%n_global
                 this%global_rhs(this%packed_row_ids(p)) = this%packed_rhs(p)
             enddo
-            call root_full_gmres(this, status, iterations, relative_residual)
+            call root_refined_gmres(this, status, iterations, relative_residual)
+            if (this%solve_count == 1 .or. status /= 0) then
+                write(output_unit,'(A,I0,A,ES12.4,A,I0)') &
+                    ' HICAR terminal physical solve: iterations=', iterations, &
+                    ' relative_residual=', relative_residual, ' status=', status
+                flush(output_unit)
+            endif
             do p = 1, this%n_global
                 this%packed_solution(p) = this%global_solution(this%packed_row_ids(p))
             enddo
@@ -271,6 +279,56 @@ contains
         this%solve_count = this%solve_count+1
         deallocate(local_values)
     end subroutine solve_collective_coarse_system
+
+
+    subroutine root_refined_gmres(this, status, iterations, relative_residual)
+        class(collective_coarse_solver_t), intent(inout) :: this
+        integer, intent(out) :: status, iterations
+        real(c_double), intent(out) :: relative_residual
+        real(c_double), allocatable :: original_rhs(:), accumulated_solution(:)
+        real(c_double), allocatable :: residual(:), matvec_input(:), matvec_output(:)
+        real(c_double) :: original_norm, previous_residual
+        integer :: refinement, stage_status, stage_iterations
+        real(c_double) :: stage_residual
+
+        allocate(original_rhs(this%n_global), accumulated_solution(this%n_global), &
+                 residual(this%n_global), matvec_input(this%n_global), matvec_output(this%n_global))
+        original_rhs = this%global_rhs
+        accumulated_solution = 0.0_c_double
+        residual = original_rhs
+        original_norm = sqrt(max(dot_product(original_rhs,original_rhs),0.0_c_double))
+        iterations = 0
+        relative_residual = 0.0_c_double
+        status = 0
+        if (original_norm == 0.0_c_double) then
+            this%global_solution = 0.0_c_double
+            return
+        endif
+
+        status = 1
+        previous_residual = huge(1.0_c_double)
+        do refinement = 1, 3
+            this%global_rhs = residual
+            call root_full_gmres(this, stage_status, stage_iterations, stage_residual)
+            iterations = iterations+stage_iterations
+            if (.not. ieee_is_finite(stage_residual)) exit
+            if (stage_status /= 0 .and. stage_iterations == 0) exit
+            accumulated_solution = accumulated_solution+this%global_solution
+            matvec_input = accumulated_solution
+            call root_sparse_matvec(this, matvec_input, matvec_output)
+            residual = original_rhs-matvec_output
+            relative_residual = sqrt(max(dot_product(residual,residual),0.0_c_double))/original_norm
+            if (.not. ieee_is_finite(relative_residual)) exit
+            if (relative_residual <= COARSE_ACCEPTANCE_TOLERANCE) then
+                status = 0
+                exit
+            endif
+            if (relative_residual >= 0.95_c_double*previous_residual) exit
+            previous_residual = relative_residual
+        enddo
+        this%global_rhs = original_rhs
+        this%global_solution = accumulated_solution
+    end subroutine root_refined_gmres
 
 
     subroutine root_full_gmres(this, status, iterations, relative_residual)
