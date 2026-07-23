@@ -32,6 +32,7 @@ module wind_iterative
                                 vertical_line_factor_t, assemble_colored_tile_galerkin, &
                                 owned_coarse_interval
     use wind_multilevel_mpi, only : horizontal_halo_exchange_t
+    use wind_coarse_solve, only : collective_coarse_solver_t
 #ifdef USE_NCCL
     use nccl_interface, only : nccl_comm_init, nccl_comm_destroy, &
                                nccl_group_start, nccl_group_end, &
@@ -101,11 +102,6 @@ module wind_iterative
     integer, parameter :: BASE_PREC_SWEEPS = 2
     integer, parameter :: MAX_PREC_SWEEPS  = 4
     integer :: precond_n_sweeps = BASE_PREC_SWEEPS
-    ! A V-cycle requires a genuine terminal coarse solve.  Four line sweeps
-    ! remain the production default; the environment override supports a
-    ! bounded diagnostic before introducing rank agglomeration/direct solve.
-    integer :: coarsest_line_sweeps = 4
-
     ! Per-solve status/residual/timing printing. Off by default under
     ! RANS (one solve per physics step makes it far too verbose); on in
     ! debug mode or under the diagnostic iterative solver (solves only at
@@ -207,6 +203,7 @@ module wind_iterative
     integer :: ml_deep_count = 0
     integer :: ml_assembly_child = 0
     type(multilevel_deep_level_t), allocatable :: ml_deep(:)
+    type(collective_coarse_solver_t) :: ml_terminal_solver
 
     ! Feature-gated, distributed Petrov-Galerkin V-cycle.  These arrays use
     ! uniform local indexing rather than aliasing the solver vectors, whose
@@ -370,7 +367,7 @@ contains
         integer :: target_nest
         integer :: my_rank_in_comm
         integer :: env_status, env_length
-        character(len=32) :: audit_env, audit_max_iters_env, multilevel_env, coarse_sweeps_env, recycle_env
+        character(len=32) :: audit_env, audit_max_iters_env, multilevel_env, recycle_env
         character(len=512) :: audit_file_env
         integer :: audit_read_status
 #ifdef USE_NCCL
@@ -462,19 +459,6 @@ contains
                                       length=env_length, status=env_status)
         multilevel_requested = env_status == 0 .and. env_length > 0 .and. &
                                trim(adjustl(multilevel_env)) /= '0'
-        coarsest_line_sweeps = 4
-        coarse_sweeps_env = ''
-        call get_environment_variable('HICAR_WIND_COARSEST_SWEEPS', coarse_sweeps_env, &
-                                      length=env_length, status=env_status)
-        if (env_status == 0 .and. env_length > 0) then
-            read(coarse_sweeps_env(:min(env_length, len(coarse_sweeps_env))), *, &
-                 iostat=audit_read_status) coarsest_line_sweeps
-            if (audit_read_status /= 0 .or. coarsest_line_sweeps < 1) then
-                if (STD_OUT_PE) write(output_unit,'(A,A)') &
-                    ' Invalid HICAR_WIND_COARSEST_SWEEPS: ', trim(coarse_sweeps_env)
-                error stop
-            endif
-        endif
         fgmres_recycle_requested = 0
         recycle_env = ''
         call get_environment_variable('HICAR_WIND_RECYCLE_DIM', recycle_env, &
@@ -2650,6 +2634,12 @@ contains
             multilevel_setup_attempted = .true.
             return
         endif
+        call setup_terminal_collective_solver(deep_status)
+        if (deep_status /= 0) then
+            call release_multilevel_preconditioner()
+            multilevel_setup_attempted = .true.
+            return
+        endif
 
         multilevel_ready = .true.
         if (solver_rank == 0) then
@@ -2659,7 +2649,6 @@ contains
             flush(output_unit)
             write(output_unit,'(A,I0)') ' HICAR exact Galerkin hierarchy ready: total coarse levels=', &
                 1+ml_deep_count
-            write(output_unit,'(A,I0)') ' HICAR terminal coarse line sweeps=', coarsest_line_sweeps
             flush(output_unit)
         endif
 
@@ -2829,6 +2818,86 @@ contains
     end subroutine setup_recursive_multilevel_levels
 
 
+    subroutine setup_terminal_collective_solver(status)
+        implicit none
+        integer, intent(out) :: status
+        real(c_double), allocatable :: exact_x(:,:,:), solved_x(:,:,:), terminal_b(:,:,:)
+        real(c_double), allocatable :: halo_x(:,:,:)
+        real(c_double) :: local_error, global_error, local_reference, global_reference
+        real(c_double) :: solution_error, relative_residual
+        integer :: i, j, k, gx, gy, ierr, iterations, q
+
+        status = 0
+        if (ml_deep_count > 0) then
+            q = ml_deep_count
+            call ml_terminal_solver%setup(ml_deep(q)%stencil, solver_comm, status)
+            if (status /= 0) return
+            allocate(exact_x(ml_deep(q)%stencil%nx,mz,ml_deep(q)%stencil%ny), &
+                     solved_x(ml_deep(q)%stencil%nx,mz,ml_deep(q)%stencil%ny), &
+                     terminal_b(ml_deep(q)%stencil%nx,mz,ml_deep(q)%stencil%ny), &
+                     halo_x(0:ml_deep(q)%stencil%nx+1,mz,0:ml_deep(q)%stencil%ny+1))
+            exact_x = 0.0_c_double
+            do j = 1, ml_deep(q)%stencil%ny
+                gy = ml_deep(q)%stencil%y_first+j-1
+                do k = 2, mz-1
+                    do i = 1, ml_deep(q)%stencil%nx
+                        gx = ml_deep(q)%stencil%x_first+i-1
+                        if (gx <= 0 .or. gx >= ml_deep(q)%stencil%nx_global-1 .or. &
+                            gy <= 0 .or. gy >= ml_deep(q)%stencil%ny_global-1) cycle
+                        exact_x(i,k,j) = sin(0.113_c_double*real(3*gx+5*(k-1)+7*gy,c_double))
+                    enddo
+                enddo
+            enddo
+            halo_x = 0.0_c_double
+            halo_x(1:ml_deep(q)%stencil%nx,:,1:ml_deep(q)%stencil%ny) = exact_x
+            call ml_deep(q)%halo%exchange(halo_x)
+            call ml_deep(q)%stencil%apply_owned(halo_x, terminal_b)
+        else
+            call ml_terminal_solver%setup(ml_stencil, solver_comm, status)
+            if (status /= 0) return
+            allocate(exact_x(ml_stencil%nx,mz,ml_stencil%ny), &
+                     solved_x(ml_stencil%nx,mz,ml_stencil%ny), &
+                     terminal_b(ml_stencil%nx,mz,ml_stencil%ny), &
+                     halo_x(0:ml_stencil%nx+1,mz,0:ml_stencil%ny+1))
+            exact_x = 0.0_c_double
+            do j = 1, ml_stencil%ny
+                gy = ml_stencil%y_first+j-1
+                do k = 2, mz-1
+                    do i = 1, ml_stencil%nx
+                        gx = ml_stencil%x_first+i-1
+                        if (gx <= 0 .or. gx >= ml_stencil%nx_global-1 .or. &
+                            gy <= 0 .or. gy >= ml_stencil%ny_global-1) cycle
+                        exact_x(i,k,j) = sin(0.113_c_double*real(3*gx+5*(k-1)+7*gy,c_double))
+                    enddo
+                enddo
+            enddo
+            halo_x = 0.0_c_double
+            halo_x(1:ml_stencil%nx,:,1:ml_stencil%ny) = exact_x
+            call ml_coarse_halo%exchange(halo_x)
+            call ml_stencil%apply_owned(halo_x, terminal_b)
+        endif
+
+        call ml_terminal_solver%solve(terminal_b, solved_x, status, iterations, relative_residual)
+        local_error = sum((solved_x-exact_x)**2)
+        local_reference = sum(exact_x**2)
+        call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(local_reference, global_reference, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        solution_error = sqrt(global_error/max(global_reference,tiny(1.0_c_double)))
+        if (status /= 0 .or. relative_residual > 5.0e-12_c_double .or. &
+            solution_error > 1.0e-8_c_double) status = 1
+        if (solver_rank == 0) then
+            write(output_unit,'(A,I0,A,I0,A,I0,A,I0,A,I0,A,ES12.4,A,ES12.4)') &
+                ' HICAR terminal collective solve gate: global=', ml_terminal_solver%nx_global, 'x', &
+                ml_terminal_solver%ny_global, 'x', ml_terminal_solver%nz, &
+                ' interior_unknowns=', ml_terminal_solver%n_global, &
+                ' iterations=', iterations, ' relative_residual=', relative_residual, &
+                ' solution_error=', solution_error
+            flush(output_unit)
+        endif
+        deallocate(exact_x, solved_x, terminal_b, halo_x)
+    end subroutine setup_terminal_collective_solver
+
+
     subroutine allocate_recursive_level_arrays(q)
         implicit none
         integer, intent(in) :: q
@@ -2977,6 +3046,7 @@ contains
     subroutine release_multilevel_preconditioner()
         implicit none
 
+        call ml_terminal_solver%release()
         call release_recursive_multilevel_levels()
         if (multilevel_arrays_uploaded) then
             !$acc exit data delete(ml_fine_owned, ml_fine_residual, ml_fine_weight, &
@@ -3145,10 +3215,11 @@ contains
     subroutine apply_level_one_vcycle(omega)
         implicit none
         real(c_double), intent(in) :: omega
-        integer :: sweep
+        integer :: coarse_status, coarse_iterations
+        real(c_double) :: coarse_relative_residual
 
-        call ml_line_factor%apply_device(ml_coarse_b, ml_coarse_x)
         if (ml_deep_count > 0) then
+            call ml_line_factor%apply_device(ml_coarse_b, ml_coarse_x)
             call compute_level_one_residual()
             call copy_owned_to_halo_device(ml_coarse_r, ml_coarse_halo_x)
             call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
@@ -3164,11 +3235,11 @@ contains
             call ml_line_factor%apply_device(ml_coarse_r, ml_coarse_correction)
             call owned_axpy_device(ml_coarse_x, ml_coarse_correction, omega)
         else
-            do sweep = 2, coarsest_line_sweeps
-                call compute_level_one_residual()
-                call ml_line_factor%apply_device(ml_coarse_r, ml_coarse_correction)
-                call owned_axpy_device(ml_coarse_x, ml_coarse_correction, omega)
-            enddo
+            !$acc update self(ml_coarse_b)
+            call ml_terminal_solver%solve(ml_coarse_b, ml_coarse_x, coarse_status, &
+                                          coarse_iterations, coarse_relative_residual)
+            if (coarse_status /= 0) error stop 'terminal collective coarse solve failed'
+            !$acc update device(ml_coarse_x)
         endif
     end subroutine apply_level_one_vcycle
 
@@ -3177,10 +3248,11 @@ contains
         implicit none
         integer, intent(in) :: q
         real(c_double), intent(in) :: omega
-        integer :: sweep
+        integer :: coarse_status, coarse_iterations
+        real(c_double) :: coarse_relative_residual
 
-        call ml_deep(q)%line_factor%apply_device(ml_deep(q)%b, ml_deep(q)%x)
         if (q < ml_deep_count) then
+            call ml_deep(q)%line_factor%apply_device(ml_deep(q)%b, ml_deep(q)%x)
             call compute_recursive_level_residual(q)
             call copy_owned_to_halo_device(ml_deep(q)%r, ml_deep(q)%halo_x)
             call ml_deep(q)%halo%exchange_device(ml_deep(q)%halo_x)
@@ -3197,11 +3269,11 @@ contains
             call ml_deep(q)%line_factor%apply_device(ml_deep(q)%r, ml_deep(q)%correction)
             call owned_axpy_device(ml_deep(q)%x, ml_deep(q)%correction, omega)
         else
-            do sweep = 2, coarsest_line_sweeps
-                call compute_recursive_level_residual(q)
-                call ml_deep(q)%line_factor%apply_device(ml_deep(q)%r, ml_deep(q)%correction)
-                call owned_axpy_device(ml_deep(q)%x, ml_deep(q)%correction, omega)
-            enddo
+            !$acc update self(ml_deep(q)%b)
+            call ml_terminal_solver%solve(ml_deep(q)%b, ml_deep(q)%x, coarse_status, &
+                                          coarse_iterations, coarse_relative_residual)
+            if (coarse_status /= 0) error stop 'terminal collective coarse solve failed'
+            !$acc update device(ml_deep(q)%x)
         endif
     end subroutine apply_recursive_vcycle
 

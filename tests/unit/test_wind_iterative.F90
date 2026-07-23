@@ -33,6 +33,7 @@ module test_wind_iterative
                                     assemble_colored_galerkin, assemble_colored_tile_galerkin, &
                                     relax_with_vertical_lines
     use wind_multilevel_mpi, only : horizontal_halo_exchange_t
+    use wind_coarse_solve, only : collective_coarse_solver_t
     use advection,          only : adv_var_request
     use io_routines,        only : check_file_exists
     implicit none
@@ -53,6 +54,7 @@ contains
             new_unittest("multilevel_device", test_multilevel_device), &
             new_unittest("multilevel_device_offset", test_multilevel_device_offset), &
             new_unittest("multilevel_halo", test_multilevel_halo), &
+            new_unittest("collective_coarse", test_collective_coarse), &
             new_unittest("iter_wind_solve_decomp", test_iter_wind_solve) &
             ]
     end subroutine collect_wind_iterative_suite
@@ -902,5 +904,117 @@ contains
 #endif
         call halo%release()
     end subroutine test_multilevel_halo
+
+
+    subroutine test_collective_coarse(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(galerkin_tile_stencil_t) :: stencil
+        type(collective_coarse_solver_t) :: solver
+        real(c_double), allocatable :: exact_x(:,:,:), rhs(:,:,:), solved_x(:,:,:)
+        real(c_double) :: coefficient, local_error, global_error
+        real(c_double) :: local_reference, global_reference, solution_error, relative_residual
+        integer :: rank, n_ranks, ierr, nx_global, ny_global, nz
+        integer :: base, remainder, x_first, nx_local
+        integer :: i, j, k, di, dk, dj, gx, gy, status, iterations
+
+        call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
+        call MPI_Comm_size(MPI_COMM_WORLD, n_ranks, ierr)
+        nx_global = max(2*n_ranks+3,9)
+        ny_global = 7
+        nz = 8
+        base = nx_global/n_ranks
+        remainder = modulo(nx_global,n_ranks)
+        nx_local = base+merge(1,0,rank < remainder)
+        x_first = rank*base+min(rank,remainder)
+
+        stencil%nx_global = nx_global
+        stencil%ny_global = ny_global
+        stencil%x_first = x_first
+        stencil%y_first = 0
+        stencil%nx = nx_local
+        stencil%ny = ny_global
+        stencil%nz = nz
+        stencil%fix_lateral_boundaries = .true.
+        stencil%fix_vertical_boundaries = .true.
+        allocate(stencil%value(-1:1,-1:1,-1:1,nx_local,nz,ny_global), &
+                 exact_x(nx_local,nz,ny_global), rhs(nx_local,nz,ny_global), &
+                 solved_x(nx_local,nz,ny_global))
+        stencil%value = 0.0_c_double
+        exact_x = 0.0_c_double
+        rhs = 0.0_c_double
+        do j = 1, ny_global
+            gy = j-1
+            do k = 1, nz
+                do i = 1, nx_local
+                    gx = x_first+i-1
+                    if (gx == 0 .or. gx == nx_global-1 .or. gy == 0 .or. &
+                        gy == ny_global-1 .or. k == 1 .or. k == nz) then
+                        stencil%value(0,0,0,i,k,j) = 1.0_c_double
+                    else
+                        do dj = -1, 1
+                            do dk = -1, 1
+                                do di = -1, 1
+                                    if (di == 0 .and. dk == 0 .and. dj == 0) then
+                                        coefficient = 5.0_c_double+0.001_c_double*real(gx+2*k+3*gy,c_double)
+                                    else
+                                        coefficient = -0.005_c_double*real(10+2*di+3*dk+4*dj,c_double)
+                                    endif
+                                    stencil%value(di,dk,dj,i,k,j) = coefficient
+                                enddo
+                            enddo
+                        enddo
+                        exact_x(i,k,j) = truth(gx,k,gy)
+                    endif
+                enddo
+            enddo
+        enddo
+        do j = 2, ny_global-1
+            gy = j-1
+            do k = 2, nz-1
+                do i = 1, nx_local
+                    gx = x_first+i-1
+                    if (gx <= 0 .or. gx >= nx_global-1) cycle
+                    do dj = -1, 1
+                        do dk = -1, 1
+                            do di = -1, 1
+                                rhs(i,k,j) = rhs(i,k,j)+stencil%value(di,dk,dj,i,k,j)* &
+                                             truth(gx+di,k+dk,gy+dj)
+                            enddo
+                        enddo
+                    enddo
+                enddo
+            enddo
+        enddo
+
+        call solver%setup(stencil,MPI_COMM_WORLD,status)
+        if (status == 0) call solver%solve(rhs,solved_x,status,iterations,relative_residual)
+        local_error = sum((solved_x-exact_x)**2)
+        local_reference = sum(exact_x**2)
+        call MPI_Allreduce(local_error,global_error,1,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,ierr)
+        call MPI_Allreduce(local_reference,global_reference,1,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,ierr)
+        solution_error = sqrt(global_error/max(global_reference,tiny(1.0_c_double)))
+        if (status /= 0 .or. relative_residual > 5.0e-12_c_double .or. &
+            solution_error > 1.0e-9_c_double .or. iterations < 1) then
+            call test_failed(error,'test_collective_coarse','collective terminal solve failed its known solution')
+        endif
+        call solver%release()
+        call stencil%release()
+        deallocate(exact_x,rhs,solved_x)
+
+    contains
+
+        pure real(c_double) function truth(global_x,level,global_y) result(value)
+            integer, intent(in) :: global_x, level, global_y
+
+            if (global_x <= 0 .or. global_x >= nx_global-1 .or. &
+                global_y <= 0 .or. global_y >= ny_global-1 .or. &
+                level <= 1 .or. level >= nz) then
+                value = 0.0_c_double
+            else
+                value = sin(0.071_c_double*real(3*global_x+5*(level-1)+7*global_y,c_double))
+            endif
+        end function truth
+
+    end subroutine test_collective_coarse
 
 end module test_wind_iterative
