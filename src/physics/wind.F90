@@ -787,40 +787,32 @@ contains
 
             ! Build the grid-w predictor from the forcing w_real. The
             ! elliptic operator is calibrated to the exact composition
-            ! A = 2*D o G by probing; the probe REQUIRES the solver
-            ! workspace (x_sol etc.), which the FIRST calc_iter_winds call
-            ! allocates. Ordering therefore matters:
-            !   first-ever update: solve (analytic operator) -> calibrate
-            !                      -> polishing solve;
-            !   later updates:     re-probe up front when the Froude-
-            !                      dependent alpha changed, then a single
-            !                      solve (the historical wind_iterations
-            !                      loop compensated for operator mismatch
-            !                      and is no longer needed).
+            ! A = 2*D o G by probing.  The probe requires the native solver
+            ! workspace, so the first update allocates that state through a
+            ! setup-only call before calibration.  It must not solve or apply
+            ! the approximate analytic bootstrap operator: on large domains
+            ! that redundant solve can fail before the exact hierarchy exists.
             call calc_idealized_wgrid(domain)
 
             if (alpha_const_val <= 0 .and. operator_calibrated(min(domain%nest_indx, size(operator_calibrated)))) then
                 call calibrate_projection_operator(domain, options, div)
             endif
 
-            call calc_divergence(div,domain,horz_only=.False.,use_dqdt=.True.)
+            if (.not. operator_calibrated(min(domain%nest_indx, size(operator_calibrated)))) then
+                call calc_divergence(div,domain,horz_only=.False.,use_dqdt=.True.)
+                call calc_iter_winds(domain, &
+                    domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d, &
+                    div, options%adv%advect_density, setup_only=.true.)
+                call calibrate_projection_operator(domain, options, div)
+                operator_calibrated(min(domain%nest_indx, size(operator_calibrated))) = .true.
+            endif
 
+            call calc_divergence(div,domain,horz_only=.False.,use_dqdt=.True.)
             call calc_iter_winds(domain,domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d,div,options%adv%advect_density)
-            !Exchange the corrected fields, since the outer points are not updated in above function
+            ! Exchange the corrected fields, since the outer points are not updated above.
             call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%u)%v),do_dqdt=.True.,corners=.True.)
             call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%v)%v),do_dqdt=.True.,corners=.True.)
             call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%w)%v),do_dqdt=.True.,corners=.True.)
-
-            if (.not. operator_calibrated(min(domain%nest_indx, size(operator_calibrated)))) then
-                call calibrate_projection_operator(domain, options, div)
-                operator_calibrated(min(domain%nest_indx, size(operator_calibrated))) = .true.
-                ! Polish this first update with the exact operator
-                call calc_divergence(div,domain,horz_only=.False.,use_dqdt=.True.)
-                call calc_iter_winds(domain,domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d,div,options%adv%advect_density)
-                call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%u)%v),do_dqdt=.True.,corners=.True.)
-                call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%v)%v),do_dqdt=.True.,corners=.True.)
-                call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%w)%v),do_dqdt=.True.,corners=.True.)
-            endif
 
             !$acc end data
             end associate

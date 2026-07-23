@@ -468,15 +468,17 @@ contains
 
 
     !>------------------------------------------------------------
-    !! Main entry: run BiCGStab solve and apply the wind correction.
-    !! Signature matches calc_iter_winds_amgx so wind.F90 dispatch
-    !! is a one-line swap.
+    !! Main entry: allocate/update the solver state, then solve and apply the
+    !! wind correction.  The optional setup-only path lets wind.F90 allocate
+    !! the probe workspace before the first exact D o G calibration, avoiding
+    !! a redundant solve with the approximate analytic bootstrap operator.
     !!------------------------------------------------------------
-    subroutine calc_iter_winds(domain, alpha_in, div_in, adv_den)
+    subroutine calc_iter_winds(domain, alpha_in, div_in, adv_den, setup_only)
         implicit none
         type(domain_t), intent(inout) :: domain
         real, dimension(ims:ime, domain%kms:domain%kme, jms:jme), intent(in) :: alpha_in, div_in
         logical, intent(in) :: adv_den
+        logical, intent(in), optional :: setup_only
 
         integer :: i, j, k
         real    :: alpha_min, alpha_max
@@ -607,6 +609,14 @@ contains
             ! clobber them. Alpha changes are handled by re-probing
             ! (wind.F90::calibrate_projection_operator).
             if (varying_alpha .and. .not. operator_probed) call update_coefs_gpu()
+        endif
+
+        ! Calibration only needs the allocated vectors and uploaded stencil
+        ! storage.  Return before constructing a preconditioner or solving the
+        ! approximate analytic operator; probe_finalize will replace its
+        ! coefficients with the exact discrete D o G operator.
+        if (present(setup_only)) then
+            if (setup_only) return
         endif
 
         ! Build / refresh the vertical-line block-Jacobi preconditioner from
