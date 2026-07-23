@@ -1275,6 +1275,7 @@ contains
         real(c_double) :: eigenvectors(FGMRES_RESTART,FGMRES_RESTART)
         real(c_double) :: eigenvalues(FGMRES_RESTART), singular_values(FGMRES_MAX_RECYCLE)
         real(c_double) :: beta, bnorm2, target_norm, tmp, denom, coefficient, recycle_norm2
+        real(c_double) :: recycle_relation_error
         integer :: ierr, cycle, j, i, used, total, p, q, l, eig_index
         integer :: recycle_dim, eigen_order(FGMRES_RESTART), order_tmp
         logical :: recycle_ready
@@ -1506,9 +1507,20 @@ contains
                     call vec_scale(recycle_u(:,:,:,q), 1.0_c_double/recycle_norm2)
                 enddo
                 recycle_ready = .true.
+                recycle_relation_error = 0.0_c_double
+                do q = 1, recycle_dim
+                    call exchange_krylov_halos(recycle_u(:,:,:,q), domain)
+                    call spmv(recycle_u(:,:,:,q), t_vec)
+                    call vec_axpy(t_vec, -1.0_c_double, recycle_c(:,:,:,q))
+                    call vec_norm2_local(t_vec, recycle_norm2)
+                    call MPI_Allreduce(MPI_IN_PLACE, recycle_norm2, 1, MPI_DOUBLE_PRECISION, &
+                                       MPI_SUM, solver_comm, ierr)
+                    recycle_relation_error = max(recycle_relation_error, sqrt(max(recycle_norm2, 0.0_c_double)))
+                enddo
                 if (STD_OUT_PE .and. verbose_solver) then
-                    write(output_unit,'(A,I0,A,8(1X,ES10.3))') &
+                    write(output_unit,'(A,I0,A,ES10.3,A,8(1X,ES10.3))') &
                         ' HICAR FGMRES recycle space ready: dimension=', recycle_dim, &
+                        ' max_relative_AU_minus_C=', recycle_relation_error, &
                         ' singular_values=', singular_values(1:recycle_dim)
                     flush(output_unit)
                 endif
