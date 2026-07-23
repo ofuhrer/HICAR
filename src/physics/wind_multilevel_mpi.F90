@@ -166,7 +166,7 @@ contains
         real(c_double), intent(inout) :: field(0:,:,0:)
         integer, parameter :: tag_to_west = 741, tag_to_east = 742
         integer, parameter :: tag_to_south = 743, tag_to_north = 744
-        integer :: i, j, k, ierr, n_requests, rank_debug
+        integer :: ierr, n_requests, rank_debug
         integer :: requests(4), statuses(MPI_STATUS_SIZE,4)
 
         if (size(field,1) /= this%nx+2 .or. size(field,2) /= this%nz .or. &
@@ -174,14 +174,7 @@ contains
         if (.not. this%device_uploaded) error stop 'halo buffers are not on the device'
         this%device_exchange_count = this%device_exchange_count+1
 
-        !$acc parallel loop gang vector collapse(2) &
-        !$acc present(field,this%west_send,this%east_send)
-        do j = 1, this%ny
-            do k = 1, this%nz
-                this%west_send(k,j) = field(1,k,j)
-                this%east_send(k,j) = field(this%nx,k,j)
-            enddo
-        enddo
+        call pack_x_faces_device(field, this%west_send, this%east_send, this%nx, this%ny, this%nz)
         !$acc update self(this%west_send,this%east_send)
         if (this%device_exchange_count == 29) then
             call MPI_Comm_rank(this%communicator, rank_debug, ierr)
@@ -206,31 +199,10 @@ contains
             flush(output_unit)
         endif
         !$acc update device(this%west_recv,this%east_recv)
-        !$acc parallel loop gang vector collapse(2) &
-        !$acc present(field,this%west_recv,this%east_recv)
-        do j = 1, this%ny
-            do k = 1, this%nz
-                if (this%west == MPI_PROC_NULL) then
-                    field(0,k,j) = 0.0_c_double
-                else
-                    field(0,k,j) = this%west_recv(k,j)
-                endif
-                if (this%east == MPI_PROC_NULL) then
-                    field(this%nx+1,k,j) = 0.0_c_double
-                else
-                    field(this%nx+1,k,j) = this%east_recv(k,j)
-                endif
-            enddo
-        enddo
+        call unpack_x_faces_device(field, this%west_recv, this%east_recv, this%nx, this%ny, this%nz, &
+                                   this%west /= MPI_PROC_NULL, this%east /= MPI_PROC_NULL)
 
-        !$acc parallel loop gang vector collapse(2) &
-        !$acc present(field,this%south_send,this%north_send)
-        do k = 1, this%nz
-            do i = 0, this%nx+1
-                this%south_send(i,k) = field(i,k,1)
-                this%north_send(i,k) = field(i,k,this%ny)
-            enddo
-        enddo
+        call pack_y_faces_device(field, this%south_send, this%north_send, this%nx, this%ny, this%nz)
         !$acc update self(this%south_send,this%north_send)
         if (this%device_exchange_count == 29) then
             call MPI_Comm_rank(this%communicator, rank_debug, ierr)
@@ -255,22 +227,8 @@ contains
             flush(output_unit)
         endif
         !$acc update device(this%south_recv,this%north_recv)
-        !$acc parallel loop gang vector collapse(2) &
-        !$acc present(field,this%south_recv,this%north_recv)
-        do k = 1, this%nz
-            do i = 0, this%nx+1
-                if (this%south == MPI_PROC_NULL) then
-                    field(i,k,0) = 0.0_c_double
-                else
-                    field(i,k,0) = this%south_recv(i,k)
-                endif
-                if (this%north == MPI_PROC_NULL) then
-                    field(i,k,this%ny+1) = 0.0_c_double
-                else
-                    field(i,k,this%ny+1) = this%north_recv(i,k)
-                endif
-            enddo
-        enddo
+        call unpack_y_faces_device(field, this%south_recv, this%north_recv, this%nx, this%ny, this%nz, &
+                                   this%south /= MPI_PROC_NULL, this%north /= MPI_PROC_NULL)
 
     contains
 
@@ -291,5 +249,71 @@ contains
         end subroutine post_send
 
     end subroutine exchange_horizontal_halos_device
+
+
+    subroutine pack_x_faces_device(field, west_send, east_send, nx, ny, nz)
+        real(c_double), intent(in) :: field(0:,:,0:)
+        real(c_double), intent(out) :: west_send(:,:), east_send(:,:)
+        integer, intent(in) :: nx, ny, nz
+        integer :: j, k
+
+        !$acc parallel loop gang vector collapse(2) present(field,west_send,east_send)
+        do j = 1, ny
+            do k = 1, nz
+                west_send(k,j) = field(1,k,j)
+                east_send(k,j) = field(nx,k,j)
+            enddo
+        enddo
+    end subroutine pack_x_faces_device
+
+
+    subroutine unpack_x_faces_device(field, west_recv, east_recv, nx, ny, nz, has_west, has_east)
+        real(c_double), intent(inout) :: field(0:,:,0:)
+        real(c_double), intent(in) :: west_recv(:,:), east_recv(:,:)
+        integer, intent(in) :: nx, ny, nz
+        logical, intent(in) :: has_west, has_east
+        integer :: j, k
+
+        !$acc parallel loop gang vector collapse(2) present(field,west_recv,east_recv)
+        do j = 1, ny
+            do k = 1, nz
+                field(0,k,j) = merge(west_recv(k,j), 0.0_c_double, has_west)
+                field(nx+1,k,j) = merge(east_recv(k,j), 0.0_c_double, has_east)
+            enddo
+        enddo
+    end subroutine unpack_x_faces_device
+
+
+    subroutine pack_y_faces_device(field, south_send, north_send, nx, ny, nz)
+        real(c_double), intent(in) :: field(0:,:,0:)
+        real(c_double), intent(out) :: south_send(0:,:), north_send(0:,:)
+        integer, intent(in) :: nx, ny, nz
+        integer :: i, k
+
+        !$acc parallel loop gang vector collapse(2) present(field,south_send,north_send)
+        do k = 1, nz
+            do i = 0, nx+1
+                south_send(i,k) = field(i,k,1)
+                north_send(i,k) = field(i,k,ny)
+            enddo
+        enddo
+    end subroutine pack_y_faces_device
+
+
+    subroutine unpack_y_faces_device(field, south_recv, north_recv, nx, ny, nz, has_south, has_north)
+        real(c_double), intent(inout) :: field(0:,:,0:)
+        real(c_double), intent(in) :: south_recv(0:,:), north_recv(0:,:)
+        integer, intent(in) :: nx, ny, nz
+        logical, intent(in) :: has_south, has_north
+        integer :: i, k
+
+        !$acc parallel loop gang vector collapse(2) present(field,south_recv,north_recv)
+        do k = 1, nz
+            do i = 0, nx+1
+                field(i,k,0) = merge(south_recv(i,k), 0.0_c_double, has_south)
+                field(i,k,ny+1) = merge(north_recv(i,k), 0.0_c_double, has_north)
+            enddo
+        enddo
+    end subroutine unpack_y_faces_device
 
 end module wind_multilevel_mpi
