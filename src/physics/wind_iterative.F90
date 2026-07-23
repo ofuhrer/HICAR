@@ -2185,9 +2185,9 @@ contains
     subroutine setup_multilevel_preconditioner(domain)
         implicit none
         type(domain_t), intent(in) :: domain
-        real(c_double), allocatable :: test_x(:,:,:), direct_ax(:,:,:)
+        real(c_double), allocatable :: test_x(:,:,:), direct_ax(:,:,:), host_stencil_ax(:,:,:)
         real(c_double) :: local_error, global_error, local_reference, global_reference
-        real(c_double) :: relative_error, minimum_pivot
+        real(c_double) :: relative_error, host_relative_error, minimum_pivot
         integer :: i, j, k, gi, gj, gk, ierr, line_status, rap_apply_count, print_rank, nprocs
         integer :: west, east, south, north
 
@@ -2309,6 +2309,14 @@ contains
         call apply_coarse_rap(test_x, direct_ax)
         ml_coarse_halo_x = 0.0_c_double
         ml_coarse_halo_x(1:ml_transfer%nx_c_local,:,1:ml_transfer%ny_c_local) = test_x
+        allocate(host_stencil_ax(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local))
+        call ml_coarse_halo%exchange(ml_coarse_halo_x)
+        call ml_stencil%apply_owned(ml_coarse_halo_x, host_stencil_ax)
+        local_error = sum((host_stencil_ax-direct_ax)**2)
+        local_reference = sum(direct_ax**2)
+        call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(local_reference, global_reference, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        host_relative_error = sqrt(global_error/max(global_reference,tiny(1.0_c_double)))
         !$acc update device(ml_coarse_halo_x)
         call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
         call ml_stencil%apply_owned_device(ml_coarse_halo_x, ml_coarse_ax)
@@ -2318,7 +2326,13 @@ contains
         call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
         call MPI_Allreduce(local_reference, global_reference, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
         relative_error = sqrt(global_error/max(global_reference,tiny(1.0_c_double)))
-        deallocate(test_x, direct_ax)
+        deallocate(test_x, direct_ax, host_stencil_ax)
+        if (solver_rank == 0) then
+            write(output_unit,'(A,ES12.4,A,ES12.4)') &
+                ' HICAR multilevel R A P verification: host_stencil=', host_relative_error, &
+                ' device_stencil=', relative_error
+            flush(output_unit)
+        endif
         if (relative_error > 2.0e-11_c_double) then
             if (solver_rank == 0) write(output_unit,'(A,ES12.4)') &
                 ' HICAR multilevel rejected: coarse operator is not R A P, relative error=', relative_error
