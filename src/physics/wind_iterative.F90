@@ -114,14 +114,13 @@ module wind_iterative
     ! Keep the native flexible-GMRES workspace bounded.  Unlike the external
     ! host FGMRES path this is an explicit GPU allocation, so the national
     ! decomposition has a predictable (2*(restart+1)) vector footprint.
-    ! The 12-vector prototype made a valid first reduction but restarted into
-    ! stagnation on the 250 m calibrated operator.  The national calibrated
-    ! operator retained too little information across a 50-vector restart and
-    ! stalled well above tolerance.  Restart 100 plus reorthogonalization also
-    ! failed the Swiss gate at 2500 iterations and materially increased memory.
-    ! Do not increase this value further; it remains here only while the audit
-    ! identifies the bounded recycled subspace that will replace it.
-    integer, parameter :: FGMRES_RESTART = 100
+    ! Before the exact recursive hierarchy, 12- and 50-vector restarts lost too
+    ! much Krylov information, while restart 100 still failed and exhausted
+    ! national-scale memory.  The verified hierarchy now converges the 250 m
+    ! regression and the hard 701x701 regional bridge in 5--6 iterations, so a
+    ! bounded 20-vector space leaves ample margin without allocating roughly
+    ! 60 GiB of basis vectors per Swiss-domain compute rank.
+    integer, parameter :: FGMRES_RESTART = 20
     ! Coarse global sketch used only by the opt-in Arnoldi audit.  Signed
     ! basis sums on this fixed grid let the offline analyzer reconstruct the
     ! spatial envelope of harmonic Ritz vectors without exporting full 3-D
