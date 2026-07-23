@@ -34,5 +34,6 @@ srun -N1 -n4 --ntasks-per-node=4 --gres=gpu:4 --distribution=block:block --cpu-b
 
 grep -q 'multilevel_transfer \[PASSED\]' "$result"
 grep -q 'multilevel_device \[PASSED\]' "$result"
+grep -q 'multilevel_device_offset \[PASSED\]' "$result"
 grep -q 'multilevel_halo \[PASSED\]' "$result"
 grep -q 'iter_wind_solve_decomp \[PASSED\]' "$result"
