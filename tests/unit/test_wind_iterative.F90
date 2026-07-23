@@ -52,8 +52,8 @@ contains
             new_unittest("multilevel_transfer", test_multilevel_transfer), &
             new_unittest("multilevel_device", test_multilevel_device), &
             new_unittest("multilevel_device_offset", test_multilevel_device_offset), &
-            new_unittest("iter_wind_solve_decomp", test_iter_wind_solve), &
-            new_unittest("multilevel_halo", test_multilevel_halo) &
+            new_unittest("multilevel_halo", test_multilevel_halo), &
+            new_unittest("iter_wind_solve_decomp", test_iter_wind_solve) &
             ]
     end subroutine collect_wind_iterative_suite
 
