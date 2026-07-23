@@ -718,9 +718,11 @@ contains
         integer, parameter :: x_first = 83, nx_local = 83
         integer, parameter :: y_first = 72, ny_local = 72, nz = 5
         type(horizontal_tile_transfer_t) :: transfer
+        type(galerkin_tile_stencil_t) :: stencil
         real(c_double), allocatable :: coarse_halo(:,:,:), fine(:,:,:), reference(:,:,:)
+        real(c_double), allocatable :: stencil_x(:,:,:), stencil_ax(:,:,:), stencil_reference(:,:,:)
         real(c_double) :: scale
-        integer :: i, j, k, ci, cj
+        integer :: i, j, k, ci, cj, di, dj, dk
 
         ! Exercise a nonzero tile origin.  These maps require the west coarse
         ! halo (local index zero), which is the case that exposed an NVHPC
@@ -747,8 +749,53 @@ contains
         scale = max(1.0_c_double, maxval(abs(reference)))
         if (maxval(abs(fine-reference)) > 5.0e-13_c_double*scale) &
             call test_failed(error, 'test_multilevel_device_offset', 'offset device prolongation differs from host')
+
+        stencil%nx_global = transfer%nx_c_global
+        stencil%ny_global = transfer%ny_c_global
+        stencil%x_first = transfer%x_c_first
+        stencil%y_first = transfer%y_c_first
+        stencil%nx = transfer%nx_c_local
+        stencil%ny = transfer%ny_c_local
+        stencil%nz = nz
+        stencil%fix_lateral_boundaries = .true.
+        stencil%fix_vertical_boundaries = .true.
+        allocate(stencil%value(-1:1,-1:1,-1:1,stencil%nx,nz,stencil%ny), &
+                 stencil_x(0:stencil%nx+1,nz,0:stencil%ny+1), &
+                 stencil_ax(stencil%nx,nz,stencil%ny), &
+                 stencil_reference(stencil%nx,nz,stencil%ny))
+        do j = 1, stencil%ny
+            do k = 1, nz
+                do i = 1, stencil%nx
+                    do dj = -1, 1
+                        do dk = -1, 1
+                            do di = -1, 1
+                                stencil%value(di,dk,dj,i,k,j) = &
+                                    0.01_c_double*real(30+di+3*dk+9*dj,c_double)
+                            enddo
+                        enddo
+                    enddo
+                enddo
+            enddo
+        enddo
+        do j = 0, stencil%ny+1
+            do k = 1, nz
+                do i = 0, stencil%nx+1
+                    stencil_x(i,k,j) = cos(0.047_c_double*real(2*i+5*k+7*j,c_double))
+                enddo
+            enddo
+        enddo
+        call stencil%apply_owned(stencil_x, stencil_reference)
+        call stencil%upload_device()
+        !$acc enter data copyin(stencil_x) create(stencil_ax)
+        call stencil%apply_owned_device(stencil_x, stencil_ax)
+        !$acc update self(stencil_ax)
+        !$acc exit data delete(stencil_x, stencil_ax)
+        scale = max(1.0_c_double, maxval(abs(stencil_reference)))
+        if (maxval(abs(stencil_ax-stencil_reference)) > 5.0e-13_c_double*scale) &
+            call test_failed(error, 'test_multilevel_device_offset', 'offset device stencil differs from host')
+        call stencil%release()
         call transfer%release()
-        deallocate(coarse_halo, fine, reference)
+        deallocate(coarse_halo, fine, reference, stencil_x, stencil_ax, stencil_reference)
 #endif
     end subroutine test_multilevel_device_offset
 

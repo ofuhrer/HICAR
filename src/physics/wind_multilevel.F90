@@ -939,7 +939,7 @@ contains
 
     subroutine apply_galerkin_tile_stencil_device(this, x, ax)
         class(galerkin_tile_stencil_t), intent(in) :: this
-        real(c_double), intent(in) :: x(0:,:,0:)
+        real(c_double), intent(in) :: x(:,:,:)
         real(c_double), intent(out) :: ax(:,:,:)
         integer :: i, j, k, di, dj, dk, gi, gj
 
@@ -958,14 +958,15 @@ contains
                     if ((this%fix_lateral_boundaries .and. &
                          (gi == 0 .or. gi == this%nx_global-1 .or. gj == 0 .or. gj == this%ny_global-1)) .or. &
                         (this%fix_vertical_boundaries .and. (k == 1 .or. k == this%nz))) then
-                        ax(i,k,j) = x(i,k,j)
+                        ax(i,k,j) = x(i+1,k,j+1)
                     else
                         ax(i,k,j) = 0.0_c_double
                         do dj = -1, 1
                             do dk = -1, 1
                                 if (k+dk < 1 .or. k+dk > this%nz) cycle
                                 do di = -1, 1
-                                    ax(i,k,j) = ax(i,k,j) + this%value(di,dk,dj,i,k,j)*x(i+di,k+dk,j+dj)
+                                    ax(i,k,j) = ax(i,k,j) + &
+                                        this%value(di,dk,dj,i,k,j)*x(i+di+1,k+dk,j+dj+1)
                                 enddo
                             enddo
                         enddo
