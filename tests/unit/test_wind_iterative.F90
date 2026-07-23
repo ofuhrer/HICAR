@@ -26,7 +26,7 @@ module test_wind_iterative
     use options_interface,  only : options_t
     use wind,               only : wind_var_request, init_winds, calc_divergence
     use wind_iterative,     only : calc_iter_winds, finalize_iter_winds, probe_finalize, &
-                                   multilevel_preconditioner_smoke
+                                   multilevel_preconditioner_smoke, small_harmonic_ritz
     use wind_multilevel,    only : horizontal_transfer_t, horizontal_tile_transfer_t, horizontal_coarse_extent, &
                                     horizontal_coarse_coordinate, owned_coarse_interval, &
                                     galerkin_stencil_t, galerkin_tile_stencil_t, vertical_line_factor_t, &
@@ -55,6 +55,7 @@ contains
             new_unittest("multilevel_device_offset", test_multilevel_device_offset), &
             new_unittest("multilevel_halo", test_multilevel_halo), &
             new_unittest("collective_coarse", test_collective_coarse), &
+            new_unittest("harmonic_ritz", test_harmonic_ritz), &
             new_unittest("iter_wind_solve_decomp", test_iter_wind_solve) &
             ]
     end subroutine collect_wind_iterative_suite
@@ -1016,5 +1017,44 @@ contains
         end function truth
 
     end subroutine test_collective_coarse
+
+
+    subroutine test_harmonic_ritz(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: restart = 20
+        real(c_double) :: hbar(restart+1,restart), magnitudes(restart)
+        real(c_double) :: imaginary_parts(restart), right_vectors(restart,restart)
+        real(c_double) :: ordered(2)
+        integer :: status
+
+        ! A real 2-by-2 rotation has the conjugate pair +/-i.  DGEEV must
+        ! return the pair in adjacent real/imaginary columns so GCRO-DR can
+        ! retain the complete two-dimensional real invariant subspace.
+        hbar = 0.0_c_double
+        hbar(1,2) = -1.0_c_double
+        hbar(2,1) = 1.0_c_double
+        call small_harmonic_ritz(hbar,2,magnitudes,imaginary_parts,right_vectors,status)
+        if (status /= 0 .or. maxval(abs(magnitudes(1:2)-1.0_c_double)) > 1.0e-12_c_double .or. &
+            abs(abs(imaginary_parts(1))-1.0_c_double) > 1.0e-12_c_double .or. &
+            abs(imaginary_parts(1)+imaginary_parts(2)) > 1.0e-12_c_double) then
+            call test_failed(error,'test_harmonic_ritz','complex harmonic-Ritz pair is incorrect')
+            return
+        endif
+
+        ! With H=diag(1,2) and h_(3,2)=0.5, H^T f=e_2 gives f=(0,0.5).
+        ! The rank-one harmonic correction therefore changes the second
+        ! eigenvalue from 2 to 2.125 while leaving the first at 1.
+        hbar = 0.0_c_double
+        hbar(1,1) = 1.0_c_double
+        hbar(2,2) = 2.0_c_double
+        hbar(3,2) = 0.5_c_double
+        call small_harmonic_ritz(hbar,2,magnitudes,imaginary_parts,right_vectors,status)
+        ordered = magnitudes(1:2)
+        if (ordered(2) < ordered(1)) ordered = [ordered(2),ordered(1)]
+        if (status /= 0 .or. maxval(abs(ordered-[1.0_c_double,2.125_c_double])) > 1.0e-12_c_double .or. &
+            maxval(abs(imaginary_parts(1:2))) > 1.0e-12_c_double) then
+            call test_failed(error,'test_harmonic_ritz','rank-one harmonic correction is incorrect')
+        endif
+    end subroutine test_harmonic_ritz
 
 end module test_wind_iterative

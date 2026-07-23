@@ -3,8 +3,9 @@
 !!
 !! Right-preconditioned BiCGStab + vertical-line block-Jacobi smoothing
 !! over a 15-point stencil with terrain-following boundary
-!! conditions. Pure OpenACC + MPI — vendor-portable, no external
-!! solver library.
+!! conditions. The distributed operator and preconditioner remain pure
+!! OpenACC + MPI; LAPACK is used only for the bounded (at most 20 by 20)
+!! harmonic-Ritz problem at an optional recycled restart.
 !!
 !! Phase 1 (this file): classic BiCGStab, MPI_Allreduce on dot
 !! products, MPI Sendrecv halos, pure-stencil SpMV (no CSR).
@@ -47,6 +48,25 @@ module wind_iterative
               probe_record, probe_finalize, probe_random_pattern, probe_compare_operator
     public :: multilevel_preconditioner_is_ready
     public :: multilevel_preconditioner_smoke
+    public :: small_harmonic_ritz
+
+    interface
+        subroutine dgesv(n, nrhs, a, lda, ipiv, b, ldb, info)
+            import c_double
+            integer, intent(in) :: n, nrhs, lda, ldb
+            integer, intent(out) :: ipiv(*), info
+            real(c_double), intent(inout) :: a(lda,*), b(ldb,*)
+        end subroutine dgesv
+
+        subroutine dgeev(jobvl, jobvr, n, a, lda, wr, wi, vl, ldvl, vr, ldvr, work, lwork, info)
+            import c_double
+            character(len=1), intent(in) :: jobvl, jobvr
+            integer, intent(in) :: n, lda, ldvl, ldvr, lwork
+            integer, intent(out) :: info
+            real(c_double), intent(inout) :: a(lda,*)
+            real(c_double), intent(out) :: wr(*), wi(*), vl(ldvl,*), vr(ldvr,*), work(*)
+        end subroutine dgeev
+    end interface
 
     logical :: initialized_iter_winds = .false.
     logical :: structure_uploaded = .false.
@@ -1258,11 +1278,12 @@ contains
         real(c_double) :: right_vectors(FGMRES_RESTART,FGMRES_RESTART)
         real(c_double) :: h_times_right(FGMRES_RESTART+1,FGMRES_RESTART)
         real(c_double) :: singular_all(FGMRES_RESTART), singular_values(FGMRES_MAX_RECYCLE)
+        real(c_double) :: harmonic_imag(FGMRES_RESTART)
         real(c_double) :: beta, bnorm2, target_norm, tmp, denom, recycle_norm2
         real(c_double) :: recycle_relation_error
-        integer :: ierr, cycle, j, i, used, total, p, q, l, eig_index
-        integer :: recycle_dim, eigen_order(FGMRES_RESTART), order_tmp
-        logical :: recycle_ready
+        integer :: ierr, cycle, j, i, used, total, p, q, l, eig_index, harmonic_status
+        integer :: recycle_dim, eigen_order(FGMRES_RESTART), selected_order(FGMRES_MAX_RECYCLE), order_tmp
+        logical :: recycle_ready, harmonic_vectors_used
 
         status_out = 1; n_iters_out = 0; res0_out = 0.0_c_double; res_final_out = 0.0_c_double
         t_total_acc = 0.0_c_double
@@ -1429,19 +1450,25 @@ contains
                 enddo
             endif
 
-            ! Freeze a bounded deflation space from the first Arnoldi cycle.
-            ! The right singular vectors of Hbar with smallest singular values
-            ! approximate the slowly reduced right directions of A*M^{-1}.
-            ! U=Z*Y identifies candidate slow directions.  Form C=A*U with
+            ! Freeze a bounded GCRO-DR deflation space from the first Arnoldi
+            ! cycle.  Harmonic Ritz vectors target the small eigenvalues that
+            ! restarted GMRES otherwise discards; real and imaginary columns
+            ! of a complex conjugate pair are retained together.  U=Z*Y
+            ! identifies candidate slow directions.  Form C=A*U with
             ! the production operator rather than reconstructing it as
-            ! V*Hbar*Y/sigma: on the national case Hbar spans more than ten
-            ! orders of magnitude, so the latter cancellation falls below
-            ! the calibrated operator's numerical precision.  C is then
-            ! explicitly reorthogonalised and U receives the identical
+            ! V*Hbar*Y: the national projected problem is sufficiently
+            ! conditioned that this reconstruction lost the A*U=C relation.
+            ! C is explicitly reorthogonalised and U receives the identical
             ! transformations, preserving A*U=C for subsequent cycles.
             if (.not. recycle_ready .and. fgmres_recycle_requested > 0 .and. &
                 used > fgmres_recycle_requested) then
-                call small_one_sided_svd(h_raw, used, singular_all, right_vectors, h_times_right)
+                call small_harmonic_ritz(h_raw, used, singular_all, harmonic_imag, &
+                                         right_vectors, harmonic_status)
+                harmonic_vectors_used = harmonic_status == 0
+                if (.not. harmonic_vectors_used) then
+                    call small_one_sided_svd(h_raw, used, singular_all, right_vectors, h_times_right)
+                    harmonic_imag = 0.0_c_double
+                endif
                 do i = 1, used
                     eigen_order(i) = i
                 enddo
@@ -1454,9 +1481,32 @@ contains
                     eigen_order(i) = eigen_order(eig_index)
                     eigen_order(eig_index) = order_tmp
                 enddo
-                recycle_dim = min(fgmres_recycle_requested, used-1)
+                recycle_dim = 0
+                selected_order = 0
+                do i = 1, used
+                    eig_index = eigen_order(i)
+                    if (harmonic_imag(eig_index) < 0.0_c_double) cycle
+                    if (harmonic_imag(eig_index) > 0.0_c_double) then
+                        if (recycle_dim+2 > fgmres_recycle_requested .or. eig_index == used) cycle
+                        recycle_dim = recycle_dim+1
+                        selected_order(recycle_dim) = eig_index
+                        recycle_dim = recycle_dim+1
+                        selected_order(recycle_dim) = eig_index+1
+                    else
+                        if (recycle_dim+1 > fgmres_recycle_requested) cycle
+                        recycle_dim = recycle_dim+1
+                        selected_order(recycle_dim) = eig_index
+                    endif
+                    if (recycle_dim == fgmres_recycle_requested) exit
+                enddo
+                if (recycle_dim == 0) then
+                    call small_one_sided_svd(h_raw, used, singular_all, right_vectors, h_times_right)
+                    harmonic_vectors_used = .false.
+                    recycle_dim = min(fgmres_recycle_requested, used-1)
+                    selected_order(1:recycle_dim) = eigen_order(1:recycle_dim)
+                endif
                 do q = 1, recycle_dim
-                    eig_index = eigen_order(q)
+                    eig_index = selected_order(q)
                     singular_values(q) = max(singular_all(eig_index), breakdown_eps)
                     call vec_zero(recycle_u(:,:,:,q))
                     call vec_zero(recycle_c(:,:,:,q))
@@ -1493,10 +1543,11 @@ contains
                     recycle_relation_error = max(recycle_relation_error, sqrt(max(recycle_norm2, 0.0_c_double)))
                 enddo
                 if (STD_OUT_PE .and. verbose_solver) then
-                    write(output_unit,'(A,I0,A,ES10.3,A,8(1X,ES10.3))') &
+                    write(output_unit,'(A,I0,A,L1,A,ES10.3,A,8(1X,ES10.3))') &
                         ' HICAR FGMRES recycle space ready: dimension=', recycle_dim, &
+                        ' harmonic_Ritz=', harmonic_vectors_used, &
                         ' max_relative_AU_minus_C=', recycle_relation_error, &
-                        ' singular_values=', singular_values(1:recycle_dim)
+                        ' retained_magnitudes=', singular_values(1:recycle_dim)
                     flush(output_unit)
                 endif
             endif
@@ -1516,6 +1567,55 @@ contains
             deallocate(recycle_u, recycle_c)
         endif
     end subroutine fgmres_line_solve
+
+
+    !> Harmonic Ritz vectors of the projected right-preconditioned operator.
+    !! For Hbar=[H; h e_m^T], the harmonic Ritz values are the eigenvalues of
+    !! H + h^2 f e_m^T, where H^T f=e_m.  DGEEV stores a complex conjugate
+    !! pair as adjacent real/imaginary columns; the caller retains both.
+    subroutine small_harmonic_ritz(hbar, n, magnitudes, imaginary_parts, right_vectors, status)
+        implicit none
+        real(c_double), intent(in) :: hbar(FGMRES_RESTART+1,FGMRES_RESTART)
+        integer, intent(in) :: n
+        real(c_double), intent(out) :: magnitudes(FGMRES_RESTART)
+        real(c_double), intent(out) :: imaginary_parts(FGMRES_RESTART)
+        real(c_double), intent(out) :: right_vectors(FGMRES_RESTART,FGMRES_RESTART)
+        integer, intent(out) :: status
+        real(c_double) :: harmonic_matrix(FGMRES_RESTART,FGMRES_RESTART)
+        real(c_double) :: transpose_h(FGMRES_RESTART,FGMRES_RESTART)
+        real(c_double) :: inverse_transpose_column(FGMRES_RESTART,1)
+        real(c_double) :: real_parts(FGMRES_RESTART), left_dummy(1,1)
+        real(c_double) :: work(8*FGMRES_RESTART)
+        integer :: pivots(FGMRES_RESTART), info, i
+
+        magnitudes = huge(1.0_c_double)
+        imaginary_parts = 0.0_c_double
+        right_vectors = 0.0_c_double
+        status = 1
+        if (n < 1 .or. n > FGMRES_RESTART) return
+
+        transpose_h = 0.0_c_double
+        transpose_h(1:n,1:n) = transpose(hbar(1:n,1:n))
+        inverse_transpose_column = 0.0_c_double
+        inverse_transpose_column(n,1) = 1.0_c_double
+        call dgesv(n, 1, transpose_h, FGMRES_RESTART, pivots, inverse_transpose_column, &
+                   FGMRES_RESTART, info)
+        if (info /= 0) return
+
+        harmonic_matrix = 0.0_c_double
+        harmonic_matrix(1:n,1:n) = hbar(1:n,1:n)
+        harmonic_matrix(1:n,n) = harmonic_matrix(1:n,n) + &
+            hbar(n+1,n)*hbar(n+1,n)*inverse_transpose_column(1:n,1)
+        call dgeev('N', 'V', n, harmonic_matrix, FGMRES_RESTART, real_parts, &
+                   imaginary_parts, left_dummy, 1, right_vectors, FGMRES_RESTART, &
+                   work, size(work), info)
+        if (info /= 0) return
+        do i = 1, n
+            magnitudes(i) = sqrt(real_parts(i)*real_parts(i) + &
+                                 imaginary_parts(i)*imaginary_parts(i))
+        enddo
+        status = 0
+    end subroutine small_harmonic_ritz
 
 
     !> One-sided Jacobi SVD for the tiny (restart+1)-by-restart Hessenberg

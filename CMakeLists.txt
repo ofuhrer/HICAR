@@ -508,6 +508,8 @@ message(STATUS "...done searching for dependencies")
 list(REMOVE_ITEM SOURCE_FILES ${PROJECT_SOURCE_DIR}/src/main/driver.F90)
 add_library(hicar_lib STATIC ${SOURCE_FILES})
 add_executable(HICAR ${PROJECT_SOURCE_DIR}/src/main/driver.F90)
+find_package(LAPACK REQUIRED)
+target_link_libraries(hicar_lib PUBLIC LAPACK::LAPACK)
 
 # HICAR-only compile definitions (target-scoped so they don't leak into the
 # FetchContent subprojects). PUBLIC so they also reach the HICAR executable.
