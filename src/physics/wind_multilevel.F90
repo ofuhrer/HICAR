@@ -941,32 +941,51 @@ contains
         class(galerkin_tile_stencil_t), intent(in) :: this
         real(c_double), intent(in) :: x(:,:,:)
         real(c_double), intent(out) :: ax(:,:,:)
-        integer :: i, j, k, di, dj, dk, gi, gj
 
         if (size(x,1) /= this%nx+2 .or. size(x,2) /= this%nz .or. size(x,3) /= this%ny+2) &
             error stop 'tile Galerkin input must include one horizontal halo'
         if (size(ax,1) /= this%nx .or. size(ax,2) /= this%nz .or. size(ax,3) /= this%ny) &
             error stop 'tile Galerkin output shape mismatch'
         if (.not. this%device_uploaded) error stop 'tile Galerkin stencil is not on the device'
-        !$acc parallel loop gang vector collapse(3) present(x,ax,this%value) &
+        ! Keep allocatable components out of the device kernel argument list.
+        ! NVHPC 24.5 can mis-handle component access through polymorphic `this`
+        ! here (including a rank-local kernel stall on a multi-node run).
+        call apply_galerkin_tile_stencil_device_arrays(x, ax, this%value, &
+            this%nx_global, this%ny_global, this%x_first, this%y_first, &
+            this%nx, this%ny, this%nz, this%fix_lateral_boundaries, &
+            this%fix_vertical_boundaries)
+    end subroutine apply_galerkin_tile_stencil_device
+
+
+    subroutine apply_galerkin_tile_stencil_device_arrays(x, ax, stencil_value, &
+            nx_global, ny_global, x_first, y_first, nx, ny, nz, &
+            fix_lateral_boundaries, fix_vertical_boundaries)
+        real(c_double), intent(in) :: x(:,:,:)
+        real(c_double), intent(out) :: ax(:,:,:)
+        real(c_double), intent(in) :: stencil_value(-1:,-1:,-1:,:,:,:)
+        integer, intent(in) :: nx_global, ny_global, x_first, y_first, nx, ny, nz
+        logical, intent(in) :: fix_lateral_boundaries, fix_vertical_boundaries
+        integer :: i, j, k, di, dj, dk, gi, gj
+
+        !$acc parallel loop gang vector collapse(3) present(x,ax,stencil_value) &
         !$acc private(gi,gj,di,dj,dk)
-        do j = 1, this%ny
-            do k = 1, this%nz
-                do i = 1, this%nx
-                    gi = this%x_first+i-1
-                    gj = this%y_first+j-1
-                    if ((this%fix_lateral_boundaries .and. &
-                         (gi == 0 .or. gi == this%nx_global-1 .or. gj == 0 .or. gj == this%ny_global-1)) .or. &
-                        (this%fix_vertical_boundaries .and. (k == 1 .or. k == this%nz))) then
+        do j = 1, ny
+            do k = 1, nz
+                do i = 1, nx
+                    gi = x_first+i-1
+                    gj = y_first+j-1
+                    if ((fix_lateral_boundaries .and. &
+                         (gi == 0 .or. gi == nx_global-1 .or. gj == 0 .or. gj == ny_global-1)) .or. &
+                        (fix_vertical_boundaries .and. (k == 1 .or. k == nz))) then
                         ax(i,k,j) = x(i+1,k,j+1)
                     else
                         ax(i,k,j) = 0.0_c_double
                         do dj = -1, 1
                             do dk = -1, 1
-                                if (k+dk < 1 .or. k+dk > this%nz) cycle
+                                if (k+dk < 1 .or. k+dk > nz) cycle
                                 do di = -1, 1
                                     ax(i,k,j) = ax(i,k,j) + &
-                                        this%value(di,dk,dj,i,k,j)*x(i+di+1,k+dk,j+dj+1)
+                                        stencil_value(di,dk,dj,i,k,j)*x(i+di+1,k+dk,j+dj+1)
                                 enddo
                             enddo
                         enddo
@@ -974,7 +993,7 @@ contains
                 enddo
             enddo
         enddo
-    end subroutine apply_galerkin_tile_stencil_device
+    end subroutine apply_galerkin_tile_stencil_device_arrays
 
 
     subroutine apply_galerkin_stencil(this, x, ax)
