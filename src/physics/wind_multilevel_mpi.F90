@@ -1,5 +1,6 @@
 module wind_multilevel_mpi
     use, intrinsic :: iso_c_binding, only : c_double
+    use, intrinsic :: iso_fortran_env, only : output_unit
     use mpi
     implicit none
     private
@@ -14,6 +15,7 @@ module wind_multilevel_mpi
         integer :: south = MPI_PROC_NULL
         integer :: north = MPI_PROC_NULL
         logical :: device_uploaded = .false.
+        integer :: device_exchange_count = 0
         real(c_double), allocatable :: west_send(:,:), west_recv(:,:)
         real(c_double), allocatable :: east_send(:,:), east_recv(:,:)
         real(c_double), allocatable :: south_send(:,:), south_recv(:,:)
@@ -59,6 +61,7 @@ contains
         this%communicator = MPI_COMM_NULL
         this%west = MPI_PROC_NULL; this%east = MPI_PROC_NULL
         this%south = MPI_PROC_NULL; this%north = MPI_PROC_NULL
+        this%device_exchange_count = 0
     end subroutine release_horizontal_halo_exchange
 
 
@@ -163,12 +166,13 @@ contains
         real(c_double), intent(inout) :: field(0:,:,0:)
         integer, parameter :: tag_to_west = 741, tag_to_east = 742
         integer, parameter :: tag_to_south = 743, tag_to_north = 744
-        integer :: i, j, k, ierr, n_requests
+        integer :: i, j, k, ierr, n_requests, rank_debug
         integer :: requests(4), statuses(MPI_STATUS_SIZE,4)
 
         if (size(field,1) /= this%nx+2 .or. size(field,2) /= this%nz .or. &
             size(field,3) /= this%ny+2) error stop 'field shape does not match halo exchange'
         if (.not. this%device_uploaded) error stop 'halo buffers are not on the device'
+        this%device_exchange_count = this%device_exchange_count+1
 
         !$acc parallel loop gang vector collapse(2) &
         !$acc present(field,this%west_send,this%east_send)
@@ -179,6 +183,13 @@ contains
             enddo
         enddo
         !$acc update self(this%west_send,this%east_send)
+        if (this%device_exchange_count == 29) then
+            call MPI_Comm_rank(this%communicator, rank_debug, ierr)
+            write(output_unit,'(A,I0,A,ES14.6,A,ES14.6)') &
+                ' HICAR coarse x pack rank=', rank_debug, ' west_max=', maxval(abs(this%west_send)), &
+                ' east_max=', maxval(abs(this%east_send))
+            flush(output_unit)
+        endif
         this%west_recv = 0.0_c_double
         this%east_recv = 0.0_c_double
         n_requests = 0
@@ -187,6 +198,13 @@ contains
         call post_send(this%west_send, size(this%west_send), this%west, tag_to_west)
         call post_send(this%east_send, size(this%east_send), this%east, tag_to_east)
         if (n_requests > 0) call MPI_Waitall(n_requests, requests, statuses, ierr)
+        if (this%device_exchange_count == 29) then
+            call MPI_Comm_rank(this%communicator, rank_debug, ierr)
+            write(output_unit,'(A,I0,A,ES14.6,A,ES14.6)') &
+                ' HICAR coarse x recv rank=', rank_debug, ' west_max=', maxval(abs(this%west_recv)), &
+                ' east_max=', maxval(abs(this%east_recv))
+            flush(output_unit)
+        endif
         !$acc update device(this%west_recv,this%east_recv)
         !$acc parallel loop gang vector collapse(2) &
         !$acc present(field,this%west_recv,this%east_recv)
@@ -214,6 +232,13 @@ contains
             enddo
         enddo
         !$acc update self(this%south_send,this%north_send)
+        if (this%device_exchange_count == 29) then
+            call MPI_Comm_rank(this%communicator, rank_debug, ierr)
+            write(output_unit,'(A,I0,A,ES14.6,A,ES14.6)') &
+                ' HICAR coarse y pack rank=', rank_debug, ' south_max=', maxval(abs(this%south_send)), &
+                ' north_max=', maxval(abs(this%north_send))
+            flush(output_unit)
+        endif
         this%south_recv = 0.0_c_double
         this%north_recv = 0.0_c_double
         n_requests = 0
@@ -222,6 +247,13 @@ contains
         call post_send(this%south_send, size(this%south_send), this%south, tag_to_south)
         call post_send(this%north_send, size(this%north_send), this%north, tag_to_north)
         if (n_requests > 0) call MPI_Waitall(n_requests, requests, statuses, ierr)
+        if (this%device_exchange_count == 29) then
+            call MPI_Comm_rank(this%communicator, rank_debug, ierr)
+            write(output_unit,'(A,I0,A,ES14.6,A,ES14.6)') &
+                ' HICAR coarse y recv rank=', rank_debug, ' south_max=', maxval(abs(this%south_recv)), &
+                ' north_max=', maxval(abs(this%north_recv))
+            flush(output_unit)
+        endif
         !$acc update device(this%south_recv,this%north_recv)
         !$acc parallel loop gang vector collapse(2) &
         !$acc present(field,this%south_recv,this%north_recv)
