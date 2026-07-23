@@ -29,7 +29,8 @@ module wind_iterative
     use debug_module,  only : domain_check_winds
     use wind_hypre,    only : wind_hypre_available, wind_hypre_invalidate, wind_hypre_solve, wind_hypre_apply
     use wind_multilevel, only : horizontal_tile_transfer_t, galerkin_tile_stencil_t, &
-                                vertical_line_factor_t, assemble_colored_tile_galerkin
+                                vertical_line_factor_t, assemble_colored_tile_galerkin, &
+                                owned_coarse_interval
     use wind_multilevel_mpi, only : horizontal_halo_exchange_t
 #ifdef USE_NCCL
     use nccl_interface, only : nccl_comm_init, nccl_comm_destroy, &
@@ -2452,6 +2453,7 @@ contains
         integer :: q, ierr, local_min, global_min, line_status
         integer :: parent_nx_global, parent_ny_global, parent_x_first, parent_y_first
         integer :: parent_nx_local, parent_ny_local
+        integer :: child_x_first, child_y_first, child_nx_local, child_ny_local
         integer :: west, east, south, north
         real(c_double) :: minimum_pivot
 
@@ -2481,16 +2483,16 @@ contains
             ! Retain every rank until agglomeration is introduced.  Stop at
             ! the last grid for which the existing decomposition is nonempty.
             if (parent_nx_global <= 3 .or. parent_ny_global <= 3) exit
+            call owned_coarse_interval(parent_nx_global, parent_x_first, parent_nx_local, &
+                                       child_x_first, child_nx_local)
+            call owned_coarse_interval(parent_ny_global, parent_y_first, parent_ny_local, &
+                                       child_y_first, child_ny_local)
+            local_min = min(child_nx_local, child_ny_local)
+            call MPI_Allreduce(local_min, global_min, 1, MPI_INTEGER, MPI_MIN, solver_comm, ierr)
+            if (global_min < 1) exit
             call ml_deep(q)%transfer_from_parent%init(parent_nx_global, parent_ny_global, &
                 parent_x_first, parent_nx_local, parent_y_first, parent_ny_local, &
                 fix_lateral_boundaries=.true., fix_vertical_boundaries=.true.)
-            local_min = min(ml_deep(q)%transfer_from_parent%nx_c_local, &
-                            ml_deep(q)%transfer_from_parent%ny_c_local)
-            call MPI_Allreduce(local_min, global_min, 1, MPI_INTEGER, MPI_MIN, solver_comm, ierr)
-            if (global_min < 1) then
-                call ml_deep(q)%transfer_from_parent%release()
-                exit
-            endif
 
             west = merge(west_neighbor, MPI_PROC_NULL, &
                 ml_deep(q)%transfer_from_parent%x_c_first > 0)
