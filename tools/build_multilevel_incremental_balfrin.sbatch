@@ -19,6 +19,10 @@ module load nvhpc/24.5 cray-mpich-nvhpc/8.1.30 cuda/12.3.0-gcc \
 
 root=${HICAR_MULTILEVEL_ROOT:-$SCRATCH/icon_hicar/HICAR-wind-galerkin-multilevel}
 build=${HICAR_MULTILEVEL_BUILD:-$root/build_gpu_nccl}
-cmake --build "$build" --target HICAR HICAR-tester --parallel "$SLURM_CPUS_PER_TASK"
-test -x "$build/HICAR_gpu"
+if [ "${HICAR_MULTILEVEL_TEST_ONLY:-0}" = 1 ]; then
+  cmake --build "$build" --target HICAR-tester --parallel "$SLURM_CPUS_PER_TASK"
+else
+  cmake --build "$build" --target HICAR HICAR-tester --parallel "$SLURM_CPUS_PER_TASK"
+  test -x "$build/HICAR_gpu"
+fi
 test -x "$build/tests/HICAR-tester"
