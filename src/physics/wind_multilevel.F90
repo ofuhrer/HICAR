@@ -1203,28 +1203,43 @@ contains
         class(vertical_line_factor_t), intent(in) :: this
         real(c_double), intent(in) :: rhs(:,:,:)
         real(c_double), intent(out) :: x(:,:,:)
-        integer :: i, j, k
 
         if (.not. this%ready .or. .not. this%device_uploaded) &
             error stop 'device vertical line factor is not ready'
         if (size(rhs,1) /= this%nx .or. size(rhs,2) /= this%nz .or. size(rhs,3) /= this%ny) &
             error stop 'vertical line right-hand side shape mismatch'
         if (any(shape(x) /= shape(rhs))) error stop 'vertical line output shape mismatch'
+        call apply_vertical_line_factor_device_arrays(rhs, x, this%diagonal_inverse, &
+            this%upper_prime, this%lower_coefficient, this%nx, this%ny, this%nz)
+    end subroutine apply_vertical_line_factor_device
+
+
+    subroutine apply_vertical_line_factor_device_arrays(rhs, x, diagonal_inverse, &
+            upper_prime, lower_coefficient, nx, ny, nz)
+        real(c_double), intent(in) :: rhs(:,:,:)
+        real(c_double), intent(out) :: x(:,:,:)
+        real(c_double), intent(in) :: diagonal_inverse(:,:,:), upper_prime(:,:,:)
+        real(c_double), intent(in) :: lower_coefficient(:,:,:)
+        integer, intent(in) :: nx, ny, nz
+        integer :: i, j, k
+
+        ! As with the coarse stencil, pass allocatable components as plain
+        ! arrays so NVHPC never dereferences a polymorphic object in a kernel.
         !$acc parallel loop gang vector collapse(2) &
-        !$acc present(rhs,x,this%diagonal_inverse,this%upper_prime,this%lower_coefficient)
-        do j = 1, this%ny
-            do i = 1, this%nx
-                x(i,1,j) = this%diagonal_inverse(i,1,j)*rhs(i,1,j)
-                do k = 2, this%nz
-                    x(i,k,j) = this%diagonal_inverse(i,k,j)* &
-                        (rhs(i,k,j)-this%lower_coefficient(i,k,j)*x(i,k-1,j))
+        !$acc present(rhs,x,diagonal_inverse,upper_prime,lower_coefficient)
+        do j = 1, ny
+            do i = 1, nx
+                x(i,1,j) = diagonal_inverse(i,1,j)*rhs(i,1,j)
+                do k = 2, nz
+                    x(i,k,j) = diagonal_inverse(i,k,j)* &
+                        (rhs(i,k,j)-lower_coefficient(i,k,j)*x(i,k-1,j))
                 enddo
-                do k = this%nz-1, 1, -1
-                    x(i,k,j) = x(i,k,j)-this%upper_prime(i,k,j)*x(i,k+1,j)
+                do k = nz-1, 1, -1
+                    x(i,k,j) = x(i,k,j)-upper_prime(i,k,j)*x(i,k+1,j)
                 enddo
             enddo
         enddo
-    end subroutine apply_vertical_line_factor_device
+    end subroutine apply_vertical_line_factor_device_arrays
 
 
     subroutine relax_with_vertical_lines(stencil, line_factor, rhs, x, residual, correction, n_sweeps, omega)
