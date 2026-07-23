@@ -1274,7 +1274,7 @@ contains
         real(c_double) :: right_vectors(FGMRES_RESTART,FGMRES_RESTART)
         real(c_double) :: h_times_right(FGMRES_RESTART+1,FGMRES_RESTART)
         real(c_double) :: singular_all(FGMRES_RESTART), singular_values(FGMRES_MAX_RECYCLE)
-        real(c_double) :: beta, bnorm2, target_norm, tmp, denom, coefficient, recycle_norm2
+        real(c_double) :: beta, bnorm2, target_norm, tmp, denom, recycle_norm2
         real(c_double) :: recycle_relation_error
         integer :: ierr, cycle, j, i, used, total, p, q, l, eig_index
         integer :: recycle_dim, eigen_order(FGMRES_RESTART), order_tmp
@@ -1448,8 +1448,13 @@ contains
             ! Freeze a bounded deflation space from the first Arnoldi cycle.
             ! The right singular vectors of Hbar with smallest singular values
             ! approximate the slowly reduced right directions of A*M^{-1}.
-            ! U=Z*Y and C=V*Hbar*Y/sigma preserve A*U=C; C is explicitly
-            ! reorthogonalised and U receives the identical transformations.
+            ! U=Z*Y identifies candidate slow directions.  Form C=A*U with
+            ! the production operator rather than reconstructing it as
+            ! V*Hbar*Y/sigma: on the national case Hbar spans more than ten
+            ! orders of magnitude, so the latter cancellation falls below
+            ! the calibrated operator's numerical precision.  C is then
+            ! explicitly reorthogonalised and U receives the identical
+            ! transformations, preserving A*U=C for subsequent cycles.
             if (.not. recycle_ready .and. fgmres_recycle_requested > 0 .and. &
                 used > fgmres_recycle_requested) then
                 call small_one_sided_svd(h_raw, used, singular_all, right_vectors, h_times_right)
@@ -1474,10 +1479,8 @@ contains
                     do i = 1, used
                         call vec_axpy(recycle_u(:,:,:,q), right_vectors(i,eig_index), z_basis(:,:,:,i))
                     enddo
-                    do l = 1, used+1
-                        coefficient = h_times_right(l,eig_index) / singular_values(q)
-                        call vec_axpy(recycle_c(:,:,:,q), coefficient, v_basis(:,:,:,l))
-                    enddo
+                    call exchange_krylov_halos(recycle_u(:,:,:,q), domain)
+                    call spmv(recycle_u(:,:,:,q), recycle_c(:,:,:,q))
                     do p = 1, q-1
                         do l = 1, 2
                             call vec_dot_local(recycle_c(:,:,:,p), recycle_c(:,:,:,q), recycle_norm2)
