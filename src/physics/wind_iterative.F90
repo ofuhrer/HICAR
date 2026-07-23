@@ -125,6 +125,14 @@ module wind_iterative
     ! bounded 20-vector space leaves ample margin without allocating roughly
     ! 60 GiB of basis vectors per Swiss-domain compute rank.
     integer, parameter :: FGMRES_RESTART = 20
+    ! Optional fixed-space deflation for restarted FGMRES.  After the first
+    ! Arnoldi cycle, right singular vectors associated with the smallest
+    ! singular values of its projected operator are retained as U together
+    ! with C=A*U.  Subsequent cycles solve in the C-orthogonal complement and
+    ! apply the matching U correction (a bounded GCRO-style restart).  The
+    ! default is deliberately off until the national audit gate validates it.
+    integer, parameter :: FGMRES_MAX_RECYCLE = 8
+    integer :: fgmres_recycle_requested = 0
     ! Coarse global sketch used only by the opt-in Arnoldi audit.  Signed
     ! basis sums on this fixed grid let the offline analyzer reconstruct the
     ! spatial envelope of harmonic Ritz vectors without exporting full 3-D
@@ -362,7 +370,7 @@ contains
         integer :: target_nest
         integer :: my_rank_in_comm
         integer :: env_status, env_length
-        character(len=32) :: audit_env, audit_max_iters_env, multilevel_env, coarse_sweeps_env
+        character(len=32) :: audit_env, audit_max_iters_env, multilevel_env, coarse_sweeps_env, recycle_env
         character(len=512) :: audit_file_env
         integer :: audit_read_status
 #ifdef USE_NCCL
@@ -464,6 +472,21 @@ contains
             if (audit_read_status /= 0 .or. coarsest_line_sweeps < 1) then
                 if (STD_OUT_PE) write(output_unit,'(A,A)') &
                     ' Invalid HICAR_WIND_COARSEST_SWEEPS: ', trim(coarse_sweeps_env)
+                error stop
+            endif
+        endif
+        fgmres_recycle_requested = 0
+        recycle_env = ''
+        call get_environment_variable('HICAR_WIND_RECYCLE_DIM', recycle_env, &
+                                      length=env_length, status=env_status)
+        if (env_status == 0 .and. env_length > 0) then
+            read(recycle_env(:min(env_length, len(recycle_env))), *, &
+                 iostat=audit_read_status) fgmres_recycle_requested
+            if (audit_read_status /= 0 .or. fgmres_recycle_requested < 0 .or. &
+                fgmres_recycle_requested > FGMRES_MAX_RECYCLE .or. &
+                fgmres_recycle_requested >= FGMRES_RESTART) then
+                if (STD_OUT_PE) write(output_unit,'(A,A)') &
+                    ' Invalid HICAR_WIND_RECYCLE_DIM: ', trim(recycle_env)
                 error stop
             endif
         endif
@@ -1238,12 +1261,23 @@ contains
         integer, intent(out) :: status_out, n_iters_out
         real(c_double), intent(out) :: res0_out, res_final_out
         real(c_double), allocatable :: v_basis(:,:,:,:), z_basis(:,:,:,:)
+        real(c_double), allocatable :: recycle_u(:,:,:,:), recycle_c(:,:,:,:)
         real(c_double) :: h(FGMRES_RESTART+1,FGMRES_RESTART), h_local(FGMRES_RESTART+1)
         real(c_double) :: h_raw(FGMRES_RESTART+1,FGMRES_RESTART)
         real(c_double) :: cs(FGMRES_RESTART), sn(FGMRES_RESTART), g(FGMRES_RESTART+1)
         real(c_double) :: ycoef(FGMRES_RESTART), dots_local(FGMRES_RESTART)
-        real(c_double) :: beta, bnorm2, target_norm, tmp, denom
-        integer :: ierr, cycle, j, i, used, total
+        real(c_double) :: recycle_b(FGMRES_MAX_RECYCLE,FGMRES_RESTART)
+        real(c_double) :: recycle_dot_local(FGMRES_MAX_RECYCLE)
+        real(c_double) :: recycle_dot(FGMRES_MAX_RECYCLE)
+        real(c_double) :: recycle_gamma(FGMRES_MAX_RECYCLE)
+        real(c_double) :: recycle_eta(FGMRES_MAX_RECYCLE)
+        real(c_double) :: gram(FGMRES_RESTART,FGMRES_RESTART)
+        real(c_double) :: eigenvectors(FGMRES_RESTART,FGMRES_RESTART)
+        real(c_double) :: eigenvalues(FGMRES_RESTART), singular_values(FGMRES_MAX_RECYCLE)
+        real(c_double) :: beta, bnorm2, target_norm, tmp, denom, coefficient, recycle_norm2
+        integer :: ierr, cycle, j, i, used, total, p, q, l, eig_index
+        integer :: recycle_dim, eigen_order(FGMRES_RESTART), order_tmp
+        logical :: recycle_ready
 
         status_out = 1; n_iters_out = 0; res0_out = 0.0_c_double; res_final_out = 0.0_c_double
         t_total_acc = 0.0_c_double
@@ -1258,8 +1292,10 @@ contains
         target_norm = max(bicg_tol_abs, bicg_tol_rel * sqrt(max(bnorm2, 0.0_c_double)))
         res0_out = beta; res_final_out = beta
         if (STD_OUT_PE .and. verbose_solver) then
-            write(output_unit,'(A,ES12.4,A,ES12.4,A,I0,A)') ' HICAR native FGMRES+line start: residual=', beta, &
-                ' target=', target_norm, ' restart=', FGMRES_RESTART, '.'
+            write(output_unit,'(A,ES12.4,A,ES12.4,A,I0,A,I0,A)') &
+                ' HICAR native FGMRES+line start: residual=', beta, &
+                ' target=', target_norm, ' restart=', FGMRES_RESTART, &
+                ' recycle=', fgmres_recycle_requested, '.'
             flush(output_unit)
         endif
         if (beta <= target_norm) then; status_out = 0; return; endif
@@ -1268,17 +1304,69 @@ contains
         allocate(z_basis(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1,FGMRES_RESTART))
         v_basis = 0.0_c_double; z_basis = 0.0_c_double
         !$acc enter data copyin(v_basis, z_basis)
+        recycle_dim = 0
+        recycle_ready = .false.
+        if (fgmres_recycle_requested > 0) then
+            allocate(recycle_u(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1,fgmres_recycle_requested))
+            allocate(recycle_c(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1,fgmres_recycle_requested))
+            recycle_u = 0.0_c_double; recycle_c = 0.0_c_double
+            !$acc enter data copyin(recycle_u, recycle_c)
+        endif
         total = 0
         do cycle = 1, max(1, (max_iters + FGMRES_RESTART - 1) / FGMRES_RESTART)
             if (total >= max_iters) exit
+
+            ! Minimise over the retained space before starting the new Krylov
+            ! cycle.  C is orthonormal and A*U=C, so x <- x+U*C^T*r and
+            ! r <- (I-C*C^T)r is an exact residual projection.
+            if (recycle_ready) then
+                recycle_gamma = 0.0_c_double
+                do q = 1, 2
+                    recycle_dot_local = 0.0_c_double
+                    do p = 1, recycle_dim
+                        call vec_dot_local(recycle_c(:,:,:,p), r_vec, recycle_dot_local(p))
+                    enddo
+                    call MPI_Allreduce(recycle_dot_local, recycle_dot, recycle_dim, &
+                                       MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+                    do p = 1, recycle_dim
+                        recycle_gamma(p) = recycle_gamma(p) + recycle_dot(p)
+                        call vec_axpy(x_sol, recycle_dot(p), recycle_u(:,:,:,p))
+                        call vec_axpy(r_vec, -recycle_dot(p), recycle_c(:,:,:,p))
+                    enddo
+                enddo
+                call vec_norm2_local(r_vec, beta)
+                call MPI_Allreduce(MPI_IN_PLACE, beta, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+                beta = sqrt(max(beta, 0.0_c_double)); res_final_out = beta
+                if (beta <= target_norm) then; status_out = 0; exit; endif
+            endif
+
             call vec_axpby_into(v_basis(:,:,:,1), 1.0_c_double/beta, r_vec, 0.0_c_double, r_vec)
             h = 0.0_c_double; h_raw = 0.0_c_double
+            recycle_b = 0.0_c_double
             cs = 0.0_c_double; sn = 0.0_c_double; g = 0.0_c_double; g(1) = beta
             used = min(FGMRES_RESTART, max_iters-total)
             do j = 1, used
                 call apply_precond(v_basis(:,:,:,j), z_basis(:,:,:,j), domain)
                 call exchange_krylov_halos(z_basis(:,:,:,j), domain)
                 call spmv(z_basis(:,:,:,j), t_vec)
+
+                ! Deflated Arnoldi: remove the C component of A*z.  Its
+                ! coefficients are retained because the final correction is
+                ! Z*y-U*(B*y), which restores the action of the unprojected A.
+                if (recycle_ready) then
+                    do q = 1, 2
+                        recycle_dot_local = 0.0_c_double
+                        do p = 1, recycle_dim
+                            call vec_dot_local(recycle_c(:,:,:,p), t_vec, recycle_dot_local(p))
+                        enddo
+                        call MPI_Allreduce(recycle_dot_local, recycle_dot, recycle_dim, &
+                                           MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+                        do p = 1, recycle_dim
+                            recycle_b(p,j) = recycle_b(p,j) + recycle_dot(p)
+                            call vec_axpy(t_vec, -recycle_dot(p), recycle_c(:,:,:,p))
+                        enddo
+                    enddo
+                endif
                 dots_local = 0.0_c_double
                 do i = 1, j
                     call vec_dot_local(v_basis(:,:,:,i), t_vec, dots_local(i))
@@ -1346,6 +1434,85 @@ contains
                 ! the restart correction on the 250 m run.
                 call vec_axpy(x_sol, ycoef(i), z_basis(:,:,:,i))
             enddo
+            if (recycle_ready) then
+                recycle_eta = 0.0_c_double
+                do p = 1, recycle_dim
+                    do j = 1, used
+                        recycle_eta(p) = recycle_eta(p) - recycle_b(p,j) * ycoef(j)
+                    enddo
+                    call vec_axpy(x_sol, recycle_eta(p), recycle_u(:,:,:,p))
+                enddo
+            endif
+
+            ! Freeze a bounded deflation space from the first Arnoldi cycle.
+            ! The right singular vectors of Hbar with smallest singular values
+            ! approximate the slowly reduced right directions of A*M^{-1}.
+            ! U=Z*Y and C=V*Hbar*Y/sigma preserve A*U=C; C is explicitly
+            ! reorthogonalised and U receives the identical transformations.
+            if (.not. recycle_ready .and. fgmres_recycle_requested > 0 .and. &
+                used > fgmres_recycle_requested) then
+                gram = 0.0_c_double
+                do j = 1, used
+                    do i = 1, used
+                        do l = 1, used+1
+                            gram(i,j) = gram(i,j) + h_raw(l,i) * h_raw(l,j)
+                        enddo
+                    enddo
+                enddo
+                call small_symmetric_eigensystem(gram, used, eigenvalues, eigenvectors)
+                do i = 1, used
+                    eigen_order(i) = i
+                enddo
+                do i = 1, used-1
+                    eig_index = i
+                    do j = i+1, used
+                        if (eigenvalues(eigen_order(j)) < eigenvalues(eigen_order(eig_index))) eig_index = j
+                    enddo
+                    order_tmp = eigen_order(i)
+                    eigen_order(i) = eigen_order(eig_index)
+                    eigen_order(eig_index) = order_tmp
+                enddo
+                recycle_dim = min(fgmres_recycle_requested, used-1)
+                do q = 1, recycle_dim
+                    eig_index = eigen_order(q)
+                    singular_values(q) = sqrt(max(eigenvalues(eig_index), breakdown_eps))
+                    call vec_zero(recycle_u(:,:,:,q))
+                    call vec_zero(recycle_c(:,:,:,q))
+                    do i = 1, used
+                        call vec_axpy(recycle_u(:,:,:,q), eigenvectors(i,eig_index), z_basis(:,:,:,i))
+                    enddo
+                    do l = 1, used+1
+                        coefficient = 0.0_c_double
+                        do i = 1, used
+                            coefficient = coefficient + h_raw(l,i) * eigenvectors(i,eig_index)
+                        enddo
+                        coefficient = coefficient / singular_values(q)
+                        call vec_axpy(recycle_c(:,:,:,q), coefficient, v_basis(:,:,:,l))
+                    enddo
+                    do p = 1, q-1
+                        do l = 1, 2
+                            call vec_dot_local(recycle_c(:,:,:,p), recycle_c(:,:,:,q), recycle_norm2)
+                            call MPI_Allreduce(MPI_IN_PLACE, recycle_norm2, 1, MPI_DOUBLE_PRECISION, &
+                                               MPI_SUM, solver_comm, ierr)
+                            call vec_axpy(recycle_c(:,:,:,q), -recycle_norm2, recycle_c(:,:,:,p))
+                            call vec_axpy(recycle_u(:,:,:,q), -recycle_norm2, recycle_u(:,:,:,p))
+                        enddo
+                    enddo
+                    call vec_norm2_local(recycle_c(:,:,:,q), recycle_norm2)
+                    call MPI_Allreduce(MPI_IN_PLACE, recycle_norm2, 1, MPI_DOUBLE_PRECISION, &
+                                       MPI_SUM, solver_comm, ierr)
+                    recycle_norm2 = sqrt(max(recycle_norm2, breakdown_eps))
+                    call vec_scale(recycle_c(:,:,:,q), 1.0_c_double/recycle_norm2)
+                    call vec_scale(recycle_u(:,:,:,q), 1.0_c_double/recycle_norm2)
+                enddo
+                recycle_ready = .true.
+                if (STD_OUT_PE .and. verbose_solver) then
+                    write(output_unit,'(A,I0,A,8(1X,ES10.3))') &
+                        ' HICAR FGMRES recycle space ready: dimension=', recycle_dim, &
+                        ' singular_values=', singular_values(1:recycle_dim)
+                    flush(output_unit)
+                endif
+            endif
             call exchange_krylov_halos(x_sol, domain)
             call spmv(x_sol, t_vec)
             call vec_axpby_into(r_vec, 1.0_c_double, rhs, -1.0_c_double, t_vec)
@@ -1357,7 +1524,77 @@ contains
         enddo
         !$acc exit data delete(v_basis, z_basis)
         deallocate(v_basis, z_basis)
+        if (allocated(recycle_u)) then
+            !$acc exit data delete(recycle_u, recycle_c)
+            deallocate(recycle_u, recycle_c)
+        endif
     end subroutine fgmres_line_solve
+
+
+    !> Jacobi eigensolver for the tiny symmetric Hbar^T*Hbar matrix used by
+    !! the opt-in recycle-space construction.  Every rank has the same
+    !! allreduced Hessenberg matrix, so this requires no communication and no
+    !! external dense-linear-algebra dependency.
+    subroutine small_symmetric_eigensystem(matrix_in, n, eigenvalues, eigenvectors)
+        implicit none
+        real(c_double), intent(in) :: matrix_in(FGMRES_RESTART,FGMRES_RESTART)
+        integer, intent(in) :: n
+        real(c_double), intent(out) :: eigenvalues(FGMRES_RESTART)
+        real(c_double), intent(out) :: eigenvectors(FGMRES_RESTART,FGMRES_RESTART)
+        real(c_double) :: matrix(FGMRES_RESTART,FGMRES_RESTART)
+        real(c_double) :: app, aqq, apq, akp, akq, vkp, vkq
+        real(c_double) :: tau, tangent, cosine, sine, offdiag_max, matrix_scale
+        integer :: i, p, q, sweep
+
+        matrix = 0.0_c_double
+        matrix(1:n,1:n) = matrix_in(1:n,1:n)
+        eigenvectors = 0.0_c_double
+        do i = 1, n
+            eigenvectors(i,i) = 1.0_c_double
+        enddo
+        matrix_scale = max(1.0_c_double, maxval(abs(matrix(1:n,1:n))))
+
+        do sweep = 1, 100
+            offdiag_max = 0.0_c_double
+            do p = 1, n-1
+                do q = p+1, n
+                    offdiag_max = max(offdiag_max, abs(matrix(p,q)))
+                    apq = matrix(p,q)
+                    if (abs(apq) <= 1.0e-15_c_double * matrix_scale) cycle
+                    app = matrix(p,p); aqq = matrix(q,q)
+                    tau = (aqq-app) / (2.0_c_double*apq)
+                    if (tau >= 0.0_c_double) then
+                        tangent = 1.0_c_double / (tau + sqrt(1.0_c_double+tau*tau))
+                    else
+                        tangent = -1.0_c_double / (-tau + sqrt(1.0_c_double+tau*tau))
+                    endif
+                    cosine = 1.0_c_double / sqrt(1.0_c_double+tangent*tangent)
+                    sine = tangent*cosine
+                    do i = 1, n
+                        if (i == p .or. i == q) cycle
+                        akp = matrix(i,p); akq = matrix(i,q)
+                        matrix(i,p) = cosine*akp - sine*akq
+                        matrix(p,i) = matrix(i,p)
+                        matrix(i,q) = sine*akp + cosine*akq
+                        matrix(q,i) = matrix(i,q)
+                    enddo
+                    matrix(p,p) = app - tangent*apq
+                    matrix(q,q) = aqq + tangent*apq
+                    matrix(p,q) = 0.0_c_double; matrix(q,p) = 0.0_c_double
+                    do i = 1, n
+                        vkp = eigenvectors(i,p); vkq = eigenvectors(i,q)
+                        eigenvectors(i,p) = cosine*vkp - sine*vkq
+                        eigenvectors(i,q) = sine*vkp + cosine*vkq
+                    enddo
+                enddo
+            enddo
+            if (offdiag_max <= 1.0e-13_c_double * matrix_scale) exit
+        enddo
+        eigenvalues = 0.0_c_double
+        do i = 1, n
+            eigenvalues(i) = max(matrix(i,i), 0.0_c_double)
+        enddo
+    end subroutine small_symmetric_eigensystem
 
     subroutine spmv(x, y)
         implicit none
@@ -3194,6 +3431,23 @@ contains
             enddo
         enddo
     end subroutine vec_axpy
+
+    !> x = a*x.  Kept separate from vec_axpby_into because passing the same
+    !! actual array through both INTENT(INOUT) and INTENT(IN) aliases is not
+    !! valid Fortran and has previously been miscompiled on the GPU path.
+    subroutine vec_scale(x, a)
+        real(c_double), dimension(i_s-1:i_e+1, k_s-1:k_e+1, j_s-1:j_e+1), intent(inout) :: x
+        real(c_double), intent(in) :: a
+        integer :: i, j, k
+        !$acc parallel loop gang vector collapse(3) present(x)
+        do j = ys, ys + ym - 1
+            do k = zs, zs + zm - 1
+                do i = xs, xs + xm - 1
+                    x(i,k,j) = a * x(i,k,j)
+                enddo
+            enddo
+        enddo
+    end subroutine vec_scale
 
     !> y = y + a*x + b*z  (fused 3-term update — used for the x_sol += alpha*p_hat + omega*s_hat
     !> step in BiCGStab, replaces two sequential vec_axpy calls and saves one full pass through y).
