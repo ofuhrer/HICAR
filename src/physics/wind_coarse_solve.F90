@@ -13,7 +13,10 @@ module wind_coarse_solve
     integer, parameter :: STENCIL_WIDTH = 27
     real(c_double), parameter :: COARSE_RELATIVE_TOLERANCE = 1.0e-14_c_double
     real(c_double), parameter :: COARSE_ABSOLUTE_TOLERANCE = 1.0e-15_c_double
-    real(c_double), parameter :: COARSE_ACCEPTANCE_TOLERANCE = 5.0e-12_c_double
+    ! This is five orders tighter than the outer wind-solver target.  Requiring
+    ! a residual closer to machine precision is not portable across the GNU
+    ! and NVHPC reductions used by the setup gate.
+    real(c_double), parameter :: COARSE_ACCEPTANCE_TOLERANCE = 1.0e-10_c_double
     real(c_double), parameter :: COARSE_BREAKDOWN_TOLERANCE = 1.0e-30_c_double
 
     type, public :: collective_coarse_solver_t

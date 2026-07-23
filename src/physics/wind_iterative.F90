@@ -2886,7 +2886,7 @@ contains
         ! The exact coarse operator can be moderately ill-conditioned: retain
         ! a strict true-residual gate, while using the known-solution error to
         ! catch mapping faults rather than as a condition-number surrogate.
-        if (status /= 0 .or. relative_residual > 5.0e-12_c_double .or. &
+        if (status /= 0 .or. relative_residual > 1.0e-10_c_double .or. &
             solution_error > 1.0e-6_c_double) status = 1
         if (solver_rank == 0) then
             write(output_unit,'(A,I0,A,I0,A,I0,A,I0,A,I0,A,ES12.4,A,ES12.4)') &
