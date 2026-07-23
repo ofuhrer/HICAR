@@ -101,6 +101,10 @@ module wind_iterative
     integer, parameter :: BASE_PREC_SWEEPS = 2
     integer, parameter :: MAX_PREC_SWEEPS  = 4
     integer :: precond_n_sweeps = BASE_PREC_SWEEPS
+    ! A V-cycle requires a genuine terminal coarse solve.  Four line sweeps
+    ! remain the production default; the environment override supports a
+    ! bounded diagnostic before introducing rank agglomeration/direct solve.
+    integer :: coarsest_line_sweeps = 4
 
     ! Per-solve status/residual/timing printing. Off by default under
     ! RANS (one solve per physics step makes it far too verbose); on in
@@ -358,7 +362,7 @@ contains
         integer :: target_nest
         integer :: my_rank_in_comm
         integer :: env_status, env_length
-        character(len=32) :: audit_env, audit_max_iters_env, multilevel_env
+        character(len=32) :: audit_env, audit_max_iters_env, multilevel_env, coarse_sweeps_env
         character(len=512) :: audit_file_env
         integer :: audit_read_status
 #ifdef USE_NCCL
@@ -450,6 +454,19 @@ contains
                                       length=env_length, status=env_status)
         multilevel_requested = env_status == 0 .and. env_length > 0 .and. &
                                trim(adjustl(multilevel_env)) /= '0'
+        coarsest_line_sweeps = 4
+        coarse_sweeps_env = ''
+        call get_environment_variable('HICAR_WIND_COARSEST_SWEEPS', coarse_sweeps_env, &
+                                      length=env_length, status=env_status)
+        if (env_status == 0 .and. env_length > 0) then
+            read(coarse_sweeps_env(:min(env_length, len(coarse_sweeps_env))), *, &
+                 iostat=audit_read_status) coarsest_line_sweeps
+            if (audit_read_status /= 0 .or. coarsest_line_sweeps < 1) then
+                if (STD_OUT_PE) write(output_unit,'(A,A)') &
+                    ' Invalid HICAR_WIND_COARSEST_SWEEPS: ', trim(coarse_sweeps_env)
+                error stop
+            endif
+        endif
         multilevel_setup_attempted = .false.
         multilevel_ready = .false.
 
@@ -2403,6 +2420,7 @@ contains
             flush(output_unit)
             write(output_unit,'(A,I0)') ' HICAR exact Galerkin hierarchy ready: total coarse levels=', &
                 1+ml_deep_count
+            write(output_unit,'(A,I0)') ' HICAR terminal coarse line sweeps=', coarsest_line_sweeps
             flush(output_unit)
         endif
 
@@ -2907,7 +2925,7 @@ contains
             call ml_line_factor%apply_device(ml_coarse_r, ml_coarse_correction)
             call owned_axpy_device(ml_coarse_x, ml_coarse_correction, omega)
         else
-            do sweep = 2, 4
+            do sweep = 2, coarsest_line_sweeps
                 call compute_level_one_residual()
                 call ml_line_factor%apply_device(ml_coarse_r, ml_coarse_correction)
                 call owned_axpy_device(ml_coarse_x, ml_coarse_correction, omega)
@@ -2940,7 +2958,7 @@ contains
             call ml_deep(q)%line_factor%apply_device(ml_deep(q)%r, ml_deep(q)%correction)
             call owned_axpy_device(ml_deep(q)%x, ml_deep(q)%correction, omega)
         else
-            do sweep = 2, 4
+            do sweep = 2, coarsest_line_sweeps
                 call compute_recursive_level_residual(q)
                 call ml_deep(q)%line_factor%apply_device(ml_deep(q)%r, ml_deep(q)%correction)
                 call owned_axpy_device(ml_deep(q)%x, ml_deep(q)%correction, omega)
