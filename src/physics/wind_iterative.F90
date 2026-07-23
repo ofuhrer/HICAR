@@ -2323,6 +2323,20 @@ contains
         !$acc update device(ml_coarse_halo_x)
         call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
         !$acc update self(ml_coarse_halo_x)
+        mismatch_search: do j = 0, ml_transfer%ny_c_local+1
+            do k = 1, mz
+                do i = 0, ml_transfer%nx_c_local+1
+                    if (ml_coarse_halo_x(i,k,j) /= host_halo_reference(i,k,j)) then
+                        write(output_unit,'(A,I0,A,3(I0,1X),A,ES14.6,A,ES14.6)') &
+                            ' HICAR coarse device halo mismatch rank=', solver_rank, &
+                            ' local[i k j]=', i, k, j, ' actual=', ml_coarse_halo_x(i,k,j), &
+                            ' expected=', host_halo_reference(i,k,j)
+                        flush(output_unit)
+                        exit mismatch_search
+                    endif
+                enddo
+            enddo
+        enddo mismatch_search
         local_error = sum((ml_coarse_halo_x-host_halo_reference)**2)
         local_reference = sum(host_halo_reference**2)
         call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
