@@ -18,6 +18,7 @@
 module test_wind_iterative
 
     use, intrinsic :: iso_c_binding, only : c_double
+    use, intrinsic :: iso_fortran_env, only : output_unit
     use mpi
     use icar_constants
     use testdrive,          only : new_unittest, unittest_type, error_type, test_failed
@@ -802,12 +803,12 @@ contains
 
     subroutine test_multilevel_halo(error)
         type(error_type), allocatable, intent(out) :: error
-        integer, parameter :: nx_global = 8, ny_global = 8, nz = 3
-        integer, parameter :: nx_local = 4, ny_local = 4
+        integer, parameter :: nx_global = 84, ny_global = 73, nz = 3
+        integer, parameter :: nx_local = 42
         type(horizontal_halo_exchange_t) :: halo
         real(c_double), allocatable :: field(:,:,:)
         real(c_double) :: expected
-        integer :: rank, nprocs, ierr, rx, ry, west, east, south, north
+        integer :: rank, nprocs, ierr, rx, ry, west, east, south, north, ny_local, y_offset
         integer :: i, j, k, gi, gj
 
         call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
@@ -816,6 +817,8 @@ contains
 
         rx = modulo(rank,2)
         ry = rank/2
+        ny_local = merge(36, 37, ry == 0)
+        y_offset = merge(0, 36, ry == 0)
         west = merge(rank-1, MPI_PROC_NULL, rx > 0)
         east = merge(rank+1, MPI_PROC_NULL, rx < 1)
         south = merge(rank-2, MPI_PROC_NULL, ry > 0)
@@ -824,7 +827,7 @@ contains
         allocate(field(0:nx_local+1,nz,0:ny_local+1))
         field = 0.0_c_double
         do j = 1, ny_local
-            gj = ry*ny_local+j-1
+            gj = y_offset+j-1
             do k = 1, nz
                 do i = 1, nx_local
                     gi = rx*nx_local+i-1
@@ -839,13 +842,17 @@ contains
                 do i = 0, nx_local+1
                     if (i >= 1 .and. i <= nx_local .and. j >= 1 .and. j <= ny_local) cycle
                     gi = rx*nx_local+i-1
-                    gj = ry*ny_local+j-1
+                    gj = y_offset+j-1
                     if (gi < 0 .or. gi >= nx_global .or. gj < 0 .or. gj >= ny_global) then
                         expected = 0.0_c_double
                     else
                         expected = real(1000*k+100*gj+gi,c_double)
                     endif
                     if (field(i,k,j) /= expected) then
+                        write(output_unit,'(A,I0,A,3(I0,1X),A,ES14.6,A,ES14.6)') &
+                            ' HICAR host halo mismatch rank=', rank, ' local[i k j]=', i, k, j, &
+                            ' actual=', field(i,k,j), ' expected=', expected
+                        flush(output_unit)
                         call test_failed(error, 'test_multilevel_halo', 'two-stage halo or corner value is incorrect')
                         call halo%release()
                         return
@@ -856,7 +863,7 @@ contains
 #ifdef _OPENACC
         field = 0.0_c_double
         do j = 1, ny_local
-            gj = ry*ny_local+j-1
+            gj = y_offset+j-1
             do k = 1, nz
                 do i = 1, nx_local
                     gi = rx*nx_local+i-1
@@ -874,13 +881,17 @@ contains
                 do i = 0, nx_local+1
                     if (i >= 1 .and. i <= nx_local .and. j >= 1 .and. j <= ny_local) cycle
                     gi = rx*nx_local+i-1
-                    gj = ry*ny_local+j-1
+                    gj = y_offset+j-1
                     if (gi < 0 .or. gi >= nx_global .or. gj < 0 .or. gj >= ny_global) then
                         expected = 0.0_c_double
                     else
                         expected = real(1000*k+100*gj+gi,c_double)
                     endif
                     if (field(i,k,j) /= expected) then
+                        write(output_unit,'(A,I0,A,3(I0,1X),A,ES14.6,A,ES14.6)') &
+                            ' HICAR device halo mismatch rank=', rank, ' local[i k j]=', i, k, j, &
+                            ' actual=', field(i,k,j), ' expected=', expected
+                        flush(output_unit)
                         call test_failed(error, 'test_multilevel_halo', 'device halo or corner value is incorrect')
                         call halo%release()
                         return
