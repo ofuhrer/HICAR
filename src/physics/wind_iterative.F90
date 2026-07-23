@@ -179,6 +179,23 @@ module wind_iterative
     integer :: solver_rank = -1
     integer :: east_neighbor = -1, west_neighbor = -1, north_neighbor = -1, south_neighbor = -1
 
+    type :: multilevel_deep_level_t
+        type(horizontal_tile_transfer_t) :: transfer_from_parent
+        type(galerkin_tile_stencil_t) :: stencil
+        type(vertical_line_factor_t) :: line_factor
+        type(horizontal_halo_exchange_t) :: halo
+        logical :: arrays_uploaded = .false.
+        real(c_double), allocatable :: weight(:,:,:), weight_halo(:,:,:)
+        real(c_double), allocatable :: halo_x(:,:,:)
+        real(c_double), allocatable :: b(:,:,:), x(:,:,:), ax(:,:,:)
+        real(c_double), allocatable :: r(:,:,:), correction(:,:,:)
+    end type multilevel_deep_level_t
+
+    integer, parameter :: MAX_ML_DEEP_LEVELS = 12
+    integer :: ml_deep_count = 0
+    integer :: ml_assembly_child = 0
+    type(multilevel_deep_level_t), allocatable :: ml_deep(:)
+
     ! Feature-gated, distributed Petrov-Galerkin V-cycle.  These arrays use
     ! uniform local indexing rather than aliasing the solver vectors, whose
     ! physical-edge bounds differ by rank.  The separation is deliberate:
@@ -190,7 +207,8 @@ module wind_iterative
     real(c_double), allocatable :: ml_fine_owned(:,:,:)
     real(c_double), allocatable :: ml_fine_residual(:,:,:), ml_fine_weight(:,:,:)
     real(c_double), allocatable :: ml_coarse_halo_x(:,:,:)
-    real(c_double), allocatable :: ml_coarse_weight(:,:,:), ml_coarse_b(:,:,:)
+    real(c_double), allocatable :: ml_coarse_weight(:,:,:), ml_coarse_weight_halo(:,:,:)
+    real(c_double), allocatable :: ml_coarse_b(:,:,:)
     real(c_double), allocatable :: ml_coarse_x(:,:,:), ml_coarse_ax(:,:,:)
     real(c_double), allocatable :: ml_coarse_r(:,:,:), ml_coarse_correction(:,:,:)
 
@@ -281,7 +299,8 @@ contains
 
     logical function multilevel_preconditioner_smoke(domain)
         type(domain_t), intent(in) :: domain
-        real(c_double) :: local_norm, global_norm
+        real(c_double) :: local_norm, global_norm, local_rhs_norm, global_rhs_norm
+        real(c_double) :: local_residual_norm, global_residual_norm
         integer :: i, j, k, ierr
 
         multilevel_preconditioner_smoke = .false.
@@ -305,7 +324,23 @@ contains
         call apply_multilevel_preconditioner(rhs, x_sol, domain)
         call vec_norm2_local(x_sol, local_norm)
         call MPI_Allreduce(local_norm, global_norm, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
-        multilevel_preconditioner_smoke = global_norm > 0.0_c_double .and. global_norm < huge(global_norm)
+        call exchange_krylov_halos(x_sol, domain)
+        call spmv(x_sol, t_vec)
+        !$acc parallel loop gang vector collapse(3) present(rhs,t_vec,prec_res)
+        do j = ys, ys+ym-1
+            do k = zs, zs+zm-1
+                do i = xs, xs+xm-1
+                    prec_res(i,k,j) = rhs(i,k,j)-t_vec(i,k,j)
+                enddo
+            enddo
+        enddo
+        call vec_norm2_local(rhs, local_rhs_norm)
+        call vec_norm2_local(prec_res, local_residual_norm)
+        call MPI_Allreduce(local_rhs_norm, global_rhs_norm, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(local_residual_norm, global_residual_norm, 1, MPI_DOUBLE_PRECISION, MPI_SUM, &
+                           solver_comm, ierr)
+        multilevel_preconditioner_smoke = global_norm > 0.0_c_double .and. &
+            global_norm < huge(global_norm) .and. global_residual_norm < global_rhs_norm
     end function multilevel_preconditioner_smoke
 
     !>------------------------------------------------------------
@@ -2189,7 +2224,7 @@ contains
         real(c_double), allocatable :: host_halo_reference(:,:,:)
         real(c_double) :: local_error, global_error, local_reference, global_reference
         real(c_double) :: relative_error, host_relative_error, halo_relative_error, minimum_pivot
-        integer :: i, j, k, gi, gj, gk, ierr, line_status
+        integer :: i, j, k, gi, gj, gk, ierr, line_status, deep_status
         integer :: west, east, south, north
 
         call release_multilevel_preconditioner()
@@ -2215,6 +2250,7 @@ contains
                  ml_fine_residual(0:xm+1,mz,0:ym+1), &
                  ml_fine_weight(0:xm+1,mz,0:ym+1), &
                  ml_coarse_halo_x(0:ml_transfer%nx_c_local+1,mz,0:ml_transfer%ny_c_local+1), &
+                 ml_coarse_weight_halo(0:ml_transfer%nx_c_local+1,mz,0:ml_transfer%ny_c_local+1), &
                  ml_coarse_weight(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local), &
                  ml_coarse_b(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local), &
                  ml_coarse_x(ml_transfer%nx_c_local,mz,ml_transfer%ny_c_local), &
@@ -2242,6 +2278,7 @@ contains
         enddo
         call ml_fine_halo%exchange(ml_fine_weight)
         ml_coarse_halo_x = 0.0_c_double
+        ml_coarse_weight_halo = 0.0_c_double
         ml_coarse_weight = 0.0_c_double
         ml_coarse_b = 0.0_c_double
         ml_coarse_x = 0.0_c_double
@@ -2251,13 +2288,18 @@ contains
 
         !$acc enter data copyin(ml_fine_weight) &
         !$acc            create(ml_fine_owned, ml_fine_residual, &
-        !$acc                   ml_coarse_halo_x, ml_coarse_weight, ml_coarse_b, ml_coarse_x, &
+        !$acc                   ml_coarse_halo_x, ml_coarse_weight_halo, ml_coarse_weight, &
+        !$acc                   ml_coarse_b, ml_coarse_x, &
         !$acc                   ml_coarse_ax, ml_coarse_r, ml_coarse_correction)
         multilevel_arrays_uploaded = .true.
         call ml_transfer%upload_device()
         call ml_coarse_halo%upload_device()
         call ml_transfer%build_owned_coarse_weights_device(ml_fine_weight, ml_coarse_weight)
         !$acc update self(ml_coarse_weight)
+        ml_coarse_weight_halo = 0.0_c_double
+        ml_coarse_weight_halo(1:ml_transfer%nx_c_local,:,1:ml_transfer%ny_c_local) = ml_coarse_weight
+        call ml_coarse_halo%exchange(ml_coarse_weight_halo)
+        !$acc update device(ml_coarse_weight_halo)
 
         if (solver_rank == 0) then
             write(output_unit,'(A,I0,A,I0,A)') ' HICAR multilevel assembling exact ', &
@@ -2336,11 +2378,21 @@ contains
             return
         endif
 
+        call setup_recursive_multilevel_levels(deep_status)
+        if (deep_status /= 0) then
+            call release_multilevel_preconditioner()
+            multilevel_setup_attempted = .true.
+            return
+        endif
+
         multilevel_ready = .true.
         if (solver_rank == 0) then
             write(output_unit,'(A,I0,A,I0,A,ES12.4,A,ES12.4)') &
                 ' HICAR Petrov-Galerkin level ready: global coarse=', ml_transfer%nx_c_global, 'x', &
                 ml_transfer%ny_c_global, ' RAP_error=', relative_error, ' min_line_pivot=', minimum_pivot
+            flush(output_unit)
+            write(output_unit,'(A,I0)') ' HICAR exact Galerkin hierarchy ready: total coarse levels=', &
+                1+ml_deep_count
             flush(output_unit)
         endif
 
@@ -2394,12 +2446,273 @@ contains
     end subroutine setup_multilevel_preconditioner
 
 
+    subroutine setup_recursive_multilevel_levels(status)
+        implicit none
+        integer, intent(out) :: status
+        integer :: q, ierr, local_min, global_min, line_status
+        integer :: parent_nx_global, parent_ny_global, parent_x_first, parent_y_first
+        integer :: parent_nx_local, parent_ny_local
+        integer :: west, east, south, north
+        real(c_double) :: minimum_pivot
+
+        status = 0
+        ml_deep_count = 0
+        ml_assembly_child = 0
+        if (allocated(ml_deep)) call release_recursive_multilevel_levels()
+        allocate(ml_deep(MAX_ML_DEEP_LEVELS))
+
+        do q = 1, MAX_ML_DEEP_LEVELS
+            if (q == 1) then
+                parent_nx_global = ml_transfer%nx_c_global
+                parent_ny_global = ml_transfer%ny_c_global
+                parent_x_first = ml_transfer%x_c_first
+                parent_y_first = ml_transfer%y_c_first
+                parent_nx_local = ml_transfer%nx_c_local
+                parent_ny_local = ml_transfer%ny_c_local
+            else
+                parent_nx_global = ml_deep(q-1)%stencil%nx_global
+                parent_ny_global = ml_deep(q-1)%stencil%ny_global
+                parent_x_first = ml_deep(q-1)%stencil%x_first
+                parent_y_first = ml_deep(q-1)%stencil%y_first
+                parent_nx_local = ml_deep(q-1)%stencil%nx
+                parent_ny_local = ml_deep(q-1)%stencil%ny
+            endif
+
+            ! Retain every rank until agglomeration is introduced.  Stop at
+            ! the last grid for which the existing decomposition is nonempty.
+            if (parent_nx_global <= 3 .or. parent_ny_global <= 3) exit
+            call ml_deep(q)%transfer_from_parent%init(parent_nx_global, parent_ny_global, &
+                parent_x_first, parent_nx_local, parent_y_first, parent_ny_local, &
+                fix_lateral_boundaries=.true., fix_vertical_boundaries=.true.)
+            local_min = min(ml_deep(q)%transfer_from_parent%nx_c_local, &
+                            ml_deep(q)%transfer_from_parent%ny_c_local)
+            call MPI_Allreduce(local_min, global_min, 1, MPI_INTEGER, MPI_MIN, solver_comm, ierr)
+            if (global_min < 1) then
+                call ml_deep(q)%transfer_from_parent%release()
+                exit
+            endif
+
+            west = merge(west_neighbor, MPI_PROC_NULL, &
+                ml_deep(q)%transfer_from_parent%x_c_first > 0)
+            east = merge(east_neighbor, MPI_PROC_NULL, &
+                ml_deep(q)%transfer_from_parent%x_c_first + &
+                ml_deep(q)%transfer_from_parent%nx_c_local < &
+                ml_deep(q)%transfer_from_parent%nx_c_global)
+            south = merge(south_neighbor, MPI_PROC_NULL, &
+                ml_deep(q)%transfer_from_parent%y_c_first > 0)
+            north = merge(north_neighbor, MPI_PROC_NULL, &
+                ml_deep(q)%transfer_from_parent%y_c_first + &
+                ml_deep(q)%transfer_from_parent%ny_c_local < &
+                ml_deep(q)%transfer_from_parent%ny_c_global)
+            call ml_deep(q)%halo%init(ml_deep(q)%transfer_from_parent%nx_c_local, &
+                ml_deep(q)%transfer_from_parent%ny_c_local, mz, solver_comm, west, east, south, north)
+            call allocate_recursive_level_arrays(q)
+            call ml_deep(q)%transfer_from_parent%upload_device()
+            call ml_deep(q)%halo%upload_device()
+
+            if (q == 1) then
+                call ml_deep(q)%transfer_from_parent%build_owned_coarse_weights_device( &
+                    ml_coarse_weight_halo, ml_deep(q)%weight)
+            else
+                call ml_deep(q)%transfer_from_parent%build_owned_coarse_weights_device( &
+                    ml_deep(q-1)%weight_halo, ml_deep(q)%weight)
+            endif
+            call copy_owned_to_halo_device(ml_deep(q)%weight, ml_deep(q)%weight_halo)
+            call ml_deep(q)%halo%exchange_device(ml_deep(q)%weight_halo)
+
+            ml_assembly_child = q
+            if (solver_rank == 0) then
+                write(output_unit,'(A,I0,A,I0,A,I0,A)') ' HICAR multilevel assembling level ', q+1, &
+                    ' exact ', ml_deep(q)%transfer_from_parent%nx_c_global, 'x', &
+                    ml_deep(q)%transfer_from_parent%ny_c_global, ' R A P stencil'
+                flush(output_unit)
+            endif
+            call assemble_colored_tile_galerkin( &
+                ml_deep(q)%transfer_from_parent%nx_c_global, &
+                ml_deep(q)%transfer_from_parent%ny_c_global, &
+                ml_deep(q)%transfer_from_parent%x_c_first, &
+                ml_deep(q)%transfer_from_parent%y_c_first, &
+                ml_deep(q)%transfer_from_parent%nx_c_local, &
+                ml_deep(q)%transfer_from_parent%ny_c_local, mz, .true., .true., &
+                apply_recursive_coarse_rap, ml_deep(q)%stencil)
+            call ml_deep(q)%line_factor%factorize(ml_deep(q)%stencil, line_status, minimum_pivot)
+            if (line_status /= 0) then
+                if (solver_rank == 0) write(output_unit,'(A,I0,A,ES12.4)') &
+                    ' HICAR multilevel rejected: singular line on level ', q+1, &
+                    ', pivot=', minimum_pivot
+                status = 1
+                return
+            endif
+            call ml_deep(q)%stencil%upload_device()
+            call ml_deep(q)%line_factor%upload_device()
+            call verify_recursive_level(q, status)
+            if (status /= 0) return
+            ml_deep_count = q
+            if (solver_rank == 0) then
+                write(output_unit,'(A,I0,A,I0,A,I0,A,ES12.4)') &
+                    ' HICAR exact Galerkin level ', q+1, ' ready: global=', &
+                    ml_deep(q)%stencil%nx_global, 'x', ml_deep(q)%stencil%ny_global, &
+                    ' min_line_pivot=', minimum_pivot
+                flush(output_unit)
+            endif
+            if (ml_deep(q)%stencil%nx_global <= 4 .or. ml_deep(q)%stencil%ny_global <= 4) exit
+        enddo
+        ml_assembly_child = 0
+    end subroutine setup_recursive_multilevel_levels
+
+
+    subroutine allocate_recursive_level_arrays(q)
+        implicit none
+        integer, intent(in) :: q
+        integer :: nx, ny
+
+        nx = ml_deep(q)%transfer_from_parent%nx_c_local
+        ny = ml_deep(q)%transfer_from_parent%ny_c_local
+        allocate(ml_deep(q)%weight(nx,mz,ny), ml_deep(q)%weight_halo(0:nx+1,mz,0:ny+1), &
+                 ml_deep(q)%halo_x(0:nx+1,mz,0:ny+1), ml_deep(q)%b(nx,mz,ny), &
+                 ml_deep(q)%x(nx,mz,ny), ml_deep(q)%ax(nx,mz,ny), ml_deep(q)%r(nx,mz,ny), &
+                 ml_deep(q)%correction(nx,mz,ny))
+        ml_deep(q)%weight = 0.0_c_double
+        ml_deep(q)%weight_halo = 0.0_c_double
+        ml_deep(q)%halo_x = 0.0_c_double
+        ml_deep(q)%b = 0.0_c_double
+        ml_deep(q)%x = 0.0_c_double
+        ml_deep(q)%ax = 0.0_c_double
+        ml_deep(q)%r = 0.0_c_double
+        ml_deep(q)%correction = 0.0_c_double
+        !$acc enter data create(ml_deep(q)%weight, ml_deep(q)%weight_halo, &
+        !$acc                   ml_deep(q)%halo_x, ml_deep(q)%b, ml_deep(q)%x, &
+        !$acc                   ml_deep(q)%ax, ml_deep(q)%r, ml_deep(q)%correction)
+        ml_deep(q)%arrays_uploaded = .true.
+    end subroutine allocate_recursive_level_arrays
+
+
+    subroutine apply_recursive_coarse_rap(coarse, coarse_ax)
+        implicit none
+        real(c_double), intent(in) :: coarse(:,:,:)
+        real(c_double), intent(out) :: coarse_ax(:,:,:)
+        integer :: q
+
+        q = ml_assembly_child
+        if (q < 1 .or. q > size(ml_deep)) error stop 'invalid recursive R A P level'
+        ml_deep(q)%halo_x = 0.0_c_double
+        ml_deep(q)%halo_x(1:size(coarse,1),:,1:size(coarse,3)) = coarse
+        !$acc update device(ml_deep(q)%halo_x)
+        call ml_deep(q)%halo%exchange_device(ml_deep(q)%halo_x)
+        if (q == 1) then
+            call ml_deep(q)%transfer_from_parent%prolong_owned_device(ml_deep(q)%halo_x, ml_coarse_b)
+            call copy_owned_to_halo_device(ml_coarse_b, ml_coarse_halo_x)
+            call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
+            call ml_stencil%apply_owned_device(ml_coarse_halo_x, ml_coarse_ax)
+            call copy_owned_to_halo_device(ml_coarse_ax, ml_coarse_halo_x)
+            call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
+            call ml_deep(q)%transfer_from_parent%restrict_owned_adjoint_device( &
+                ml_coarse_halo_x, ml_coarse_weight_halo, ml_deep(q)%weight, ml_deep(q)%r)
+        else
+            call ml_deep(q)%transfer_from_parent%prolong_owned_device(ml_deep(q)%halo_x, ml_deep(q-1)%b)
+            call copy_owned_to_halo_device(ml_deep(q-1)%b, ml_deep(q-1)%halo_x)
+            call ml_deep(q-1)%halo%exchange_device(ml_deep(q-1)%halo_x)
+            call ml_deep(q-1)%stencil%apply_owned_device(ml_deep(q-1)%halo_x, ml_deep(q-1)%ax)
+            call copy_owned_to_halo_device(ml_deep(q-1)%ax, ml_deep(q-1)%halo_x)
+            call ml_deep(q-1)%halo%exchange_device(ml_deep(q-1)%halo_x)
+            call ml_deep(q)%transfer_from_parent%restrict_owned_adjoint_device( &
+                ml_deep(q-1)%halo_x, ml_deep(q-1)%weight_halo, &
+                ml_deep(q)%weight, ml_deep(q)%r)
+        endif
+        !$acc update self(ml_deep(q)%r)
+        coarse_ax = ml_deep(q)%r
+    end subroutine apply_recursive_coarse_rap
+
+
+    subroutine verify_recursive_level(q, status)
+        implicit none
+        integer, intent(in) :: q
+        integer, intent(out) :: status
+        real(c_double), allocatable :: test_x(:,:,:), direct_ax(:,:,:), host_ax(:,:,:)
+        real(c_double), allocatable :: host_halo(:,:,:)
+        real(c_double) :: local_error, global_error, local_reference, global_reference
+        real(c_double) :: host_error, halo_error, device_error
+        integer :: i, j, k, gi, gj, ierr, nx, ny
+
+        status = 0
+        nx = ml_deep(q)%stencil%nx
+        ny = ml_deep(q)%stencil%ny
+        allocate(test_x(nx,mz,ny), direct_ax(nx,mz,ny), host_ax(nx,mz,ny), &
+                 host_halo(0:nx+1,mz,0:ny+1))
+        do j = 1, ny
+            gj = ml_deep(q)%stencil%y_first+j-1
+            do k = 1, mz
+                do i = 1, nx
+                    gi = ml_deep(q)%stencil%x_first+i-1
+                    test_x(i,k,j) = sin(0.137_c_double*real(3*gi+5*(k-1)+7*gj,c_double))
+                    if (gi == 0 .or. gi == ml_deep(q)%stencil%nx_global-1 .or. &
+                        gj == 0 .or. gj == ml_deep(q)%stencil%ny_global-1 .or. &
+                        k == 1 .or. k == mz) test_x(i,k,j) = 0.0_c_double
+                enddo
+            enddo
+        enddo
+        ml_assembly_child = q
+        call apply_recursive_coarse_rap(test_x, direct_ax)
+        ml_deep(q)%halo_x = 0.0_c_double
+        ml_deep(q)%halo_x(1:nx,:,1:ny) = test_x
+        call ml_deep(q)%halo%exchange(ml_deep(q)%halo_x)
+        host_halo = ml_deep(q)%halo_x
+        call ml_deep(q)%stencil%apply_owned(ml_deep(q)%halo_x, host_ax)
+        local_error = sum((host_ax-direct_ax)**2)
+        local_reference = sum(direct_ax**2)
+        call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(local_reference, global_reference, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        host_error = sqrt(global_error/max(global_reference,tiny(1.0_c_double)))
+        !$acc update device(ml_deep(q)%halo_x)
+        call ml_deep(q)%halo%exchange_device(ml_deep(q)%halo_x)
+        !$acc update self(ml_deep(q)%halo_x)
+        local_error = sum((ml_deep(q)%halo_x-host_halo)**2)
+        local_reference = sum(host_halo**2)
+        call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(local_reference, global_reference, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        halo_error = sqrt(global_error/max(global_reference,tiny(1.0_c_double)))
+        call ml_deep(q)%stencil%apply_owned_device(ml_deep(q)%halo_x, ml_deep(q)%ax)
+        !$acc update self(ml_deep(q)%ax)
+        local_error = sum((ml_deep(q)%ax-direct_ax)**2)
+        local_reference = sum(direct_ax**2)
+        call MPI_Allreduce(local_error, global_error, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        call MPI_Allreduce(local_reference, global_reference, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
+        device_error = sqrt(global_error/max(global_reference,tiny(1.0_c_double)))
+        if (solver_rank == 0) then
+            write(output_unit,'(A,I0,A,ES12.4,A,ES12.4,A,ES12.4)') &
+                ' HICAR recursive R A P verification level ', q+1, ': host_stencil=', host_error, &
+                ' device_halo=', halo_error, ' device_stencil=', device_error
+            flush(output_unit)
+        endif
+        if (max(host_error, halo_error, device_error) > 2.0e-11_c_double) status = 1
+        deallocate(test_x, direct_ax, host_ax, host_halo)
+    end subroutine verify_recursive_level
+
+
+    subroutine copy_owned_to_halo_device(owned, halo)
+        implicit none
+        real(c_double), intent(in) :: owned(:,:,:)
+        real(c_double), intent(inout) :: halo(0:,:,0:)
+        integer :: i, j, k
+
+        !$acc parallel loop gang vector collapse(3) present(owned,halo)
+        do j = 1, size(owned,3)
+            do k = 1, size(owned,2)
+                do i = 1, size(owned,1)
+                    halo(i,k,j) = owned(i,k,j)
+                enddo
+            enddo
+        enddo
+    end subroutine copy_owned_to_halo_device
+
+
     subroutine release_multilevel_preconditioner()
         implicit none
 
+        call release_recursive_multilevel_levels()
         if (multilevel_arrays_uploaded) then
             !$acc exit data delete(ml_fine_owned, ml_fine_residual, ml_fine_weight, &
-            !$acc                  ml_coarse_halo_x, ml_coarse_weight, &
+            !$acc                  ml_coarse_halo_x, ml_coarse_weight_halo, ml_coarse_weight, &
             !$acc                  ml_coarse_b, ml_coarse_x, ml_coarse_ax, ml_coarse_r, &
             !$acc                  ml_coarse_correction)
         endif
@@ -2413,6 +2726,7 @@ contains
         if (allocated(ml_fine_residual)) deallocate(ml_fine_residual)
         if (allocated(ml_fine_weight)) deallocate(ml_fine_weight)
         if (allocated(ml_coarse_halo_x)) deallocate(ml_coarse_halo_x)
+        if (allocated(ml_coarse_weight_halo)) deallocate(ml_coarse_weight_halo)
         if (allocated(ml_coarse_weight)) deallocate(ml_coarse_weight)
         if (allocated(ml_coarse_b)) deallocate(ml_coarse_b)
         if (allocated(ml_coarse_x)) deallocate(ml_coarse_x)
@@ -2421,6 +2735,41 @@ contains
         if (allocated(ml_coarse_correction)) deallocate(ml_coarse_correction)
         multilevel_ready = .false.
     end subroutine release_multilevel_preconditioner
+
+
+    subroutine release_recursive_multilevel_levels()
+        implicit none
+        integer :: q
+
+        if (.not. allocated(ml_deep)) then
+            ml_deep_count = 0
+            ml_assembly_child = 0
+            return
+        endif
+        do q = 1, size(ml_deep)
+            if (ml_deep(q)%arrays_uploaded) then
+                !$acc exit data delete(ml_deep(q)%weight, ml_deep(q)%weight_halo, &
+                !$acc                  ml_deep(q)%halo_x, ml_deep(q)%b, ml_deep(q)%x, &
+                !$acc                  ml_deep(q)%ax, ml_deep(q)%r, ml_deep(q)%correction)
+            endif
+            ml_deep(q)%arrays_uploaded = .false.
+            call ml_deep(q)%line_factor%release()
+            call ml_deep(q)%stencil%release()
+            call ml_deep(q)%transfer_from_parent%release()
+            call ml_deep(q)%halo%release()
+            if (allocated(ml_deep(q)%weight)) deallocate(ml_deep(q)%weight)
+            if (allocated(ml_deep(q)%weight_halo)) deallocate(ml_deep(q)%weight_halo)
+            if (allocated(ml_deep(q)%halo_x)) deallocate(ml_deep(q)%halo_x)
+            if (allocated(ml_deep(q)%b)) deallocate(ml_deep(q)%b)
+            if (allocated(ml_deep(q)%x)) deallocate(ml_deep(q)%x)
+            if (allocated(ml_deep(q)%ax)) deallocate(ml_deep(q)%ax)
+            if (allocated(ml_deep(q)%r)) deallocate(ml_deep(q)%r)
+            if (allocated(ml_deep(q)%correction)) deallocate(ml_deep(q)%correction)
+        enddo
+        deallocate(ml_deep)
+        ml_deep_count = 0
+        ml_assembly_child = 0
+    end subroutine release_recursive_multilevel_levels
 
 
     subroutine copy_solver_to_multilevel_halo(vec)
@@ -2453,7 +2802,7 @@ contains
         real(c_double), dimension(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), intent(in) :: in_vec
         real(c_double), dimension(i_s-1:i_e+1,k_s-1:k_e+1,j_s-1:j_e+1), intent(inout) :: out_vec
         type(domain_t), intent(in) :: domain
-        integer :: i, j, k, sweep, nxc, nyc
+        integer :: i, j, k, nxc, nyc
         real(c_double), parameter :: coarse_omega = 0.8_c_double
         real(c_double), parameter :: post_omega = 0.8_c_double
 
@@ -2484,36 +2833,7 @@ contains
         call copy_solver_to_multilevel_halo(prec_res)
         call ml_transfer%restrict_owned_adjoint_device(ml_fine_residual, ml_fine_weight, &
                                                         ml_coarse_weight, ml_coarse_b)
-        call ml_line_factor%apply_device(ml_coarse_b, ml_coarse_x)
-        do sweep = 2, 4
-            !$acc parallel loop gang vector collapse(3) present(ml_coarse_halo_x,ml_coarse_x)
-            do j = 1, nyc
-                do k = 1, mz
-                    do i = 1, nxc
-                        ml_coarse_halo_x(i,k,j) = ml_coarse_x(i,k,j)
-                    enddo
-                enddo
-            enddo
-            call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
-            call ml_stencil%apply_owned_device(ml_coarse_halo_x, ml_coarse_ax)
-            !$acc parallel loop gang vector collapse(3) present(ml_coarse_b,ml_coarse_ax,ml_coarse_r)
-            do j = 1, nyc
-                do k = 1, mz
-                    do i = 1, nxc
-                        ml_coarse_r(i,k,j) = ml_coarse_b(i,k,j)-ml_coarse_ax(i,k,j)
-                    enddo
-                enddo
-            enddo
-            call ml_line_factor%apply_device(ml_coarse_r, ml_coarse_correction)
-            !$acc parallel loop gang vector collapse(3) present(ml_coarse_x,ml_coarse_correction)
-            do j = 1, nyc
-                do k = 1, mz
-                    do i = 1, nxc
-                        ml_coarse_x(i,k,j) = ml_coarse_x(i,k,j)+coarse_omega*ml_coarse_correction(i,k,j)
-                    enddo
-                enddo
-            enddo
-        enddo
+        call apply_level_one_vcycle(coarse_omega)
         !$acc parallel loop gang vector collapse(3) present(ml_coarse_halo_x,ml_coarse_x)
         do j = 1, nyc
             do k = 1, mz
@@ -2552,6 +2872,125 @@ contains
             enddo
         enddo
     end subroutine apply_multilevel_preconditioner
+
+
+    subroutine apply_level_one_vcycle(omega)
+        implicit none
+        real(c_double), intent(in) :: omega
+        integer :: sweep
+
+        call ml_line_factor%apply_device(ml_coarse_b, ml_coarse_x)
+        if (ml_deep_count > 0) then
+            call compute_level_one_residual()
+            call copy_owned_to_halo_device(ml_coarse_r, ml_coarse_halo_x)
+            call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
+            call ml_deep(1)%transfer_from_parent%restrict_owned_adjoint_device( &
+                ml_coarse_halo_x, ml_coarse_weight_halo, ml_deep(1)%weight, ml_deep(1)%b)
+            call apply_recursive_vcycle(1, omega)
+            call copy_owned_to_halo_device(ml_deep(1)%x, ml_deep(1)%halo_x)
+            call ml_deep(1)%halo%exchange_device(ml_deep(1)%halo_x)
+            call ml_deep(1)%transfer_from_parent%prolong_owned_device( &
+                ml_deep(1)%halo_x, ml_coarse_correction)
+            call owned_axpy_device(ml_coarse_x, ml_coarse_correction, 1.0_c_double)
+            call compute_level_one_residual()
+            call ml_line_factor%apply_device(ml_coarse_r, ml_coarse_correction)
+            call owned_axpy_device(ml_coarse_x, ml_coarse_correction, omega)
+        else
+            do sweep = 2, 4
+                call compute_level_one_residual()
+                call ml_line_factor%apply_device(ml_coarse_r, ml_coarse_correction)
+                call owned_axpy_device(ml_coarse_x, ml_coarse_correction, omega)
+            enddo
+        endif
+    end subroutine apply_level_one_vcycle
+
+
+    recursive subroutine apply_recursive_vcycle(q, omega)
+        implicit none
+        integer, intent(in) :: q
+        real(c_double), intent(in) :: omega
+        integer :: sweep
+
+        call ml_deep(q)%line_factor%apply_device(ml_deep(q)%b, ml_deep(q)%x)
+        if (q < ml_deep_count) then
+            call compute_recursive_level_residual(q)
+            call copy_owned_to_halo_device(ml_deep(q)%r, ml_deep(q)%halo_x)
+            call ml_deep(q)%halo%exchange_device(ml_deep(q)%halo_x)
+            call ml_deep(q+1)%transfer_from_parent%restrict_owned_adjoint_device( &
+                ml_deep(q)%halo_x, ml_deep(q)%weight_halo, &
+                ml_deep(q+1)%weight, ml_deep(q+1)%b)
+            call apply_recursive_vcycle(q+1, omega)
+            call copy_owned_to_halo_device(ml_deep(q+1)%x, ml_deep(q+1)%halo_x)
+            call ml_deep(q+1)%halo%exchange_device(ml_deep(q+1)%halo_x)
+            call ml_deep(q+1)%transfer_from_parent%prolong_owned_device( &
+                ml_deep(q+1)%halo_x, ml_deep(q)%correction)
+            call owned_axpy_device(ml_deep(q)%x, ml_deep(q)%correction, 1.0_c_double)
+            call compute_recursive_level_residual(q)
+            call ml_deep(q)%line_factor%apply_device(ml_deep(q)%r, ml_deep(q)%correction)
+            call owned_axpy_device(ml_deep(q)%x, ml_deep(q)%correction, omega)
+        else
+            do sweep = 2, 4
+                call compute_recursive_level_residual(q)
+                call ml_deep(q)%line_factor%apply_device(ml_deep(q)%r, ml_deep(q)%correction)
+                call owned_axpy_device(ml_deep(q)%x, ml_deep(q)%correction, omega)
+            enddo
+        endif
+    end subroutine apply_recursive_vcycle
+
+
+    subroutine compute_level_one_residual()
+        implicit none
+
+        call copy_owned_to_halo_device(ml_coarse_x, ml_coarse_halo_x)
+        call ml_coarse_halo%exchange_device(ml_coarse_halo_x)
+        call ml_stencil%apply_owned_device(ml_coarse_halo_x, ml_coarse_ax)
+        call owned_residual_device(ml_coarse_b, ml_coarse_ax, ml_coarse_r)
+    end subroutine compute_level_one_residual
+
+
+    subroutine compute_recursive_level_residual(q)
+        implicit none
+        integer, intent(in) :: q
+
+        call copy_owned_to_halo_device(ml_deep(q)%x, ml_deep(q)%halo_x)
+        call ml_deep(q)%halo%exchange_device(ml_deep(q)%halo_x)
+        call ml_deep(q)%stencil%apply_owned_device(ml_deep(q)%halo_x, ml_deep(q)%ax)
+        call owned_residual_device(ml_deep(q)%b, ml_deep(q)%ax, ml_deep(q)%r)
+    end subroutine compute_recursive_level_residual
+
+
+    subroutine owned_residual_device(b, ax, r)
+        implicit none
+        real(c_double), intent(in) :: b(:,:,:), ax(:,:,:)
+        real(c_double), intent(out) :: r(:,:,:)
+        integer :: i, j, k
+
+        !$acc parallel loop gang vector collapse(3) present(b,ax,r)
+        do j = 1, size(b,3)
+            do k = 1, size(b,2)
+                do i = 1, size(b,1)
+                    r(i,k,j) = b(i,k,j)-ax(i,k,j)
+                enddo
+            enddo
+        enddo
+    end subroutine owned_residual_device
+
+
+    subroutine owned_axpy_device(x, correction, omega)
+        implicit none
+        real(c_double), intent(inout) :: x(:,:,:)
+        real(c_double), intent(in) :: correction(:,:,:), omega
+        integer :: i, j, k
+
+        !$acc parallel loop gang vector collapse(3) present(x,correction)
+        do j = 1, size(x,3)
+            do k = 1, size(x,2)
+                do i = 1, size(x,1)
+                    x(i,k,j) = x(i,k,j)+omega*correction(i,k,j)
+                enddo
+            enddo
+        enddo
+    end subroutine owned_axpy_device
 
 
     !>------------------------------------------------------------
