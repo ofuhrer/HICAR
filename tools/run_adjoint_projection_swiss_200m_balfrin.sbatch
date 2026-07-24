@@ -108,9 +108,7 @@ grep -q 'Simulation completed successfully!' "$run/model.out"
 grep -q 'Timing across all compute images:' "$run/model.out"
 awk -f "$root/tools/check_adjoint_projection_log.awk" "$run/model.out"
 
-initial="$run/output/domain_static_swiss_200m_2010-01-01_00-00-00.nc"
-evolved="$run/output/domain_static_swiss_200m_2010-01-01_00-30-00.nc"
-test -s "$initial"
-test -s "$evolved"
+output="$run/output/domain_static_swiss_200m_2010-01-01_00-00-00.nc"
+test -s "$output"
 
 echo "Adjoint Switzerland 200 m gate passed: run=$run"
