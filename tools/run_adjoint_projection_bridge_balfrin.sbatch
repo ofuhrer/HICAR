@@ -61,7 +61,14 @@ sed -e "/^[[:space:]]*restart_folder[[:space:]]*=/c\\  restart_folder = '$run/re
     -e "/^[[:space:]]*output_folder[[:space:]]*=/c\\  output_folder = '$run/output/'" \
     -e "/^[[:space:]]*forcing_file_list[[:space:]]*=/c\\  forcing_file_list = '$forcing_list'" \
     -e "/^[[:space:]]*init_conditions_file[[:space:]]*=/c\\  init_conditions_file = '$static_file'" \
-    "$nml_src" > "$run/input.nml"
+    "$nml_src" | awk '
+      /^[[:space:]]*terrain_smooth_(windowsize|cycles)[[:space:]]*=/ { next }
+      { print }
+      /^[[:space:]]*stretch_fac[[:space:]]*=/ {
+        print "  terrain_smooth_windowsize = 5"
+        print "  terrain_smooth_cycles = 10"
+      }
+    ' > "$run/input.nml"
 for asset in NoahmpTable.TBL rrtmgp_support mp_support; do
   cp -a "$root/run/$asset" "$run/"
 done
@@ -80,6 +87,7 @@ srun --distribution=block:block --cpu-bind=none "$wrapper" "$exe" "$run/input.nm
   2>&1 | tee "$run/model.out"
 
 grep -q 'HICAR discretely adjoint wind projection enabled' "$run/model.out"
+grep -q 'HICAR SLEVE geometry gate:' "$run/model.out"
 grep -q 'HICAR exact Galerkin hierarchy ready:' "$run/model.out"
 grep -q 'HICAR native FGMRES+line:' "$run/model.out"
 grep -q 'HICAR adjoint conservation: relative_Bq=' "$run/model.out"

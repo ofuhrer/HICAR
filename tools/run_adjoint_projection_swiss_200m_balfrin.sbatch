@@ -67,7 +67,14 @@ sed -e "/^[[:space:]]*restart_folder[[:space:]]*=/c\\  restart_folder = '$run/re
     -e "/^[[:space:]]*init_conditions_file[[:space:]]*=/c\\  init_conditions_file = '$static_file'" \
     -e "/^[[:space:]]*outputinterval[[:space:]]*=/c\\  outputinterval = 1800" \
     -e "/^[[:space:]]*output_vars[[:space:]]*=/c\\  output_vars = 'u', 'v', 'w', 'w_grid', 'pressure', 'temperature', 'qv', 'density', 'z', 'jacobian', 'precipitation', 'psfc', 'psl'" \
-    "$nml_src" > "$run/input.nml"
+    "$nml_src" | awk '
+      /^[[:space:]]*terrain_smooth_(windowsize|cycles)[[:space:]]*=/ { next }
+      { print }
+      /^[[:space:]]*stretch_fac[[:space:]]*=/ {
+        print "  terrain_smooth_windowsize = 5"
+        print "  terrain_smooth_cycles = 10"
+      }
+    ' > "$run/input.nml"
 for asset in NoahmpTable.TBL rrtmgp_support mp_support; do
   cp -a "$root/run/$asset" "$run/"
 done
@@ -86,6 +93,12 @@ srun --distribution=block:block --cpu-bind=none "$wrapper" "$exe" "$run/input.nm
   2>&1 | tee "$run/model.out"
 
 grep -q 'HICAR discretely adjoint wind projection enabled' "$run/model.out"
+geometry=$(grep 'HICAR SLEVE geometry gate:' "$run/model.out" | tail -n 1)
+test -n "$geometry"
+minimum_jacobian=$(sed -n 's/.*minimum_mass_jacobian=[[:space:]]*\([^[:space:]]*\).*/\1/p' <<<"$geometry")
+minimum_thickness=$(sed -n 's/.*minimum_interface_thickness=[[:space:]]*\([^[:space:]]*\).*/\1/p' <<<"$geometry")
+awk -v jacobian="$minimum_jacobian" -v thickness="$minimum_thickness" \
+  'BEGIN { exit !(jacobian + 0 >= 0.1 && thickness + 0 >= 5.0) }'
 grep -q 'HICAR exact Galerkin hierarchy ready:' "$run/model.out"
 grep -q 'HICAR terminal collective solve gate:' "$run/model.out"
 grep -q 'HICAR terminal physical solve:.*status=0' "$run/model.out"

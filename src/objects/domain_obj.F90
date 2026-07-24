@@ -8,6 +8,7 @@
 !!
 !!------------------------------------------------------------
 submodule(domain_interface) domain_implementation
+    use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
     use assertions_mod,       only : assert, assertions
     use mod_atm_utilities,    only : exner_function, update_pressure, compute_ivt, compute_iq
     use icar_constants
@@ -1652,9 +1653,11 @@ contains
         real, allocatable :: temp(:,:,:), gamma_n(:), neighbor_jacobian(:,:,:), neighbor_z(:,:,:)
         integer :: i, max_level
         real :: s, n, s1, s2, gamma, gamma_min
+        real :: geometry_minima(2)
         real :: b1_i, b1_mass, db1_i, db1_mass, b2_i, b2_mass, db2_i, db2_mass
 
         real, allocatable :: dz(:)
+        integer :: ierr
 
         ! Automatic level generation: computes dz_levels analytically when auto_level >= 1.
         call auto_dz(options)
@@ -1899,6 +1902,31 @@ contains
             z_interface  = global_z_interface(ims:ime,:,jms:jme)
             z            = neighbor_z(ims:ime,:,jms:jme)
             jacobian     = neighbor_jacobian(ims:ime,:,jms:jme)
+
+            geometry_minima(1) = minval(jacobian(this%its:this%ite, this%kms:this%kme, &
+                                                 this%jts:this%jte))
+            geometry_minima(2) = minval(global_dz_interface(this%its:this%ite, &
+                                                            this%kms:this%kme, &
+                                                            this%jts:this%jte))
+            call MPI_Allreduce(MPI_IN_PLACE, geometry_minima, 2, MPI_REAL, MPI_MIN, &
+                               this%compute_comms, ierr)
+            if (STD_OUT_PE) then
+                write(output_unit,'(A,ES12.4,A,ES12.4)') &
+                    ' HICAR SLEVE geometry gate: minimum_mass_jacobian=', geometry_minima(1), &
+                    ' minimum_interface_thickness=', geometry_minima(2)
+                flush(output_unit)
+            endif
+            if (.not. ieee_is_finite(geometry_minima(1)) .or. &
+                .not. ieee_is_finite(geometry_minima(2)) .or. &
+                geometry_minima(1) <= 0.0 .or. geometry_minima(2) <= 0.0) then
+                if (STD_OUT_PE) then
+                    write(output_unit,'(A)') &
+                        ' HICAR SLEVE geometry rejected: nonfinite or inverted vertical coordinate'
+                    flush(output_unit)
+                endif
+                call MPI_Abort(MPI_COMM_WORLD, 88, ierr)
+                error stop
+            endif
 
 
         !$acc update device(dzdx, dzdy)
