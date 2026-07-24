@@ -172,7 +172,9 @@ contains
                 if (this%output%vars_for_output(i) > 0) this%output%vars_for_output(i) = 0
                 if (this%vars_for_restart(i) > 0) this%vars_for_restart(i) = 0
             endif
-            !see if we have any 3d variables requested, if so we will need to output z levels
+            ! Clean the union of output and restart variables. Only a requested
+            ! 3-D history variable requires z in history output; restart-only
+            ! 3-D state must not force a full z field into every output file.
             if (this%output%vars_for_output(i)+this%vars_for_restart(i) > 0) then
                 tmp_meta = get_varmeta(i)
                 ! Also clean entries that have no metadata defined (no output name) or are not 2d or 3d
@@ -182,7 +184,7 @@ contains
                     this%vars_for_restart(i) = 0
                     cycle
                 endif
-                if (tmp_meta%three_d) output_zvar = .True.
+                if (tmp_meta%three_d .and. this%output%vars_for_output(i) > 0) output_zvar = .True.
             endif
         enddo
         ! Force the output of lat/lon, since these should always be present with output data
