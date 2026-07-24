@@ -49,13 +49,25 @@ grep -q 'HICAR exact Galerkin hierarchy ready:' "$result"
 grep -q 'HICAR terminal physical solve:.*status=0' "$result"
 diagnostic=$(grep 'adjoint projection diagnostic:' "$result" | tail -n 1)
 test -n "$diagnostic"
-matrix_relative=$(sed -n 's/.*matrix_relative=[[:space:]]*\\([^[:space:]]*\\).*/\\1/p' <<<"$diagnostic")
-constraint_relative=$(sed -n 's/.*constraint_relative=[[:space:]]*\\([^[:space:]]*\\).*/\\1/p' <<<"$diagnostic")
-awk -v matrix="$matrix_relative" -v constraint="$constraint_relative" \
-  'BEGIN { exit !((matrix + 0) <= 1.0e-5 && (constraint + 0) <= 2.0e-5) }'
+awk '
+  function is_number(value) {
+    return value ~ /^[+-]?([0-9]+([.][0-9]*)?|[.][0-9]+)([Ee][+-]?[0-9]+)?$/
+  }
+  /adjoint projection diagnostic:/ {
+    ++count
+    matrix = constraint = ""
+    for (i = 1; i <= NF; ++i) {
+      if ($i == "matrix_relative=") matrix = $(i + 1)
+      if ($i == "constraint_relative=") constraint = $(i + 1)
+    }
+    if (!is_number(matrix) || !is_number(constraint) ||
+        matrix + 0 > 1.0e-5 || constraint + 0 > 2.0e-5) bad = 1
+  }
+  END { exit !(count == 1 && !bad) }
+' "$result"
 if grep -Eq 'wind solve rejected|adjoint projection rejected|native FGMRES\\+line failed' "$result"; then
   echo "Rejected solver state found in $result" >&2
   exit 1
 fi
 
-echo "Adjoint GPU unit gate passed: matrix_relative=$matrix_relative constraint_relative=$constraint_relative"
+echo "Adjoint GPU unit gate passed."

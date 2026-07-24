@@ -19,6 +19,7 @@ module test_wind_iterative
 
     use, intrinsic :: iso_c_binding, only : c_double
     use, intrinsic :: iso_fortran_env, only : output_unit
+    use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
     use mpi
     use icar_constants
     use testdrive,          only : new_unittest, unittest_type, error_type, test_failed
@@ -81,11 +82,13 @@ contains
         real(c_double) :: constraint0_prod_g2, constraint1_prod_g2
         real(c_double) :: constraint0_metric_error, constraint1_metric_error
         real(c_double) :: solve_res0, solve_res1, cell_volume
+        real(c_double) :: matrix_relative, constraint_relative
         integer :: ierr
         integer :: rank, solve_status, solve_iterations, ii, jj, kk
         integer :: env_status, env_length
         integer :: ims, ime, jms, jme, kms, kme, its, ite, jts, jte
         logical :: ok, multilevel_test, multilevel_ready_ok, adjoint_operator_ok
+        logical :: adjoint_metrics_ok
         logical :: test_advect_density
         character(len=16) :: multilevel_env
         character(len=256) :: msg
@@ -272,12 +275,25 @@ contains
             constraint1_metric_error = 0.0_c_double
         endif
         call get_last_wind_solve_diagnostics(solve_status, solve_iterations, solve_res0, solve_res1)
+        matrix_relative = 0.0_c_double
+        constraint_relative = 0.0_c_double
+        adjoint_metrics_ok = .true.
+        if (adjoint_projection_is_enabled()) then
+            matrix_relative = solve_res1/max(solve_res0,tiny(solve_res0))
+            constraint_relative = sqrt(constraint1_g2/max(constraint0_g2,tiny(constraint0_g2)))
+            adjoint_metrics_ok = constraint0_g2 > tiny(constraint0_g2) .and. &
+                ieee_is_finite(constraint0_g2) .and. ieee_is_finite(constraint1_g2) .and. &
+                ieee_is_finite(constraint0_prod_g2) .and. ieee_is_finite(constraint1_prod_g2) .and. &
+                ieee_is_finite(constraint0_metric_error) .and. ieee_is_finite(constraint1_metric_error) .and. &
+                ieee_is_finite(solve_res0) .and. ieee_is_finite(solve_res1) .and. &
+                ieee_is_finite(matrix_relative) .and. ieee_is_finite(constraint_relative)
+        endif
         call MPI_Comm_rank(domain%compute_comms, rank, ierr)
         if (rank == 0 .and. adjoint_projection_is_enabled()) then
             write(output_unit,'(A,I0,A,ES12.4,A,ES12.4,A,ES12.4)') &
                 ' adjoint projection diagnostic: iterations=', solve_iterations, &
-                ' true_residual=', solve_res1, ' matrix_relative=', solve_res1/max(solve_res0,tiny(solve_res0)), &
-                ' constraint_relative=', sqrt(constraint1_g2/max(constraint0_g2,tiny(constraint0_g2)))
+                ' true_residual=', solve_res1, ' matrix_relative=', matrix_relative, &
+                ' constraint_relative=', constraint_relative
         endif
 
         ! --- evaluate BEFORE tearing down (so cleanup always runs) -------------------
@@ -288,6 +304,9 @@ contains
         else if (.not. adjoint_operator_ok) then
             ok = .False.
             msg = 'distributed adjoint operator failed symmetry or positive-energy gate'
+        else if (adjoint_projection_is_enabled() .and. .not. adjoint_metrics_ok) then
+            ok = .False.
+            msg = 'adjoint projection produced a nonfinite or degenerate acceptance metric'
         else if (adjoint_projection_is_enabled() .and. &
                  max(constraint0_metric_error,constraint1_metric_error) > 2.0e-6_c_double) then
             ok = .False.
@@ -295,12 +314,12 @@ contains
                 'production constraint norm differs from independent calculation: initial=', &
                 constraint0_metric_error, ' final=', constraint1_metric_error
         else if (adjoint_projection_is_enabled() .and. &
-                 (solve_status /= 0 .or. constraint1_g2 > (2.0e-5_c_double**2)*constraint0_g2)) then
+                 (solve_status /= 0 .or. matrix_relative > 1.0e-5_c_double .or. &
+                  constraint_relative > 2.0e-5_c_double)) then
             ok = .False.
             write(msg,'(A,I0,A,ES12.4,A,ES12.4)') &
                 'adjoint projection failed independent conservation gate: status=', solve_status, &
-                ' matrix residual=', solve_res1/max(solve_res0,tiny(solve_res0)), &
-                ' Bq residual=', sqrt(constraint1_g2/max(constraint0_g2,tiny(constraint0_g2)))
+                ' matrix residual=', matrix_relative, ' Bq residual=', constraint_relative
         else if (div1_max_g /= div1_max_g) then                  ! NaN
             ok = .False.
             msg = 'corrected wind divergence is NaN'
