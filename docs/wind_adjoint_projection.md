@@ -148,6 +148,13 @@ terrain metric is necessary; solver convergence alone does not.
 7. Physical gate: short finite output with bounded winds, plausible mass
    fluxes, and no degradation hidden by terrain or residual smoothing.
 
+The terrain-following coordinate is a prerequisite to these gates.  HICAR
+computes a distributed minimum of the actual mass-level Jacobian and
+interface thickness after constructing `z` and aborts before physics if
+either is nonfinite or nonpositive.  Do not substitute the analytic SLEVE
+`gamma` estimate for this check; a positive sampled estimate previously
+coexisted with locally inverted mass layers on the Switzerland grid.
+
 The solver may move from FGMRES to CG only after the distributed and GPU
 symmetry/positive-energy gates pass.  A horizontal multilevel hierarchy with
 vertical line relaxation remains appropriate for the strong vertical
@@ -173,3 +180,25 @@ Every production adjoint update recomputes the volume-weighted constraint
 after the final stored-wind halo exchange.  The application aborts before
 subsequent physics when its norm has not fallen below `2e-5` of the initial
 constraint norm.
+
+## Switzerland 200 m acceptance
+
+The validated national configuration uses 80 automatically generated levels
+to 12 km, first-layer height 15 m, stretch factor 0.65, SLEVE decay 2/6, and
+an unchanged static DEM split internally with
+`terrain_smooth_windowsize=5`, `terrain_smooth_cycles=10`.  The previous
+100-cycle split inverted layers near a 4740 m summit; making the SLEVE split
+less scale-mixing repaired the coordinate without changing the published
+static fields.
+
+On 16 compute GPUs plus four CPU I/O ranks, the accepted run built nine exact
+Galerkin levels with `R A P` errors near `4e-16`.  The initial physical solve
+converged in seven iterations at relative residual `2.5403e-6`, iterative
+refinement reached `2.6617e-6`, and the independently recomputed constraint
+ratio was `1.2488e-5`.  The first timestep remained below the same strict
+limits.  A 30-minute simulation completed with minimum mass Jacobian
+`0.17194`, minimum interface thickness `12.257 m`, and bounded task memory.
+The chunked output gate passed two records with no nonfinite values, minimum
+mass-level spacing `12.936 m`, physical vertical wind
+`-11.04..9.15 m/s`, and grid-relative vertical wind
+`-23.19..16.01 m/s`.
