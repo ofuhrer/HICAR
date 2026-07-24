@@ -1911,13 +1911,13 @@ contains
             case ("soil_t_var")
                 description = "Name of the soil temperature variable in domain file"
                 units = "K"
-                allocate(dimensions(2))
-                dimensions = ["Y", "X"]
+                allocate(dimensions(3))
+                dimensions = ["S", "Y", "X"]
                 group = "Domain"
             case ("soil_vwc_var")
                 description = "Name of the soil volumetric water content variable in domain file"
-                allocate(dimensions(2))
-                dimensions = ["Y", "X"]
+                allocate(dimensions(3))
+                dimensions = ["S", "Y", "X"]
                 group = "Domain"
             case ("swe_var")
                 description = "Name of the snow water equivalent variable in domain file"
