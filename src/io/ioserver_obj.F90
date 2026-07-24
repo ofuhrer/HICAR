@@ -1136,8 +1136,10 @@ contains
         if (STD_OUT_PE_IO) write(*,*) "Done data from child images for output"
         if (STD_OUT_PE_IO) write(*,"(A23,I2,A16 /)") "-------------- IOserver",this%nest_indx," --------------"
 
-        if (ALL(this%write_buffer_3d(1)%buff(1:this%n_out_3d,:,:,:)==kEMPT_BUFF) .or. &
-            ALL(this%write_buffer_2d(1)%buff(1:this%n_out_2d,:,:)==kEMPT_BUFF)) then
+        if ((this%n_out_3d > 0 .and. &
+             ALL(this%write_buffer_3d(1)%buff(1:this%n_out_3d,:,:,:)==kEMPT_BUFF)) .or. &
+            (this%n_out_2d > 0 .and. &
+             ALL(this%write_buffer_2d(1)%buff(1:this%n_out_2d,:,:)==kEMPT_BUFF))) then
             stop 'Error, all of write buffer used for output was still set to empty buffer flag at time of writing.'
         endif
 
