@@ -14,7 +14,8 @@ module wind
     use wind_iterative,    only : calc_iter_winds, init_iter_winds, &
                                   probe_lambda_pattern, probe_zero_corrections, &
                                   probe_apply_corrections, probe_record, probe_finalize, &
-                                  probe_random_pattern, probe_compare_operator
+                                  probe_random_pattern, probe_compare_operator, &
+                                  adjoint_projection_is_enabled, reset_wind_solver_guess
     use iso_fortran_env, only : output_unit
     use icar_constants
     use domain_interface,  only : domain_t
@@ -794,7 +795,8 @@ contains
             ! that redundant solve can fail before the exact hierarchy exists.
             call calc_idealized_wgrid(domain)
 
-            if (alpha_const_val <= 0 .and. operator_calibrated(min(domain%nest_indx, size(operator_calibrated)))) then
+            if (.not. adjoint_projection_is_enabled() .and. alpha_const_val <= 0 .and. &
+                operator_calibrated(min(domain%nest_indx, size(operator_calibrated)))) then
                 call calibrate_projection_operator(domain, options, div)
             endif
 
@@ -803,16 +805,27 @@ contains
                 call calc_iter_winds(domain, &
                     domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d, &
                     div, options%adv%advect_density, setup_only=.true.)
-                call calibrate_projection_operator(domain, options, div)
+                if (.not. adjoint_projection_is_enabled()) &
+                    call calibrate_projection_operator(domain, options, div)
                 operator_calibrated(min(domain%nest_indx, size(operator_calibrated))) = .true.
             endif
 
-            call calc_divergence(div,domain,horz_only=.False.,use_dqdt=.True.)
-            call calc_iter_winds(domain,domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d,div,options%adv%advect_density)
-            ! Exchange the corrected fields, since the outer points are not updated above.
-            call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%u)%v),do_dqdt=.True.,corners=.True.)
-            call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%v)%v),do_dqdt=.True.,corners=.True.)
-            call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%w)%v),do_dqdt=.True.,corners=.True.)
+            ! The adjoint path uses wind_iterations as bounded mixed-precision
+            ! iterative refinement.  Pass one projects the forcing field;
+            ! later passes recompute Bq from the actual single-precision winds
+            ! and solve for a fresh multiplier correction.  The legacy path
+            ! retains its established single solve.
+            do it = 1, merge(max(1,options%wind%wind_iterations), 1, &
+                             adjoint_projection_is_enabled())
+                call calc_divergence(div,domain,horz_only=.False.,use_dqdt=.True.)
+                if (it > 1) call reset_wind_solver_guess()
+                call calc_iter_winds(domain, &
+                    domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d, &
+                    div, options%adv%advect_density)
+                call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%u)%v),do_dqdt=.True.,corners=.True.)
+                call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%v)%v),do_dqdt=.True.,corners=.True.)
+                call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%w)%v),do_dqdt=.True.,corners=.True.)
+            enddo
 
             !$acc end data
             end associate

@@ -49,6 +49,10 @@ module wind_iterative
     public :: multilevel_preconditioner_is_ready
     public :: multilevel_preconditioner_smoke
     public :: small_harmonic_ritz
+    public :: adjoint_projection_is_enabled
+    public :: get_last_wind_solve_diagnostics
+    public :: reset_wind_solver_guess
+    public :: adjoint_operator_smoke
 
     interface
         subroutine dgesv(n, nrhs, a, lda, ipiv, b, ldb, info)
@@ -95,10 +99,19 @@ module wind_iterative
     logical :: operator_audit_done = .false.
     logical :: krylov_audit_written = .false.
     logical :: bootstrap_rhs_saved = .false.
+    ! Opt-in replacement for the independently discretized D o G operator.
+    ! This path assembles K = B M^-1 B^T analytically and applies the matching
+    ! correction -M^-1 B^T.  It is deliberately runtime-gated until the
+    ! distributed/GPU and physical acceptance sequence is complete.
+    logical :: adjoint_projection_requested = .false.
     logical :: multilevel_requested = .false.
     logical :: multilevel_setup_attempted = .false.
     logical :: multilevel_ready = .false.
     logical :: multilevel_arrays_uploaded = .false.
+    integer :: last_wind_solve_status = -1
+    integer :: last_wind_solve_iterations = 0
+    real(c_double) :: last_wind_solve_initial_residual = huge(1.0_c_double)
+    real(c_double) :: last_wind_solve_final_residual = huge(1.0_c_double)
     integer :: operator_audit_max_iters = 0
     character(len=512) :: operator_audit_file = 'hicar_wind_operator_audit.csv'
 
@@ -266,6 +279,7 @@ module wind_iterative
         logical :: operator_audit_done = .false.
         logical :: krylov_audit_written = .false.
         logical :: bootstrap_rhs_saved = .false.
+        logical :: adjoint_projection_requested = .false.
         logical :: multilevel_requested = .false.
         integer :: wind_solver_max_iters
         integer :: precond_n_sweeps = BASE_PREC_SWEEPS
@@ -324,6 +338,46 @@ contains
     logical function multilevel_preconditioner_is_ready()
         multilevel_preconditioner_is_ready = multilevel_ready
     end function multilevel_preconditioner_is_ready
+
+
+    logical function adjoint_projection_is_enabled()
+        adjoint_projection_is_enabled = adjoint_projection_requested
+    end function adjoint_projection_is_enabled
+
+
+    subroutine get_last_wind_solve_diagnostics(status, iterations, initial_residual, final_residual)
+        integer, intent(out) :: status, iterations
+        real(c_double), intent(out) :: initial_residual, final_residual
+
+        status = last_wind_solve_status
+        iterations = last_wind_solve_iterations
+        initial_residual = last_wind_solve_initial_residual
+        final_residual = last_wind_solve_final_residual
+    end subroutine get_last_wind_solve_diagnostics
+
+
+    subroutine reset_wind_solver_guess()
+        if (allocated(x_sol)) call vec_zero(x_sol)
+    end subroutine reset_wind_solver_guess
+
+
+    logical function adjoint_operator_smoke(domain)
+        type(domain_t), intent(in) :: domain
+        real(c_double) :: defect, rayleigh_x, rayleigh_y, cosine_xy
+
+        adjoint_operator_smoke = .false.
+        if (.not. adjoint_projection_requested .or. .not. structure_uploaded) return
+        call fill_audit_vector(p_vec, 1, 0)
+        call fill_audit_vector(v_vec, 2, 1)
+        call exchange_krylov_halos(p_vec, domain)
+        call spmv(p_vec, p_hat)
+        call exchange_krylov_halos(v_vec, domain)
+        call spmv(v_vec, s_hat)
+        call audit_weighted_pair(p_vec, p_hat, v_vec, s_hat, 1, &
+                                 defect, rayleigh_x, rayleigh_y, cosine_xy)
+        adjoint_operator_smoke = defect <= 5.0e-12_c_double .and. &
+                                 rayleigh_x > 0.0_c_double .and. rayleigh_y > 0.0_c_double
+    end function adjoint_operator_smoke
 
 
     logical function multilevel_preconditioner_smoke(domain)
@@ -388,6 +442,7 @@ contains
         integer :: my_rank_in_comm
         integer :: env_status, env_length
         character(len=32) :: audit_env, audit_max_iters_env, multilevel_env, recycle_env
+        character(len=32) :: adjoint_projection_env
         character(len=512) :: audit_file_env
         integer :: audit_read_status
 #ifdef USE_NCCL
@@ -474,6 +529,16 @@ contains
         verbose_solver = options%general%debug .or. &
                          (options%physics%windtype == kITERATIVE_WINDS)
 
+        adjoint_projection_env = ''
+        call get_environment_variable('HICAR_WIND_ADJOINT_PROJECTION', adjoint_projection_env, &
+                                      length=env_length, status=env_status)
+        adjoint_projection_requested = env_status == 0 .and. env_length > 0 .and. &
+                                       trim(adjustl(adjoint_projection_env)) /= '0'
+        if (STD_OUT_PE .and. adjoint_projection_requested) then
+            write(output_unit,'(A)') ' HICAR discretely adjoint wind projection enabled'
+            flush(output_unit)
+        endif
+
         multilevel_env = ''
         call get_environment_variable('HICAR_WIND_MULTILEVEL', multilevel_env, &
                                       length=env_length, status=env_status)
@@ -524,24 +589,42 @@ contains
         logical, intent(in), optional :: setup_only
 
         integer :: i, j, k
-        real    :: alpha_min, alpha_max
-        logical :: varying_alpha
+        real    :: alpha_change_max
+        logical :: alpha_changed
         integer :: status, n_iters, apply_status, calibrated_max_iters
         integer :: nan_count
         real(c_double) :: res0, res_final, local_norm2, global_norm2, target_norm, max_x_global
         real(c_double) :: local_apply_stats(2), global_apply_stats(2), operator_error
         integer :: ierr
 
-        ! Copy alpha and div into module-resident arrays on GPU
-        !$acc parallel loop gang vector collapse(3) present(alpha, div, alpha_in, div_in)
-        do j = j_s, j_e
-            do k = k_s, k_e
-                do i = i_s, i_e
-                    div(i,k,j)   = div_in(i,k,j)
-                    alpha(i,k,j) = alpha_in(i,k,j)
+        ! Copy alpha and div into module-resident arrays on GPU.  On an
+        ! existing structure, detect an actual temporal alpha change before
+        ! overwriting the prior field.  Spatial variability by itself must
+        ! not rebuild the hierarchy on every mixed-precision refinement pass.
+        alpha_change_max = 0.0
+        if (structure_uploaded) then
+            !$acc parallel loop gang vector collapse(3) reduction(max:alpha_change_max) &
+            !$acc present(alpha, div, alpha_in, div_in)
+            do j = j_s, j_e
+                do k = k_s, k_e
+                    do i = i_s, i_e
+                        alpha_change_max = max(alpha_change_max, abs(alpha_in(i,k,j)-alpha(i,k,j)))
+                        div(i,k,j) = div_in(i,k,j)
+                        alpha(i,k,j) = alpha_in(i,k,j)
+                    enddo
                 enddo
             enddo
-        enddo
+        else
+            !$acc parallel loop gang vector collapse(3) present(alpha, div, alpha_in, div_in)
+            do j = j_s, j_e
+                do k = k_s, k_e
+                    do i = i_s, i_e
+                        div(i,k,j) = div_in(i,k,j)
+                        alpha(i,k,j) = alpha_in(i,k,j)
+                    enddo
+                enddo
+            enddo
+        endif
 
         ! Debug: if the input divergence contains any NaN, dump the min/max of the
         ! state fields that feed the divergence so the source can be traced.
@@ -634,24 +717,24 @@ contains
 
             structure_uploaded = .true.
         else
-            ! Subsequent call: detect varying alpha on GPU; refresh coefs only when needed
-            alpha_min =  HUGE(1.0)
-            alpha_max = -HUGE(1.0)
-            !$acc parallel loop gang vector collapse(3) reduction(min:alpha_min) reduction(max:alpha_max) present(alpha)
-            do j = j_s, j_e
-                do k = k_s, k_e
-                    do i = i_s, i_e
-                        alpha_min = min(alpha_min, alpha(i,k,j))
-                        alpha_max = max(alpha_max, alpha(i,k,j))
-                    enddo
-                enddo
-            enddo
-            varying_alpha = (alpha_max > alpha_min)
+            ! Refresh alpha-dependent coefficients only when the field has
+            ! changed since the previous solve.
+            alpha_changed = alpha_change_max > 8.0*epsilon(alpha_change_max)
             ! Under the probed operator the coefficients ARE the exact
             ! alpha-dependent composition; the analytic refresh would
             ! clobber them. Alpha changes are handled by re-probing
             ! (wind.F90::calibrate_projection_operator).
-            if (varying_alpha .and. .not. operator_probed) call update_coefs_gpu()
+            if (alpha_changed) then
+                if (adjoint_projection_requested) then
+                    call update_adjoint_coefs_gpu(domain)
+                    call wind_hypre_invalidate()
+                    hypre_operator_verified = .false.
+                    operator_audit_done = .false.
+                    call release_multilevel_preconditioner()
+                else if (.not. operator_probed) then
+                    call update_coefs_gpu()
+                endif
+            endif
         endif
 
         ! Calibration only needs the allocated vectors and uploaded stencil
@@ -669,7 +752,7 @@ contains
             call setup_multilevel_preconditioner(domain)
 
         ! Build RHS on GPU (3D layout: rhs(i,k,j) = -2*div for interior, 0 at BCs)
-        call compute_rhs_3d()
+        call compute_rhs_3d(domain)
 
         if (operator_probed .and. operator_audit_enabled .and. .not. operator_audit_done) then
             call audit_operator_structure(domain)
@@ -903,6 +986,12 @@ contains
             if (STD_OUT_PE) write(*,'(A,I0)') ' HICAR wind solve rejected after acceptance gate: status=', status
             stop
         endif
+
+        if (adjoint_projection_requested) call exchange_krylov_halos(x_sol, domain)
+        last_wind_solve_status = status
+        last_wind_solve_iterations = n_iters
+        last_wind_solve_initial_residual = res0
+        last_wind_solve_final_residual = res_final
 
         ! Preserve the accepted analytic-bootstrap RHS in an existing Krylov
         ! work vector.  The calibrated FGMRES path does not otherwise use
@@ -3770,26 +3859,35 @@ contains
 
 
     !>------------------------------------------------------------
-    !! RHS vector: rhs(i,k,j) = -2*div(i,k,j) for interior; 0 at BCs.
+    !! RHS vector for the selected projection operator; zero at inactive rows.
+    !!
+    !! The legacy/probed composition solves A lambda = -2 D q.  The adjoint
+    !! projection instead solves K lambda = B q = cell_volume * D q.
     !! Halo cells are left at their previous value (won't be read).
     !!------------------------------------------------------------
-    subroutine compute_rhs_3d()
+    subroutine compute_rhs_3d(domain)
         implicit none
+        type(domain_t), intent(in) :: domain
         integer :: i, j, k
 
-        !$acc parallel loop gang vector collapse(3) present(rhs, div)
+        associate(mxy => domain%mapfac_mxy)
+        !$acc parallel loop gang vector collapse(3) present(rhs, div, jaco, adv_dz_col, mxy)
         do j = ys, ys + ym - 1
             do k = zs, zs + zm - 1
                 do i = xs, xs + xm - 1
                     if (i <= 0 .or. j <= 0 .or. i >= mx-1 .or. j >= my-1 .or. &
                         k <= 0 .or. k >= mz-1) then
                         rhs(i,k,j) = 0.0_c_double
+                    else if (adjoint_projection_requested) then
+                        rhs(i,k,j) = real(dx**2*adv_dz_col(k)*jaco(i,k,j) / &
+                                          mxy(i,j)*div(i,k,j), c_double)
                     else
                         rhs(i,k,j) = real(-2.0 * div(i,k,j), c_double)
                     endif
                 enddo
             enddo
         enddo
+        end associate
     end subroutine compute_rhs_3d
 
 
@@ -4062,7 +4160,7 @@ contains
         !$acc enter data create(u_temp, v_temp, u_dlambdz, v_dlambdz, rho, rho_u, rho_v, rho_w)
         !$acc data present(density, u, v, jaco_u_domain, jaco_v_domain, jaco_domain, dzdx_u, dzdy_v, &
         !$acc              u_temp, v_temp, u_dlambdz, v_dlambdz, rho, rho_u, rho_v, rho_w, &
-        !$acc              alpha, dz_if, lambda_3d, mf_mx_u, mf_my_v)
+        !$acc              alpha, dz_if, lambda_3d, x_sol, mf_mx_u, mf_my_v)
 
         !$acc kernels
         rho   = 1.0
@@ -4095,8 +4193,13 @@ contains
             !$acc loop gang vector collapse(2)
             do j = j_s, j_e
                 do k = k_s, k_e
-                    rho_u(i_end,k,j)   = rho(i_end-1,k,j)
-                    rho_u(i_start,k,j) = rho(i_start,k,j)
+                    if (adjoint_projection_requested) then
+                        rho_u(i_end,k,j) = 1.5*rho(i_end-1,k,j)-0.5*rho(i_end-2,k,j)
+                        rho_u(i_start,k,j) = 1.5*rho(i_start,k,j)-0.5*rho(i_start+1,k,j)
+                    else
+                        rho_u(i_end,k,j) = rho(i_end-1,k,j)
+                        rho_u(i_start,k,j) = rho(i_start,k,j)
+                    endif
                 enddo
             enddo
         else if (i_s == ids) then
@@ -4111,7 +4214,11 @@ contains
             !$acc loop gang vector collapse(2)
             do j = j_s, j_e
                 do k = k_s, k_e
-                    rho_u(i_start,k,j) = rho(i_start,k,j)
+                    if (adjoint_projection_requested) then
+                        rho_u(i_start,k,j) = 1.5*rho(i_start,k,j)-0.5*rho(i_start+1,k,j)
+                    else
+                        rho_u(i_start,k,j) = rho(i_start,k,j)
+                    endif
                 enddo
             enddo
         else if (i_e == ide) then
@@ -4126,7 +4233,11 @@ contains
             !$acc loop gang vector collapse(2)
             do j = j_s, j_e
                 do k = k_s, k_e
-                    rho_u(i_end,k,j) = rho(i_end-1,k,j)
+                    if (adjoint_projection_requested) then
+                        rho_u(i_end,k,j) = 1.5*rho(i_end-1,k,j)-0.5*rho(i_end-2,k,j)
+                    else
+                        rho_u(i_end,k,j) = rho(i_end-1,k,j)
+                    endif
                 enddo
             enddo
         else
@@ -4154,8 +4265,13 @@ contains
             !$acc loop gang vector collapse(2)
             do k = k_s, k_e
                 do i = i_s, i_e
-                    rho_v(i,k,j_start) = rho(i,k,j_start)
-                    rho_v(i,k,j_end)   = rho(i,k,j_end-1)
+                    if (adjoint_projection_requested) then
+                        rho_v(i,k,j_start) = 1.5*rho(i,k,j_start)-0.5*rho(i,k,j_start+1)
+                        rho_v(i,k,j_end) = 1.5*rho(i,k,j_end-1)-0.5*rho(i,k,j_end-2)
+                    else
+                        rho_v(i,k,j_start) = rho(i,k,j_start)
+                        rho_v(i,k,j_end) = rho(i,k,j_end-1)
+                    endif
                 enddo
             enddo
         else if (j_s == jds) then
@@ -4170,7 +4286,11 @@ contains
             !$acc loop gang vector collapse(2)
             do k = k_s, k_e
                 do i = i_s, i_e
-                    rho_v(i,k,j_start) = rho(i,k,j_start)
+                    if (adjoint_projection_requested) then
+                        rho_v(i,k,j_start) = 1.5*rho(i,k,j_start)-0.5*rho(i,k,j_start+1)
+                    else
+                        rho_v(i,k,j_start) = rho(i,k,j_start)
+                    endif
                 enddo
             enddo
         else if (j_e == jde) then
@@ -4185,7 +4305,11 @@ contains
             !$acc loop gang vector collapse(2)
             do k = k_s, k_e
                 do i = i_s, i_e
-                    rho_v(i,k,j_end) = rho(i,k,j_end-1)
+                    if (adjoint_projection_requested) then
+                        rho_v(i,k,j_end) = 1.5*rho(i,k,j_end-1)-0.5*rho(i,k,j_end-2)
+                    else
+                        rho_v(i,k,j_end) = rho(i,k,j_end-1)
+                    endif
                 enddo
             enddo
         else
@@ -4278,29 +4402,54 @@ contains
         ! including the dzdx cross term (true slope = m_x * grid slope).
         ! Factors are exactly 1.0 when use_map_factors is off. The probed
         ! operator A = D∘G absorbs these on the next (re-)probe.
-        !$acc parallel loop gang vector collapse(3)
-        do j = j_s, j_e
-            do k = k_s, k_e
-                do i = i_start, i_end
-                    u(i,k,j) = u(i,k,j) + 0.5 * mf_mx_u(i,j) * &
-                                          ( (lambda_3d(i,k,j) - lambda_3d(i-1,k,j)) / dx - &
-                                            dzdx_u(i,k,j) * (u_dlambdz(i,k,j)) / jaco_u_domain(i,k,j) ) &
-                                          / (rho_u(i,k,j))
+        if (adjoint_projection_requested) then
+            ! Exact -M^-1 B^T action matching the analytic SPD stencil.
+            !$acc parallel loop gang vector collapse(3)
+            do j = j_s, j_e
+                do k = k_s, k_e
+                    do i = i_start, i_end
+                        u(i,k,j) = u(i,k,j) + real(0.5_c_double*real(mf_mx_u(i,j),c_double) * &
+                            (x_sol(i,k,j)-x_sol(i-1,k,j)) / &
+                            (real(dx,c_double)*real(rho_u(i,k,j),c_double)))
+                    enddo
                 enddo
             enddo
-        enddo
 
-        !$acc parallel loop gang vector collapse(3)
-        do j = j_start, j_end
-            do k = k_s, k_e
-                do i = i_s, i_e
-                    v(i,k,j) = v(i,k,j) + 0.5 * mf_my_v(i,j) * &
-                                          ( (lambda_3d(i,k,j) - lambda_3d(i,k,j-1)) / dx - &
-                                            dzdy_v(i,k,j) * (v_dlambdz(i,k,j)) / jaco_v_domain(i,k,j) ) &
-                                          / (rho_v(i,k,j))
+            !$acc parallel loop gang vector collapse(3)
+            do j = j_start, j_end
+                do k = k_s, k_e
+                    do i = i_s, i_e
+                        v(i,k,j) = v(i,k,j) + real(0.5_c_double*real(mf_my_v(i,j),c_double) * &
+                            (x_sol(i,k,j)-x_sol(i,k,j-1)) / &
+                            (real(dx,c_double)*real(rho_v(i,k,j),c_double)))
+                    enddo
                 enddo
             enddo
-        enddo
+        else
+            !$acc parallel loop gang vector collapse(3)
+            do j = j_s, j_e
+                do k = k_s, k_e
+                    do i = i_start, i_end
+                        u(i,k,j) = u(i,k,j) + 0.5 * mf_mx_u(i,j) * &
+                                              ( (lambda_3d(i,k,j) - lambda_3d(i-1,k,j)) / dx - &
+                                                dzdx_u(i,k,j) * (u_dlambdz(i,k,j)) / jaco_u_domain(i,k,j) ) &
+                                              / (rho_u(i,k,j))
+                    enddo
+                enddo
+            enddo
+
+            !$acc parallel loop gang vector collapse(3)
+            do j = j_start, j_end
+                do k = k_s, k_e
+                    do i = i_s, i_e
+                        v(i,k,j) = v(i,k,j) + 0.5 * mf_my_v(i,j) * &
+                                              ( (lambda_3d(i,k,j) - lambda_3d(i,k,j-1)) / dx - &
+                                                dzdy_v(i,k,j) * (v_dlambdz(i,k,j)) / jaco_v_domain(i,k,j) ) &
+                                              / (rho_v(i,k,j))
+                    enddo
+                enddo
+            enddo
+        endif
 
         ! Vertical velocity correction: applied to the grid-relative w
         ! predictor (w%dqdt) so the corrected (u, v, w_grid) triplet
@@ -4313,16 +4462,29 @@ contains
         ! that fits the probed 15-point stencil. The lid interface (k_e)
         ! gets no correction (rigid lid).
         associate(w_g => domain%vars_3d(domain%var_indx(kVARS%w)%v)%dqdt_3d)
-        !$acc parallel loop gang vector collapse(3) present(w_g, lambda_3d, dz_if)
-        do j = j_s, j_e
-            do k = k_s, k_e-1
-                do i = i_s, i_e
-                    w_g(i,k,j) = w_g(i,k,j) + 0.5 * (alpha(i,k,j)**2) * &
-                                 (lambda_3d(i,k+1,j) - lambda_3d(i,k,j)) / dz_if(i,k+1,j) &
-                                 / jaco_domain(i,k,j) / rho_w(i,k,j)
+        if (adjoint_projection_requested) then
+            !$acc parallel loop gang vector collapse(3) present(w_g, x_sol, dz_if)
+            do j = j_s, j_e
+                do k = k_s, k_e-1
+                    do i = i_s, i_e
+                        w_g(i,k,j) = w_g(i,k,j) + real(0.5_c_double*real(alpha(i,k,j),c_double)**2 * &
+                            (x_sol(i,k+1,j)-x_sol(i,k,j)) / real(dz_if(i,k+1,j),c_double) / &
+                            real(jaco_domain(i,k,j),c_double) / real(rho_w(i,k,j),c_double))
+                    enddo
                 enddo
             enddo
-        enddo
+        else
+            !$acc parallel loop gang vector collapse(3) present(w_g, lambda_3d, dz_if)
+            do j = j_s, j_e
+                do k = k_s, k_e-1
+                    do i = i_s, i_e
+                        w_g(i,k,j) = w_g(i,k,j) + 0.5 * (alpha(i,k,j)**2) * &
+                                     (lambda_3d(i,k+1,j) - lambda_3d(i,k,j)) / dz_if(i,k+1,j) &
+                                     / jaco_domain(i,k,j) / rho_w(i,k,j)
+                    enddo
+                enddo
+            enddo
+        endif
         end associate
 
         !$acc end data
@@ -4713,6 +4875,12 @@ contains
         F_coef = 0; G_coef = 0; H_coef = 0; I_coef = 0; J_coef = 0
         K_coef = 0; L_coef = 0; M_coef = 0; N_coef = 0; O_coef = 0
 
+        if (adjoint_projection_requested) then
+            call update_adjoint_coefs_host(domain)
+            operator_probed = .true.
+            return
+        endif
+
         D_coef = 1.0/(domain%dx**2)
         E_coef = 1.0/(domain%dx**2)
         F_coef = 1.0/(domain%dx**2)
@@ -4733,6 +4901,102 @@ contains
         ! B / C / A — host computation (used on first call before update_coefs_gpu)
         call update_coefs_host(domain)
     end subroutine initialize_coefs
+
+
+    !> Assemble K = B M^-1 B^T for the diagonal mass-flux energy.
+    !!
+    !! Only the seven face-neighbour entries are nonzero.  The density and
+    !! vertical Jacobian cancel analytically from each Schur conductance; the
+    !! matching density/Jacobian factors remain in calc_updated_winds where
+    !! -M^-1 B^T is applied to the velocity fields.
+    subroutine update_adjoint_coefs_host(domain)
+        implicit none
+        type(domain_t), intent(in) :: domain
+        integer :: i, j, k, i_lo, i_hi, j_lo, j_hi
+        real :: c_west, c_east, c_south, c_north, c_down, c_up
+
+        i_lo = max(i_s, 1)
+        i_hi = min(i_e, mx-2)
+        j_lo = max(j_s, 1)
+        j_hi = min(j_e, my-2)
+        if (i_lo > i_hi .or. j_lo > j_hi) return
+
+        do j = j_lo, j_hi
+            do k = 1, mz-2
+                do i = i_lo, i_hi
+                    c_west = adv_dz_col(k)*jaco_u_stag(i,k,j)*domain%mapfac_mx_u(i,j) / &
+                             (2.0*domain%mapfac_my_u(i,j))
+                    c_east = adv_dz_col(k)*jaco_u_stag(i+1,k,j)*domain%mapfac_mx_u(i+1,j) / &
+                             (2.0*domain%mapfac_my_u(i+1,j))
+                    c_south = adv_dz_col(k)*jaco_v_stag(i,k,j)*domain%mapfac_my_v(i,j) / &
+                              (2.0*domain%mapfac_mx_v(i,j))
+                    c_north = adv_dz_col(k)*jaco_v_stag(i,k,j+1)*domain%mapfac_my_v(i,j+1) / &
+                              (2.0*domain%mapfac_mx_v(i,j+1))
+                    if (k == k_s) then
+                        c_down = 0.0
+                    else
+                        c_down = domain%dx**2*alpha(i,k-1,j)**2 / &
+                                 (2.0*dz_if(i,k,j)*domain%mapfac_mxy(i,j))
+                    endif
+                    if (k == k_e) then
+                        c_up = 0.0
+                    else
+                        c_up = domain%dx**2*alpha(i,k,j)**2 / &
+                               (2.0*dz_if(i,k+1,j)*domain%mapfac_mxy(i,j))
+                    endif
+
+                    E_coef(i,k,j) = -c_west
+                    D_coef(i,k,j) = -c_east
+                    G_coef(i,k,j) = -c_south
+                    F_coef(i,k,j) = -c_north
+                    C_coef(i,k,j) = -c_down
+                    B_coef(i,k,j) = -c_up
+                    A_coef(i,k,j) = c_west+c_east+c_south+c_north+c_down+c_up
+                enddo
+            enddo
+        enddo
+    end subroutine update_adjoint_coefs_host
+
+
+    !> Refresh the alpha-dependent vertical conductances on the GPU.
+    subroutine update_adjoint_coefs_gpu(domain)
+        implicit none
+        type(domain_t), intent(in) :: domain
+        integer :: i, j, k, i_lo, i_hi, j_lo, j_hi
+        real :: c_down, c_up
+
+        i_lo = max(i_s, 1)
+        i_hi = min(i_e, mx-2)
+        j_lo = max(j_s, 1)
+        j_hi = min(j_e, my-2)
+        if (i_lo > i_hi .or. j_lo > j_hi) return
+
+        associate(mxy => domain%mapfac_mxy)
+        !$acc parallel loop gang vector collapse(3) &
+        !$acc present(A_coef, B_coef, C_coef, D_coef, E_coef, F_coef, G_coef, &
+        !$acc         alpha, dz_if, mxy) private(c_down, c_up)
+        do j = j_lo, j_hi
+            do k = 1, mz-2
+                do i = i_lo, i_hi
+                    if (k == k_s) then
+                        c_down = 0.0
+                    else
+                        c_down = dx**2*alpha(i,k-1,j)**2 / (2.0*dz_if(i,k,j)*mxy(i,j))
+                    endif
+                    if (k == k_e) then
+                        c_up = 0.0
+                    else
+                        c_up = dx**2*alpha(i,k,j)**2 / (2.0*dz_if(i,k+1,j)*mxy(i,j))
+                    endif
+                    C_coef(i,k,j) = -c_down
+                    B_coef(i,k,j) = -c_up
+                    A_coef(i,k,j) = -D_coef(i,k,j)-E_coef(i,k,j)-F_coef(i,k,j)-G_coef(i,k,j) + &
+                                    c_down+c_up
+                enddo
+            enddo
+        enddo
+        end associate
+    end subroutine update_adjoint_coefs_gpu
 
 
     subroutine update_coefs_host(domain)
@@ -4911,6 +5175,7 @@ contains
         domain_cache(slot)%operator_audit_done       = operator_audit_done
         domain_cache(slot)%krylov_audit_written      = krylov_audit_written
         domain_cache(slot)%bootstrap_rhs_saved       = bootstrap_rhs_saved
+        domain_cache(slot)%adjoint_projection_requested = adjoint_projection_requested
         domain_cache(slot)%multilevel_requested      = multilevel_requested
         domain_cache(slot)%wind_solver_max_iters = wind_solver_max_iters
         domain_cache(slot)%precond_n_sweeps      = precond_n_sweeps
@@ -5044,6 +5309,7 @@ contains
         operator_audit_done      = domain_cache(slot)%operator_audit_done
         krylov_audit_written     = domain_cache(slot)%krylov_audit_written
         bootstrap_rhs_saved      = domain_cache(slot)%bootstrap_rhs_saved
+        adjoint_projection_requested = domain_cache(slot)%adjoint_projection_requested
         multilevel_requested     = domain_cache(slot)%multilevel_requested
         multilevel_setup_attempted = .false.
         multilevel_ready = .false.

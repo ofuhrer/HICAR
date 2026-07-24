@@ -27,6 +27,9 @@ module test_wind_iterative
     use wind,               only : wind_var_request, init_winds, calc_divergence
     use wind_iterative,     only : calc_iter_winds, finalize_iter_winds, probe_finalize, &
                                    multilevel_preconditioner_smoke, small_harmonic_ritz
+    use wind_iterative,     only : adjoint_projection_is_enabled, get_last_wind_solve_diagnostics
+    use wind_iterative,     only : reset_wind_solver_guess
+    use wind_iterative,     only : adjoint_operator_smoke
     use wind_multilevel,    only : horizontal_transfer_t, horizontal_tile_transfer_t, horizontal_coarse_extent, &
                                     horizontal_coarse_coordinate, owned_coarse_interval, &
                                     galerkin_stencil_t, galerkin_tile_stencil_t, vertical_line_factor_t, &
@@ -34,6 +37,7 @@ module test_wind_iterative
                                     relax_with_vertical_lines
     use wind_multilevel_mpi, only : horizontal_halo_exchange_t
     use wind_coarse_solve, only : collective_coarse_solver_t
+    use wind_adjoint_projection, only : adjoint_projection_t
     use advection,          only : adv_var_request
     use io_routines,        only : check_file_exists
     implicit none
@@ -56,6 +60,7 @@ contains
             new_unittest("multilevel_halo", test_multilevel_halo), &
             new_unittest("collective_coarse", test_collective_coarse), &
             new_unittest("harmonic_ritz", test_harmonic_ritz), &
+            new_unittest("adjoint_projection", test_adjoint_projection), &
             new_unittest("iter_wind_solve_decomp", test_iter_wind_solve) &
             ]
     end subroutine collect_wind_iterative_suite
@@ -71,10 +76,14 @@ contains
         type(options_t) :: options
         real, allocatable :: div(:,:,:)
         real    :: div0_max, div1_max, div0_max_g, div1_max_g
+        real(c_double) :: constraint0_l2, constraint1_l2, constraint0_g2, constraint1_g2
+        real(c_double) :: solve_res0, solve_res1, cell_volume
         integer :: ierr
+        integer :: rank, solve_status, solve_iterations, ii, jj, kk
         integer :: env_status, env_length
         integer :: ims, ime, jms, jme, kms, kme, its, ite, jts, jte
-        logical :: ok, multilevel_test, multilevel_ready_ok
+        logical :: ok, multilevel_test, multilevel_ready_ok, adjoint_operator_ok
+        logical :: test_advect_density
         character(len=16) :: multilevel_env
         character(len=256) :: msg
 
@@ -111,12 +120,14 @@ contains
         call wind_var_request(options)             ! wind_alpha / w_real
         call domain%init(options, 1)
         call init_winds(domain, options)           ! -> init_iter_winds: solver state + neighbours
+        test_advect_density = adjoint_projection_is_enabled()
         multilevel_env = ''
         call get_environment_variable('HICAR_WIND_MULTILEVEL', multilevel_env, &
                                       length=env_length, status=env_status)
         multilevel_test = env_status == 0 .and. env_length > 0 .and. &
                           trim(adjustl(multilevel_env)) /= '0'
         multilevel_ready_ok = .true.
+        adjoint_operator_ok = .true.
 
         ims = domain%ims; ime = domain%ime; jms = domain%jms; jme = domain%jme
         kms = domain%kms; kme = domain%kme
@@ -136,7 +147,21 @@ contains
         !     memory indices are global, so a function of (i,j) is automatically
         !     continuous across tile boundaries and the halo cells are well-defined. --
         call seed_divergent_winds()
-        domain%vars_3d(domain%var_indx(kVARS%density)%v)%data_3d    = 1.0
+        if (test_advect_density) then
+            associate(density => domain%vars_3d(domain%var_indx(kVARS%density)%v)%data_3d)
+            do jj = lbound(density,3), ubound(density,3)
+                do kk = lbound(density,2), ubound(density,2)
+                    do ii = lbound(density,1), ubound(density,1)
+                        density(ii,kk,jj) = 0.85 + 0.001*real(ii) + &
+                                            0.004*real(kk) + 0.0007*real(jj)
+                    enddo
+                enddo
+            enddo
+            !$acc update device(density)
+            end associate
+        else
+            domain%vars_3d(domain%var_indx(kVARS%density)%v)%data_3d = 1.0
+        endif
         domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d = 1.0
 
         ! These tendency arrays are allocated locally by this fixture rather
@@ -148,13 +173,46 @@ contains
 
         !$acc data copy(kVARS) copy(div)
         ! divergence of the seeded field
-        call calc_divergence(div, domain, advect_density=.False., horz_only=.False., use_dqdt=.True.)
+        call calc_divergence(div, domain, advect_density=test_advect_density, &
+                             horz_only=.False., use_dqdt=.True.)
         !$acc update host(div)
         div0_max = maxval(abs(div(its:ite, kms:kme, jts:jte)))
+        constraint0_l2 = 0.0_c_double
+        associate(dz_c => domain%vars_3d(domain%var_indx(kVARS%advection_dz)%v)%data_3d, &
+                  jaco_c => domain%vars_3d(domain%var_indx(kVARS%jacobian)%v)%data_3d)
+        do jj = jts, jte
+            do kk = kms, kme
+                do ii = its, ite
+                    cell_volume = real(domain%dx**2*dz_c(ii,kk,jj)*jaco_c(ii,kk,jj) / &
+                                       domain%mapfac_mxy(ii,jj), c_double)
+                    constraint0_l2 = constraint0_l2 + (cell_volume*real(div(ii,kk,jj),c_double))**2
+                enddo
+            enddo
+        enddo
+        end associate
 
         ! THE solve: drives bicgstab_solve -> exchange_krylov_halos on every iteration
         call calc_iter_winds(domain, &
-            domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d, div, .False.)
+            domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d, div, test_advect_density)
+        ! Mirror wind.F90's production ordering before the independent
+        ! conservation check: corrected staggered faces are shared across
+        ! tile boundaries and must be exchanged after applying lambda.
+        call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%u)%v),do_dqdt=.True.,corners=.True.)
+        call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%v)%v),do_dqdt=.True.,corners=.True.)
+        call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%w)%v),do_dqdt=.True.,corners=.True.)
+        if (adjoint_projection_is_enabled()) then
+            ! One mixed-precision iterative-refinement pass: recompute Bq
+            ! from the actual single-precision velocity fields, solve for a
+            ! fresh correction, and apply it with a zero multiplier guess.
+            call calc_divergence(div, domain, advect_density=test_advect_density, &
+                                 horz_only=.False., use_dqdt=.True.)
+            call reset_wind_solver_guess()
+            call calc_iter_winds(domain, &
+                domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d, div, test_advect_density)
+            call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%u)%v),do_dqdt=.True.,corners=.True.)
+            call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%v)%v),do_dqdt=.True.,corners=.True.)
+            call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%w)%v),do_dqdt=.True.,corners=.True.)
+        endif
         if (multilevel_test) then
             ! The fixture bypasses wind.F90's physical D o G calibration.
             ! Its first analytic solve allocates the solver structure; now
@@ -162,14 +220,29 @@ contains
             ! feature-gated hierarchy.  The exact R A P gate is unchanged;
             ! the smoke applies one complete V-cycle to a deterministic RHS
             ! without constructing an invalid second physical divergence.
-            call probe_finalize(0.0)
+            if (.not. adjoint_projection_is_enabled()) call probe_finalize(0.0)
             multilevel_ready_ok = multilevel_preconditioner_smoke(domain)
         endif
+        if (adjoint_projection_is_enabled()) adjoint_operator_ok = adjoint_operator_smoke(domain)
 
         ! divergence of the corrected field
-        call calc_divergence(div, domain, advect_density=.False., horz_only=.False., use_dqdt=.True.)
+        call calc_divergence(div, domain, advect_density=test_advect_density, &
+                             horz_only=.False., use_dqdt=.True.)
         !$acc update host(div)
         div1_max = maxval(abs(div(its:ite, kms:kme, jts:jte)))
+        constraint1_l2 = 0.0_c_double
+        associate(dz_c => domain%vars_3d(domain%var_indx(kVARS%advection_dz)%v)%data_3d, &
+                  jaco_c => domain%vars_3d(domain%var_indx(kVARS%jacobian)%v)%data_3d)
+        do jj = jts, jte
+            do kk = kms, kme
+                do ii = its, ite
+                    cell_volume = real(domain%dx**2*dz_c(ii,kk,jj)*jaco_c(ii,kk,jj) / &
+                                       domain%mapfac_mxy(ii,jj), c_double)
+                    constraint1_l2 = constraint1_l2 + (cell_volume*real(div(ii,kk,jj),c_double))**2
+                enddo
+            enddo
+        enddo
+        end associate
         !$acc end data
         !$acc exit data delete(domain%vars_3d(domain%var_indx(kVARS%u)%v)%dqdt_3d, &
         !$acc                      domain%vars_3d(domain%var_indx(kVARS%v)%v)%dqdt_3d)
@@ -177,12 +250,34 @@ contains
         ! reduce to a global max so the assertion is decomposition-independent
         call MPI_Allreduce(div0_max, div0_max_g, 1, MPI_REAL, MPI_MAX, domain%compute_comms, ierr)
         call MPI_Allreduce(div1_max, div1_max_g, 1, MPI_REAL, MPI_MAX, domain%compute_comms, ierr)
+        call MPI_Allreduce(constraint0_l2, constraint0_g2, 1, MPI_DOUBLE_PRECISION, MPI_SUM, &
+                           domain%compute_comms, ierr)
+        call MPI_Allreduce(constraint1_l2, constraint1_g2, 1, MPI_DOUBLE_PRECISION, MPI_SUM, &
+                           domain%compute_comms, ierr)
+        call get_last_wind_solve_diagnostics(solve_status, solve_iterations, solve_res0, solve_res1)
+        call MPI_Comm_rank(domain%compute_comms, rank, ierr)
+        if (rank == 0 .and. adjoint_projection_is_enabled()) then
+            write(output_unit,'(A,I0,A,ES12.4,A,ES12.4,A,ES12.4)') &
+                ' adjoint projection diagnostic: iterations=', solve_iterations, &
+                ' true_residual=', solve_res1, ' matrix_relative=', solve_res1/max(solve_res0,tiny(solve_res0)), &
+                ' constraint_relative=', sqrt(constraint1_g2/max(constraint0_g2,tiny(constraint0_g2)))
+        endif
 
         ! --- evaluate BEFORE tearing down (so cleanup always runs) -------------------
         ok = .True.; msg = ''
         if (.not. multilevel_ready_ok) then
             ok = .False.
             msg = 'feature-gated multilevel hierarchy did not pass its R A P setup gate'
+        else if (.not. adjoint_operator_ok) then
+            ok = .False.
+            msg = 'distributed adjoint operator failed symmetry or positive-energy gate'
+        else if (adjoint_projection_is_enabled() .and. &
+                 (solve_status /= 0 .or. constraint1_g2 > (2.0e-5_c_double**2)*constraint0_g2)) then
+            ok = .False.
+            write(msg,'(A,I0,A,ES12.4,A,ES12.4)') &
+                'adjoint projection failed independent conservation gate: status=', solve_status, &
+                ' matrix residual=', solve_res1/max(solve_res0,tiny(solve_res0)), &
+                ' Bq residual=', sqrt(constraint1_g2/max(constraint0_g2,tiny(constraint0_g2)))
         else if (div1_max_g /= div1_max_g) then                  ! NaN
             ok = .False.
             msg = 'corrected wind divergence is NaN'
@@ -1056,5 +1151,181 @@ contains
             call test_failed(error,'test_harmonic_ritz','rank-one harmonic correction is incorrect')
         endif
     end subroutine test_harmonic_ritz
+
+
+    subroutine test_adjoint_projection(error)
+        type(error_type), allocatable, intent(out) :: error
+        integer, parameter :: nx = 4, nz = 3, ny = 3
+        type(adjoint_projection_t) :: projection
+        real(c_double) :: dz(nz), dz_w(nz-1), jaco_c(nx,nz,ny)
+        real(c_double) :: jaco_u(nx+1,nz,ny), rho_u(nx+1,nz,ny)
+        real(c_double) :: mx_u(nx+1,ny), my_u(nx+1,ny)
+        real(c_double) :: jaco_v(nx,nz,ny+1), rho_v(nx,nz,ny+1)
+        real(c_double) :: mx_v(nx,ny+1), my_v(nx,ny+1)
+        real(c_double) :: jaco_w(nx,nz-1,ny), rho_w(nx,nz-1,ny)
+        real(c_double) :: alpha_w(nx,nz-1,ny), mxy(nx,ny)
+        real(c_double) :: lambda(nx,nz,ny), mu(nx,nz,ny)
+        real(c_double) :: u(nx+1,nz,ny), v(nx,nz,ny+1), w(nx,nz-1,ny)
+        real(c_double) :: gu(nx+1,nz,ny), gv(nx,nz,ny+1), gw(nx,nz-1,ny)
+        real(c_double) :: ku(nx+1,nz,ny), kv(nx,nz,ny+1), kw(nx,nz-1,ny)
+        real(c_double) :: constraint(nx,nz,ny), klambda(nx,nz,ny), kmu(nx,nz,ny)
+        real(c_double) :: rhs(nx,nz,ny), solution(nx,nz,ny), residual(nx,nz,ny)
+        real(c_double) :: direction(nx,nz,ny), image(nx,nz,ny)
+        real(c_double) :: lhs, rhs_adjoint, scale, rr, rr_new, step, beta, denominator
+        real(c_double) :: initial_constraint, final_constraint
+        integer :: i, j, k, status, iteration
+
+        dz = [100.0_c_double,150.0_c_double,250.0_c_double]
+        dz_w = [125.0_c_double,200.0_c_double]
+        do j = 1, ny
+            do k = 1, nz
+                do i = 1, nx
+                    jaco_c(i,k,j) = 0.95_c_double+0.01_c_double*real(2*i+k+j,c_double)
+                    lambda(i,k,j) = sin(0.17_c_double*real(3*i+5*k+7*j,c_double))
+                    mu(i,k,j) = cos(0.11_c_double*real(5*i+2*k+3*j,c_double))
+                enddo
+            enddo
+        enddo
+        do j = 1, ny
+            do i = 1, nx
+                mxy(i,j) = 0.98_c_double+0.003_c_double*real(i+2*j,c_double)
+            enddo
+        enddo
+        do j = 1, ny
+            do k = 1, nz
+                do i = 1, nx+1
+                    jaco_u(i,k,j) = 0.96_c_double+0.008_c_double*real(i+k+j,c_double)
+                    rho_u(i,k,j) = 0.8_c_double+0.02_c_double*real(i+2*k+j,c_double)
+                    u(i,k,j) = sin(0.09_c_double*real(2*i+3*k+5*j,c_double))
+                enddo
+            enddo
+            do i = 1, nx+1
+                mx_u(i,j) = 0.99_c_double+0.002_c_double*real(i+j,c_double)
+                my_u(i,j) = 1.01_c_double+0.001_c_double*real(2*i+j,c_double)
+            enddo
+        enddo
+        do j = 1, ny+1
+            do k = 1, nz
+                do i = 1, nx
+                    jaco_v(i,k,j) = 0.97_c_double+0.007_c_double*real(i+k+j,c_double)
+                    rho_v(i,k,j) = 0.85_c_double+0.018_c_double*real(2*i+k+j,c_double)
+                    v(i,k,j) = cos(0.08_c_double*real(3*i+2*k+4*j,c_double))
+                enddo
+            enddo
+            do i = 1, nx
+                mx_v(i,j) = 1.00_c_double+0.001_c_double*real(i+2*j,c_double)
+                my_v(i,j) = 0.99_c_double+0.002_c_double*real(2*i+j,c_double)
+            enddo
+        enddo
+        do j = 1, ny
+            do k = 1, nz-1
+                do i = 1, nx
+                    jaco_w(i,k,j) = 0.94_c_double+0.009_c_double*real(i+k+j,c_double)
+                    rho_w(i,k,j) = 0.9_c_double+0.015_c_double*real(i+k+2*j,c_double)
+                    alpha_w(i,k,j) = 0.55_c_double+0.03_c_double*real(i+k+j,c_double)
+                    w(i,k,j) = sin(0.13_c_double*real(i+4*k+2*j,c_double))
+                enddo
+            enddo
+        enddo
+
+        call projection%initialize_diagonal_metric(200.0_c_double,dz,dz_w,jaco_c, &
+            jaco_u,rho_u,mx_u,my_u,jaco_v,rho_v,mx_v,my_v,jaco_w,rho_w,alpha_w,mxy,status)
+        if (status /= 0) then
+            call test_failed(error,'test_adjoint_projection','valid metric initialization failed')
+            return
+        endif
+
+        ! Exact discrete adjoint identity:
+        ! <lambda,Bq> + <-M^-1 B^T lambda,Mq> = 0.
+        call projection%apply_constraint(u,v,w,constraint)
+        call projection%apply_correction(lambda,gu,gv,gw)
+        lhs = sum(lambda*constraint)
+        rhs_adjoint = sum(gu*u/projection%inv_m_u) + sum(gv*v/projection%inv_m_v) + &
+                      sum(gw*w/projection%inv_m_w)
+        scale = max(1.0_c_double,abs(lhs),abs(rhs_adjoint))
+        if (abs(lhs+rhs_adjoint) > 2.0e-13_c_double*scale) then
+            call test_failed(error,'test_adjoint_projection','B and correction are not discrete adjoints')
+            call projection%release()
+            return
+        endif
+
+        ! The Schur complement must be symmetric and strictly positive for
+        ! the selected open-side/rigid-lid boundary conditions.
+        call projection%apply_schur(lambda,klambda)
+        call projection%apply_schur(mu,kmu)
+        lhs = sum(lambda*kmu)
+        rhs_adjoint = sum(mu*klambda)
+        scale = max(1.0_c_double,abs(lhs),abs(rhs_adjoint))
+        if (abs(lhs-rhs_adjoint) > 2.0e-13_c_double*scale .or. &
+            sum(lambda*klambda) <= 0.0_c_double) then
+            call test_failed(error,'test_adjoint_projection','Schur complement is not SPD')
+            call projection%release()
+            return
+        endif
+
+        ! Solve a manufactured mass-balance problem with matrix-free CG and
+        ! require the correction to annihilate the same Bq residual.
+        call projection%apply_constraint(u,v,w,rhs)
+        initial_constraint = sqrt(sum(rhs*rhs))
+        solution = 0.0_c_double
+        residual = rhs
+        direction = residual
+        rr = sum(residual*residual)
+        do iteration = 1, 300
+            call projection%apply_schur(direction,image)
+            denominator = sum(direction*image)
+            if (denominator <= 0.0_c_double) exit
+            step = rr/denominator
+            solution = solution+step*direction
+            residual = residual-step*image
+            rr_new = sum(residual*residual)
+            if (sqrt(rr_new) <= 2.0e-12_c_double*max(initial_constraint,1.0_c_double)) exit
+            beta = rr_new/rr
+            direction = residual+beta*direction
+            rr = rr_new
+        enddo
+        call projection%apply_correction(solution,ku,kv,kw)
+        u = u+ku
+        v = v+kv
+        w = w+kw
+        call projection%apply_constraint(u,v,w,constraint)
+        final_constraint = sqrt(sum(constraint*constraint))
+        if (iteration > 300 .or. final_constraint > &
+            5.0e-11_c_double*max(initial_constraint,1.0_c_double)) then
+            call test_failed(error,'test_adjoint_projection','manufactured projection is not mass consistent')
+            call projection%release()
+            return
+        endif
+
+        ! Flat-grid coefficients reproduce the non-cross terms in HICAR's
+        ! existing correction exactly.
+        jaco_c = 1.0_c_double; jaco_u = 1.0_c_double; jaco_v = 1.0_c_double; jaco_w = 1.0_c_double
+        rho_u = 2.0_c_double; rho_v = 2.0_c_double; rho_w = 2.0_c_double
+        mx_u = 1.0_c_double; my_u = 1.0_c_double; mx_v = 1.0_c_double; my_v = 1.0_c_double
+        mxy = 1.0_c_double; alpha_w = 0.8_c_double
+        call projection%initialize_diagonal_metric(200.0_c_double,dz,dz_w,jaco_c, &
+            jaco_u,rho_u,mx_u,my_u,jaco_v,rho_v,mx_v,my_v,jaco_w,rho_w,alpha_w,mxy,status)
+        if (status /= 0 .or. &
+            maxval(abs(projection%b_u*projection%inv_m_u-1.0_c_double/800.0_c_double)) > 1.0e-15_c_double .or. &
+            maxval(abs(projection%b_v*projection%inv_m_v-1.0_c_double/800.0_c_double)) > 1.0e-15_c_double) then
+            call test_failed(error,'test_adjoint_projection','flat horizontal correction coefficient changed')
+            call projection%release()
+            return
+        endif
+        do k = 1, nz-1
+            if (maxval(abs(projection%b_w(:,k,:)*projection%inv_m_w(:,k,:) - &
+                0.8_c_double**2/(4.0_c_double*dz_w(k)))) > 1.0e-15_c_double) then
+                call test_failed(error,'test_adjoint_projection','flat vertical correction coefficient changed')
+                exit
+            endif
+        enddo
+        alpha_w(1,1,1) = 0.0_c_double
+        call projection%initialize_diagonal_metric(200.0_c_double,dz,dz_w,jaco_c, &
+            jaco_u,rho_u,mx_u,my_u,jaco_v,rho_v,mx_v,my_v,jaco_w,rho_w,alpha_w,mxy,status)
+        if (status == 0 .or. projection%nx /= 0) then
+            call test_failed(error,'test_adjoint_projection','non-positive mobility was accepted')
+        endif
+        call projection%release()
+    end subroutine test_adjoint_projection
 
 end module test_wind_iterative
