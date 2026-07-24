@@ -542,8 +542,14 @@ contains
         multilevel_env = ''
         call get_environment_variable('HICAR_WIND_MULTILEVEL', multilevel_env, &
                                       length=env_length, status=env_status)
-        multilevel_requested = env_status == 0 .and. env_length > 0 .and. &
-                               trim(adjustl(multilevel_env)) /= '0'
+        multilevel_requested = adjoint_projection_requested .or. &
+                               (env_status == 0 .and. env_length > 0 .and. &
+                                trim(adjustl(multilevel_env)) /= '0')
+        if (STD_OUT_PE .and. adjoint_projection_requested) then
+            write(output_unit,'(A)') &
+                ' HICAR exact Galerkin multilevel preconditioner required by adjoint projection'
+            flush(output_unit)
+        endif
         fgmres_recycle_requested = 0
         recycle_env = ''
         call get_environment_variable('HICAR_WIND_RECYCLE_DIM', recycle_env, &
@@ -593,7 +599,8 @@ contains
         logical :: alpha_changed
         integer :: status, n_iters, apply_status, calibrated_max_iters
         integer :: nan_count
-        real(c_double) :: res0, res_final, local_norm2, global_norm2, target_norm, max_x_global
+        real(c_double) :: res0, res_final, local_norm2, global_norm2, rhs_norm
+        real(c_double) :: target_norm, relative_residual, max_x_global
         real(c_double) :: local_apply_stats(2), global_apply_stats(2), operator_error
         integer :: ierr
 
@@ -796,10 +803,14 @@ contains
                 ! after a warm start by substituting the smaller ||r_0||.
                 call vec_norm2_local(rhs, local_norm2)
                 call MPI_Allreduce(local_norm2, global_norm2, 1, MPI_DOUBLE_PRECISION, MPI_SUM, solver_comm, ierr)
-                target_norm = max(bicg_tol_abs, bicg_tol_rel * sqrt(global_norm2))
+                rhs_norm = sqrt(global_norm2)
+                target_norm = max(bicg_tol_abs, bicg_tol_rel * rhs_norm)
+                relative_residual = res_final / max(rhs_norm, tiny(1.0_c_double))
                 if (STD_OUT_PE) then
-                    write(*,'(A,I0,A,ES12.4,A,ES12.4)') ' HICAR native FGMRES+line: iterations=', n_iters, &
-                        ' true_residual=', res_final, ' target=', target_norm
+                    write(*,'(A,I0,A,ES12.4,A,ES12.4,A,ES12.4)') &
+                        ' HICAR native FGMRES+line: iterations=', n_iters, &
+                        ' true_residual=', res_final, ' relative_residual=', relative_residual, &
+                        ' target=', target_norm
                     flush(output_unit)
                 endif
                 if (res_final > target_norm) status = 3

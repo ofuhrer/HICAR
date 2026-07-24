@@ -126,6 +126,7 @@ contains
                                       length=env_length, status=env_status)
         multilevel_test = env_status == 0 .and. env_length > 0 .and. &
                           trim(adjustl(multilevel_env)) /= '0'
+        multilevel_test = multilevel_test .or. adjoint_projection_is_enabled()
         multilevel_ready_ok = .true.
         adjoint_operator_ok = .true.
 

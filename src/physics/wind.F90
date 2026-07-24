@@ -25,6 +25,9 @@ module wind
     use mod_atm_utilities,   only : calc_froude, calc_Ri, calc_dry_stability
     use array_utilities,      only : smooth_array
     use debug_module,     only : domain_check_winds
+    use iso_c_binding,    only : c_double
+    use ieee_arithmetic,  only : ieee_is_finite
+    use mpi
 
     implicit none
     private
@@ -40,6 +43,7 @@ module wind
     real, parameter::deg2rad=0.017453293 !2*pi/360
     real, parameter :: rad2deg=57.2957779371
     real, parameter :: DEFAULT_FR_L = 1000.0
+    real(c_double), parameter :: ADJOINT_CONSERVATION_TOL = 2.0e-5_c_double
 contains
 
 
@@ -693,10 +697,12 @@ contains
         type(options_t),intent(in)    :: options
 
         real, allocatable, dimension(:,:,:) :: div
-        integer :: nx, ny, nz, it
+        integer :: nx, ny, nz, it, conservation_ierr
         integer :: i, j, k
         logical :: w_var_given, update
         real :: wind_dt_seconds, alpha_const_val
+        real(c_double) :: constraint_initial_norm2, constraint_final_norm2
+        real(c_double) :: constraint_relative
 
         w_var_given = (options%forcing%wvar/="")
         wind_dt_seconds = options%wind%update_dt%seconds() - domain%forcing_elapsed
@@ -801,7 +807,13 @@ contains
             endif
 
             if (.not. operator_calibrated(min(domain%nest_indx, size(operator_calibrated)))) then
-                call calc_divergence(div,domain,horz_only=.False.,use_dqdt=.True.)
+                if (adjoint_projection_is_enabled()) then
+                    call calc_divergence(div, domain, &
+                        advect_density=options%adv%advect_density, &
+                        horz_only=.False., use_dqdt=.True.)
+                else
+                    call calc_divergence(div,domain,horz_only=.False.,use_dqdt=.True.)
+                endif
                 call calc_iter_winds(domain, &
                     domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d, &
                     div, options%adv%advect_density, setup_only=.true.)
@@ -817,7 +829,16 @@ contains
             ! retains its established single solve.
             do it = 1, merge(max(1,options%wind%wind_iterations), 1, &
                              adjoint_projection_is_enabled())
-                call calc_divergence(div,domain,horz_only=.False.,use_dqdt=.True.)
+                if (adjoint_projection_is_enabled()) then
+                    call calc_divergence(div, domain, &
+                        advect_density=options%adv%advect_density, &
+                        horz_only=.False., use_dqdt=.True.)
+                else
+                    call calc_divergence(div,domain,horz_only=.False.,use_dqdt=.True.)
+                endif
+                if (it == 1 .and. adjoint_projection_is_enabled()) then
+                    call projection_constraint_norm2(div, domain, constraint_initial_norm2)
+                endif
                 if (it > 1) call reset_wind_solver_guess()
                 call calc_iter_winds(domain, &
                     domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v)%data_3d, &
@@ -826,6 +847,36 @@ contains
                 call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%v)%v),do_dqdt=.True.,corners=.True.)
                 call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%w)%v),do_dqdt=.True.,corners=.True.)
             enddo
+
+            if (adjoint_projection_is_enabled()) then
+                ! The Krylov true-residual gate validates K*lambda=Bq in double
+                ! precision.  This independent check validates Bq itself after
+                ! the correction has been rounded into HICAR's single-precision
+                ! staggered wind arrays and their shared faces exchanged.
+                call calc_divergence(div, domain, &
+                    advect_density=options%adv%advect_density, &
+                    horz_only=.False., use_dqdt=.True.)
+                call projection_constraint_norm2(div, domain, constraint_final_norm2)
+                constraint_relative = sqrt(constraint_final_norm2 / &
+                    max(constraint_initial_norm2, tiny(1.0_c_double)))
+                if (STD_OUT_PE) then
+                    write(output_unit,'(A,ES12.4,A,ES12.4)') &
+                        ' HICAR adjoint conservation: relative_Bq=', constraint_relative, &
+                        ' target=', ADJOINT_CONSERVATION_TOL
+                    flush(output_unit)
+                endif
+                if (.not. ieee_is_finite(constraint_relative) .or. &
+                    constraint_relative > ADJOINT_CONSERVATION_TOL) then
+                    if (STD_OUT_PE) then
+                        write(output_unit,'(A,ES12.4,A,ES12.4)') &
+                            ' HICAR adjoint projection rejected by conservation gate: ', &
+                            constraint_relative, ' target=', ADJOINT_CONSERVATION_TOL
+                        flush(output_unit)
+                    endif
+                    call MPI_Abort(MPI_COMM_WORLD, 87, conservation_ierr)
+                    error stop
+                endif
+            endif
 
             !$acc end data
             end associate
@@ -895,6 +946,45 @@ contains
         if (options%general%debug) call domain_check_winds(domain, "Post update_winds::balance_uvw",dqdt=.True.)
 
     end subroutine update_winds
+
+
+    subroutine projection_constraint_norm2(div, domain, global_norm2)
+        real, intent(in) :: div(ims:ime,kms:kme,jms:jme)
+        type(domain_t), intent(in) :: domain
+        real(c_double), intent(out) :: global_norm2
+
+        real(c_double) :: local_norm2, dx_squared, cell_constraint
+        integer :: i, j, k, ierr
+
+        local_norm2 = 0.0_c_double
+        dx_squared = real(domain%dx,c_double)**2
+        associate(dz_c => domain%vars_3d(domain%var_indx(kVARS%advection_dz)%v)%data_3d, &
+                  jaco_c => domain%vars_3d(domain%var_indx(kVARS%jacobian)%v)%data_3d, &
+                  mapfac_mxy => domain%mapfac_mxy)
+        !$acc parallel loop gang vector collapse(3) reduction(+:local_norm2) &
+        !$acc private(cell_constraint) present(div,dz_c,jaco_c,mapfac_mxy)
+        do j = jts, jte
+            do k = kms, kme
+                do i = its, ite
+                    cell_constraint = dx_squared * real(dz_c(i,k,j),c_double) * &
+                                      real(jaco_c(i,k,j),c_double) / &
+                                      real(mapfac_mxy(i,j),c_double) * &
+                                      real(div(i,k,j),c_double)
+                    local_norm2 = local_norm2 + cell_constraint**2
+                enddo
+            enddo
+        enddo
+        end associate
+
+        call MPI_Allreduce(local_norm2, global_norm2, 1, MPI_DOUBLE_PRECISION, MPI_SUM, &
+                           domain%compute_comms, ierr)
+        if (ierr /= MPI_SUCCESS) then
+            if (STD_OUT_PE) write(output_unit,'(A,I0)') &
+                ' HICAR adjoint conservation reduction failed: MPI status=', ierr
+            call MPI_Abort(MPI_COMM_WORLD, 88, ierr)
+            error stop
+        endif
+    end subroutine projection_constraint_norm2
     
     subroutine update_wind_dqdt(domain, dt)
         implicit none

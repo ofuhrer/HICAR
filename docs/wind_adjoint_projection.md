@@ -161,3 +161,15 @@ actual stored winds, resets the multiplier correction, and resolves.  This
 does not weaken the matrix residual gate; it closes the independently
 recomputed physical constraint to the same standard despite storage
 roundoff.
+
+Enable the experimental projection with
+`HICAR_WIND_ADJOINT_PROJECTION=1`.  This automatically requires and enables
+the exact Galerkin multilevel preconditioner; running the adjoint projection
+with only the local line smoother is not a supported production mode.
+`HICAR_WIND_MULTILEVEL=1` remains available for testing that hierarchy with
+the legacy projection operator.
+
+Every production adjoint update recomputes the volume-weighted constraint
+after the final stored-wind halo exchange.  The application aborts before
+subsequent physics when its norm has not fallen below `2e-5` of the initial
+constraint norm.
