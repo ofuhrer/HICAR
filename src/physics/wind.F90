@@ -31,7 +31,8 @@ module wind
 
     implicit none
     private
-    public:: balance_uvw, update_winds, init_winds, calc_w_real, wind_var_request, update_wind_dqdt, calc_divergence
+    public:: balance_uvw, update_winds, init_winds, calc_w_real, wind_var_request
+    public:: update_wind_dqdt, calc_divergence, projection_constraint_norm2
 
     integer :: ids, ide, jds, jde, kds, kde,  &
                ims, ime, jms, jme, kms, kme,  &

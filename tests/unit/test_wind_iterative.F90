@@ -24,7 +24,8 @@ module test_wind_iterative
     use testdrive,          only : new_unittest, unittest_type, error_type, test_failed
     use domain_interface,   only : domain_t
     use options_interface,  only : options_t
-    use wind,               only : wind_var_request, init_winds, calc_divergence
+    use wind,               only : wind_var_request, init_winds, calc_divergence, &
+                                   projection_constraint_norm2
     use wind_iterative,     only : calc_iter_winds, finalize_iter_winds, probe_finalize, &
                                    multilevel_preconditioner_smoke, small_harmonic_ritz
     use wind_iterative,     only : adjoint_projection_is_enabled, get_last_wind_solve_diagnostics
@@ -77,6 +78,8 @@ contains
         real, allocatable :: div(:,:,:)
         real    :: div0_max, div1_max, div0_max_g, div1_max_g
         real(c_double) :: constraint0_l2, constraint1_l2, constraint0_g2, constraint1_g2
+        real(c_double) :: constraint0_prod_g2, constraint1_prod_g2
+        real(c_double) :: constraint0_metric_error, constraint1_metric_error
         real(c_double) :: solve_res0, solve_res1, cell_volume
         integer :: ierr
         integer :: rank, solve_status, solve_iterations, ii, jj, kk
@@ -176,6 +179,8 @@ contains
         ! divergence of the seeded field
         call calc_divergence(div, domain, advect_density=test_advect_density, &
                              horz_only=.False., use_dqdt=.True.)
+        if (adjoint_projection_is_enabled()) &
+            call projection_constraint_norm2(div, domain, constraint0_prod_g2)
         !$acc update host(div)
         div0_max = maxval(abs(div(its:ite, kms:kme, jts:jte)))
         constraint0_l2 = 0.0_c_double
@@ -229,6 +234,8 @@ contains
         ! divergence of the corrected field
         call calc_divergence(div, domain, advect_density=test_advect_density, &
                              horz_only=.False., use_dqdt=.True.)
+        if (adjoint_projection_is_enabled()) &
+            call projection_constraint_norm2(div, domain, constraint1_prod_g2)
         !$acc update host(div)
         div1_max = maxval(abs(div(its:ite, kms:kme, jts:jte)))
         constraint1_l2 = 0.0_c_double
@@ -255,6 +262,15 @@ contains
                            domain%compute_comms, ierr)
         call MPI_Allreduce(constraint1_l2, constraint1_g2, 1, MPI_DOUBLE_PRECISION, MPI_SUM, &
                            domain%compute_comms, ierr)
+        if (adjoint_projection_is_enabled()) then
+            constraint0_metric_error = abs(constraint0_prod_g2-constraint0_g2) / &
+                max(constraint0_g2,tiny(constraint0_g2))
+            constraint1_metric_error = abs(constraint1_prod_g2-constraint1_g2) / &
+                max(constraint1_g2,tiny(constraint1_g2))
+        else
+            constraint0_metric_error = 0.0_c_double
+            constraint1_metric_error = 0.0_c_double
+        endif
         call get_last_wind_solve_diagnostics(solve_status, solve_iterations, solve_res0, solve_res1)
         call MPI_Comm_rank(domain%compute_comms, rank, ierr)
         if (rank == 0 .and. adjoint_projection_is_enabled()) then
@@ -272,6 +288,12 @@ contains
         else if (.not. adjoint_operator_ok) then
             ok = .False.
             msg = 'distributed adjoint operator failed symmetry or positive-energy gate'
+        else if (adjoint_projection_is_enabled() .and. &
+                 max(constraint0_metric_error,constraint1_metric_error) > 2.0e-6_c_double) then
+            ok = .False.
+            write(msg,'(A,ES12.4,A,ES12.4)') &
+                'production constraint norm differs from independent calculation: initial=', &
+                constraint0_metric_error, ' final=', constraint1_metric_error
         else if (adjoint_projection_is_enabled() .and. &
                  (solve_status /= 0 .or. constraint1_g2 > (2.0e-5_c_double**2)*constraint0_g2)) then
             ok = .False.

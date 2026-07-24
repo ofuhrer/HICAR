@@ -84,25 +84,7 @@ grep -q 'HICAR exact Galerkin hierarchy ready:' "$run/model.out"
 grep -q 'HICAR native FGMRES+line:' "$run/model.out"
 grep -q 'HICAR adjoint conservation: relative_Bq=' "$run/model.out"
 grep -q 'Timing across all compute images:' "$run/model.out"
-awk '
-  /HICAR native FGMRES\+line:/ {
-    found_solver=1
-    for (i=1; i<=NF; ++i) {
-      if ($i == "relative_residual=" && $(i+1)+0 > 1.0e-5) bad_solver=1
-    }
-  }
-  /HICAR adjoint conservation: relative_Bq=/ {
-    found_constraint=1
-    for (i=1; i<=NF; ++i) {
-      if ($i == "relative_Bq=" && $(i+1)+0 > 2.0e-5) bad_constraint=1
-    }
-  }
-  END { exit !(found_solver && found_constraint && !bad_solver && !bad_constraint) }
-' "$run/model.out"
-if grep -Eq 'wind solve rejected|adjoint projection rejected|native FGMRES\\+line failed' "$run/model.out"; then
-  echo "Rejected solver state found in $run/model.out" >&2
-  exit 1
-fi
+awk -f "$root/tools/check_adjoint_projection_log.awk" "$run/model.out"
 test -n "$(find "$run/output" -name '*.nc' -print -quit)"
 
 echo "Adjoint 701 x 701 Alpine bridge gate passed."

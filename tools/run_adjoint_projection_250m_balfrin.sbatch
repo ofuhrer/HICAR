@@ -81,19 +81,7 @@ grep -q 'HICAR exact Galerkin hierarchy ready:' "$run/model.out"
 grep -q 'HICAR native FGMRES+line:' "$run/model.out"
 grep -q 'HICAR adjoint conservation: relative_Bq=' "$run/model.out"
 grep -q 'Timing across all compute images:' "$run/model.out"
-last_solver=$(grep 'HICAR native FGMRES+line:' "$run/model.out" | tail -n 1)
-last_conservation=$(grep 'HICAR adjoint conservation: relative_Bq=' "$run/model.out" | tail -n 1)
-relative_residual=$(sed -n 's/.*relative_residual=[[:space:]]*\\([^[:space:]]*\\).*/\\1/p' <<<"$last_solver")
-constraint_relative=$(sed -n 's/.*relative_Bq=[[:space:]]*\\([^[:space:]]*\\).*/\\1/p' <<<"$last_conservation")
-constraint_target=$(sed -n 's/.*target=[[:space:]]*\\([^[:space:]]*\\).*/\\1/p' <<<"$last_conservation")
-awk -v relative="$relative_residual" \
-  -v constraint="$constraint_relative" -v constraint_target="$constraint_target" \
-  'BEGIN { exit !((relative + 0) <= 1.0e-5 && \
-                   (constraint + 0) <= (constraint_target + 0)) }'
-if grep -Eq 'wind solve rejected|adjoint projection rejected|native FGMRES\\+line failed' "$run/model.out"; then
-  echo "Rejected solver state found in $run/model.out" >&2
-  exit 1
-fi
+awk -f "$root/tools/check_adjoint_projection_log.awk" "$run/model.out"
 test -n "$(find "$run/output" -name '*.nc' -print -quit)"
 
-echo "Adjoint 250 m gate passed: relative_residual=$relative_residual constraint=$constraint_relative"
+echo "Adjoint 250 m gate passed."
