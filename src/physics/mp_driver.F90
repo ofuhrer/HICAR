@@ -686,7 +686,7 @@ contains
         else
             ! if this is the first time mp is called, set last time such that mp will update
             if (last_model_time==-999) then
-                last_model_time = domain%sim_time%seconds() - real(update_interval)
+                last_model_time = domain%sim_time%seconds() - max(real(update_interval), dt_in)
             endif
             ! only run the microphysics if the next time step would put it over the update interval
             run_microphysics = ((domain%sim_time%seconds() + dt_in) - last_model_time >= update_interval)
