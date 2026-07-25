@@ -17,6 +17,7 @@ module time_object
     implicit none
 
     private
+    public :: canonical_time_seconds
 
     !>------------------------------------------------------------
     !!  date / time Object
@@ -89,6 +90,13 @@ module time_object
     end type Time_type
 
 interface
+
+    !> Canonicalize a model/event time to millisecond resolution.
+    module pure function canonical_time_seconds(seconds) result(canonical_seconds)
+        implicit none
+        real(real64), intent(in) :: seconds
+        real(real64)             :: canonical_seconds
+    end function canonical_time_seconds
 
     !>------------------------------------------------------------
     !!  Initialize the time object

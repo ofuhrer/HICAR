@@ -29,7 +29,7 @@ module radiation
     use options_interface,  only : options_t
     use domain_interface,   only : domain_t
     use iso_fortran_env, only: real64
-    use time_object,        only : Time_type
+    use time_object,        only : Time_type, canonical_time_seconds
     use icar_constants, only : kVARS, kRA_BASIC, kRA_SIMPLE, kRA_RRTMG, kRA_RRTMGP, STD_OUT_PE, kMP_THOMP_AER, kMAX_NESTS
     use mod_wrf_constants, only : cp, R_d, gravity, DEGRAD, DPD, piconst, STBOLT
     use mod_atm_utilities, only : cal_cldfra3_level, calc_solar_elevation, calc_solar_date
@@ -159,7 +159,7 @@ contains
         character(len=512) :: cloud_optics_lw_file = 'rrtmgp_support/rrtmgp-clouds-lw-bnd.nc'
         character(len=512) :: aerosol_optics_sw_file = ''
         character(len=512) :: aerosol_optics_lw_file = ''
-        real*8 :: eff_interval
+        real*8 :: eff_interval, initial_time
 
         if (present(context_chng)) then
             context_change = context_chng
@@ -197,12 +197,13 @@ contains
                 domain%vars_2d(domain%var_indx(kVARS%radiation_update_phase_offset)%v)%data_2d, &
                       next_update_offset => &
                 domain%vars_2d(domain%var_indx(kVARS%radiation_next_update_offset)%v)%data_2d)
+            initial_time = canonical_time_seconds(domain%sim_time%seconds())
             if (update_interval<=10) then
-                last_model_time(domain%nest_indx) = domain%sim_time%seconds()-10
-                next_update_time(domain%nest_indx) = domain%sim_time%seconds()
+                last_model_time(domain%nest_indx) = initial_time-10
+                next_update_time(domain%nest_indx) = initial_time
             else
-                last_model_time(domain%nest_indx) = domain%sim_time%seconds()-update_interval
-                next_update_time(domain%nest_indx) = domain%sim_time%seconds()
+                last_model_time(domain%nest_indx) = initial_time-update_interval
+                next_update_time(domain%nest_indx) = initial_time
             endif
             if (options%restart%restart) then
                 ! Reconstruct the exact cadence relative to the checkpoint.
@@ -210,10 +211,11 @@ contains
                 ! cannot serve as the original cadence anchor.
                 eff_interval = max(dble(update_interval), 10.0d0)
                 !$acc update self(update_phase(its,jts), next_update_offset(its,jts))
-                next_update_time(domain%nest_indx) = options%restart%restart_time%seconds() + &
-                    dble(next_update_offset(its,jts))
+                next_update_time(domain%nest_indx) = &
+                    canonical_time_seconds(options%restart%restart_time%seconds()) + &
+                    canonical_time_seconds(dble(next_update_offset(its,jts)))
                 last_model_time(domain%nest_indx) = next_update_time(domain%nest_indx) - &
-                    eff_interval + dble(update_phase(its,jts))
+                    eff_interval + canonical_time_seconds(dble(update_phase(its,jts)))
             else
                 !$acc parallel loop gang vector collapse(2) present(update_phase, next_update_offset)
                 do j = jms, jme
@@ -956,10 +958,12 @@ contains
         ! Terrain-emitted LW local variables (LW-SVF correction)
         real :: lw_emit_sum, lw_weight_sum, lw_emit_terrain, local_emit
         real(real64) :: phase_offset, next_update_offset_value
+        real(real64) :: model_time_seconds, post_step_seconds
         logical :: run_full_radiation = .False. ! Default to not running full radiation, but may be set to true below if we are over the update interval
         if (options%physics%radiation == 0) return
-        
-        run_full_radiation = (domain%sim_time%seconds() >= next_update_time(domain%nest_indx))
+
+        model_time_seconds = canonical_time_seconds(domain%sim_time%seconds())
+        run_full_radiation = (model_time_seconds >= next_update_time(domain%nest_indx))
         sun_up = .false.   ! recomputed below when terrain_shading; must be defined (`.and.` is not short-circuit)
         sun_up_global = .false.
 
@@ -1016,7 +1020,7 @@ contains
         !If we are not over the update interval, don't run any of this, since it contains allocations, etc...
         if (run_full_radiation) then
 
-            phase_offset = domain%sim_time%seconds() - next_update_time(domain%nest_indx)
+            phase_offset = model_time_seconds - next_update_time(domain%nest_indx)
             associate(update_phase => &
                 domain%vars_2d(domain%var_indx(kVARS%radiation_update_phase_offset)%v)%data_2d)
             !$acc parallel loop gang vector collapse(2) present(update_phase) firstprivate(phase_offset)
@@ -1056,9 +1060,11 @@ contains
                       skin_temperature => domain%vars_2d(domain%var_indx(kVARS%skin_temperature)%v)%data_2d, &
                       th_lwrad => domain%vars_3d(domain%var_indx(kVARS%tend_th_lwrad)%v)%data_3d, &
                       th_swrad => domain%vars_3d(domain%var_indx(kVARS%tend_th_swrad)%v)%data_3d)
-            ra_dt = domain%sim_time%seconds() - last_model_time(domain%nest_indx)
-            last_model_time(domain%nest_indx) = domain%sim_time%seconds()
-            next_update_time(domain%nest_indx) = next_update_time(domain%nest_indx) + update_interval
+            ra_dt = model_time_seconds - last_model_time(domain%nest_indx)
+            last_model_time(domain%nest_indx) = model_time_seconds
+            next_update_time(domain%nest_indx) = canonical_time_seconds( &
+                next_update_time(domain%nest_indx) + dble(update_interval) &
+            )
 
             F_QI=.false.
             F_QI2 = .false.
@@ -2060,8 +2066,12 @@ contains
 
         ! rad() is called before sim_time is advanced. Persist the next
         ! cadence boundary relative to the post-step checkpoint time.
-        next_update_offset_value = next_update_time(domain%nest_indx) - &
-            (domain%sim_time%seconds() + dble(dt))
+        post_step_seconds = canonical_time_seconds( &
+            domain%sim_time%seconds() + dble(dt) &
+        )
+        next_update_offset_value = canonical_time_seconds( &
+            next_update_time(domain%nest_indx) - post_step_seconds &
+        )
         associate(next_update_offset => &
             domain%vars_2d(domain%var_indx(kVARS%radiation_next_update_offset)%v)%data_2d)
         !$acc parallel loop gang vector collapse(2) present(next_update_offset) firstprivate(next_update_offset_value)

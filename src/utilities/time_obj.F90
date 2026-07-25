@@ -20,6 +20,15 @@ submodule(time_object) time_implementation
     
 contains
 
+    module pure function canonical_time_seconds(seconds) result(canonical_seconds)
+        implicit none
+        real(real64), intent(in) :: seconds
+        real(real64)             :: canonical_seconds
+        real(real64), parameter  :: quantum_seconds = 1.0e-3_real64
+
+        canonical_seconds = anint(seconds / quantum_seconds) * quantum_seconds
+    end function canonical_time_seconds
+
     !>------------------------------------------------------------
     !!  Initialize the time object
     !!

@@ -45,6 +45,7 @@ module land_surface
     use NoahmpHICARinitMod
     use NoahmpIOVarType, only : NoahmpIO_type
     use snow_model_driver, only : sm_var_request, sm_init, snow_model
+    use time_object, only : canonical_time_seconds
 
     implicit none
 
@@ -285,7 +286,7 @@ contains
         logical, optional, intent(in) :: context_chng
         integer :: i, j, k, dev_num
         logical :: context_change, restart, monthly_vegfrac
-        real*8 :: eff_interval
+        real*8 :: eff_interval, initial_time
 
         if (options%physics%landsurface > 0 .or. options%physics%watersurface > 0) then
 
@@ -856,12 +857,13 @@ contains
                 domain%vars_2d(domain%var_indx(kVARS%lsm_update_phase_offset)%v)%data_2d, &
                       next_update_offset => &
                 domain%vars_2d(domain%var_indx(kVARS%lsm_next_update_offset)%v)%data_2d)
+            initial_time = canonical_time_seconds(domain%sim_time%seconds())
             if (update_interval<=10) then
-                last_model_time(domain%nest_indx) = domain%sim_time%seconds()-10
-                next_update_time(domain%nest_indx) = domain%sim_time%seconds()
+                last_model_time(domain%nest_indx) = initial_time-10
+                next_update_time(domain%nest_indx) = initial_time
             else
-                last_model_time(domain%nest_indx) = domain%sim_time%seconds()-update_interval
-                next_update_time(domain%nest_indx) = domain%sim_time%seconds()
+                last_model_time(domain%nest_indx) = initial_time-update_interval
+                next_update_time(domain%nest_indx) = initial_time
             endif
             if (options%restart%restart) then
                 ! Reconstruct the exact cadence relative to the checkpoint.
@@ -869,10 +871,11 @@ contains
                 ! cannot serve as the original cadence anchor.
                 eff_interval = max(dble(update_interval), 10.0d0)
                 !$acc update self(update_phase(its,jts), next_update_offset(its,jts))
-                next_update_time(domain%nest_indx) = options%restart%restart_time%seconds() + &
-                    dble(next_update_offset(its,jts))
+                next_update_time(domain%nest_indx) = &
+                    canonical_time_seconds(options%restart%restart_time%seconds()) + &
+                    canonical_time_seconds(dble(next_update_offset(its,jts)))
                 last_model_time(domain%nest_indx) = next_update_time(domain%nest_indx) - &
-                    eff_interval + dble(update_phase(its,jts))
+                    eff_interval + canonical_time_seconds(dble(update_phase(its,jts)))
             else
                 !$acc parallel loop gang vector collapse(2) present(update_phase, next_update_offset)
                 do j = jms, jme
@@ -897,9 +900,11 @@ contains
         integer :: i,j, k, month, dev_num
         logical :: monthly_vegfrac
         real*8 :: phase_offset, next_update_offset_value
+        real*8 :: model_time_seconds, post_step_seconds
 
-        if ((domain%sim_time%seconds()) >= next_update_time(domain%nest_indx)) then
-            phase_offset = domain%sim_time%seconds() - next_update_time(domain%nest_indx)
+        model_time_seconds = canonical_time_seconds(domain%sim_time%seconds())
+        if (model_time_seconds >= next_update_time(domain%nest_indx)) then
+            phase_offset = model_time_seconds - next_update_time(domain%nest_indx)
             associate(update_phase => &
                 domain%vars_2d(domain%var_indx(kVARS%lsm_update_phase_offset)%v)%data_2d)
             !$acc parallel loop gang vector collapse(2) present(update_phase) firstprivate(phase_offset)
@@ -909,9 +914,11 @@ contains
                 enddo
             enddo
             end associate
-            lsm_dt = domain%sim_time%seconds() - last_model_time(domain%nest_indx)
-            last_model_time(domain%nest_indx) = domain%sim_time%seconds() 
-            next_update_time(domain%nest_indx) = next_update_time(domain%nest_indx) + update_interval
+            lsm_dt = model_time_seconds - last_model_time(domain%nest_indx)
+            last_model_time(domain%nest_indx) = model_time_seconds
+            next_update_time(domain%nest_indx) = canonical_time_seconds( &
+                next_update_time(domain%nest_indx) + dble(update_interval) &
+            )
 
             landuse_name = options%lsm%LU_Categories
             julian_day = domain%sim_time%day_of_year()
@@ -1482,8 +1489,12 @@ contains
 
         ! lsm() is called before sim_time is advanced. Persist the next
         ! cadence boundary relative to the post-step checkpoint time.
-        next_update_offset_value = next_update_time(domain%nest_indx) - &
-            (domain%sim_time%seconds() + dble(dt))
+        post_step_seconds = canonical_time_seconds( &
+            domain%sim_time%seconds() + dble(dt) &
+        )
+        next_update_offset_value = canonical_time_seconds( &
+            next_update_time(domain%nest_indx) - post_step_seconds &
+        )
         associate(next_update_offset => &
             domain%vars_2d(domain%var_indx(kVARS%lsm_next_update_offset)%v)%data_2d)
         !$acc parallel loop gang vector collapse(2) present(next_update_offset) firstprivate(next_update_offset_value)

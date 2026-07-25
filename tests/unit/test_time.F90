@@ -14,7 +14,7 @@
 module test_time
 
     use iso_fortran_env,   only : real64, real128, int64
-    use time_object,       only : time_type
+    use time_object,       only : time_type, canonical_time_seconds
     use time_delta_object, only : time_delta_t
     use domain_interface,  only : domain_t
     use testdrive,         only : new_unittest, unittest_type, error_type, check
@@ -201,6 +201,12 @@ contains
 
         phase_continuous = continuous%forcing_phase_at(4.0)
         phase_restarted = restarted%forcing_phase_at(4.0)
+        call check(error, &
+                   canonical_time_seconds(continuous%sim_time%seconds()) == &
+                   canonical_time_seconds(restarted%sim_time%seconds()), &
+                   "canonical model times differ for accumulated and parsed times")
+        if (allocated(error)) return
+
         call check(error, phase_continuous == phase_restarted, &
                    "accumulated and parsed restart times changed the forcing phase")
         if (allocated(error)) return

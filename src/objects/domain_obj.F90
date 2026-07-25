@@ -21,6 +21,7 @@ submodule(domain_interface) domain_implementation
     use vertical_interpolation,only : vinterp, vLUT
     use output_metadata,            only : get_varname, get_varmeta, get_varindx
     use mod_wrf_constants,    only : gravity, R_d, KARMAN, cp, DEGRAD, piconst
+    use time_object,          only : canonical_time_seconds
     use iso_fortran_env
     use debug_module,       only : domain_check
 
@@ -3476,7 +3477,6 @@ contains
         real                        :: phase
         real(real64)                :: elapsed_seconds, interval_seconds, interval_start
         real(real64), parameter     :: endpoint_tolerance_seconds = 1.0e-3_real64
-        real(real64), parameter     :: canonical_time_quantum_seconds = 1.0e-3_real64
 
         interval_seconds = this%input_dt%seconds()
         interval_start = this%next_input%seconds() - interval_seconds
@@ -3487,9 +3487,7 @@ contains
         ! a few microseconds after conversion back to seconds. Canonicalize to
         ! the model's millisecond event-time resolution before constructing
         ! the interpolation phase so both paths use the same value.
-        elapsed_seconds = anint( &
-            elapsed_seconds / canonical_time_quantum_seconds &
-        ) * canonical_time_quantum_seconds
+        elapsed_seconds = canonical_time_seconds(elapsed_seconds)
 
         ! Exact endpoint assignments below avoid evaluating left+(right-left)
         ! at phases 0 and 1.  Snap only calendar-representation noise; normal
