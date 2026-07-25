@@ -16,6 +16,7 @@ module test_time
     use iso_fortran_env,   only : real64, real128, int64
     use time_object,       only : time_type
     use time_delta_object, only : time_delta_t
+    use domain_interface,  only : domain_t
     use testdrive,         only : new_unittest, unittest_type, error_type, check
 
     implicit none
@@ -41,7 +42,8 @@ contains
             new_unittest("calendar_noleap",    test_cal_noleap), &
             new_unittest("calendar_360day",    test_cal_360day), &
             new_unittest("set_from_string",    test_set_from_string), &
-            new_unittest("delta_accumulation", test_delta_accumulation) &
+            new_unittest("delta_accumulation", test_delta_accumulation), &
+            new_unittest("forcing_absolute_phase", test_forcing_absolute_phase) &
           ]
 
     end subroutine collect_time_suite
@@ -171,5 +173,41 @@ contains
 
         call check(error, .true., "unreachable")
     end subroutine test_delta_accumulation
+
+    !> Forcing interpolation phase is a pure function of the absolute model
+    !! time and bracketing input times.  Independently initialized
+    !! uninterrupted/restart domain objects must therefore produce the same
+    !! single-precision phase bit pattern.
+    subroutine test_forcing_absolute_phase(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(domain_t) :: continuous, restarted
+        real :: phase_continuous, phase_restarted
+
+        call continuous%sim_time%init("gregorian")
+        call continuous%next_input%init("gregorian")
+        call continuous%sim_time%set("2017-02-14 00:20:00")
+        call continuous%next_input%set("2017-02-14 01:00:00")
+        call continuous%input_dt%set(seconds=3600.0)
+
+        call restarted%sim_time%init("gregorian")
+        call restarted%next_input%init("gregorian")
+        call restarted%sim_time%set("2017-02-14 00:20:00")
+        call restarted%next_input%set("2017-02-14 01:00:00")
+        call restarted%input_dt%set(seconds=3600.0)
+
+        phase_continuous = continuous%forcing_phase_at(10.0)
+        phase_restarted = restarted%forcing_phase_at(10.0)
+        call check(error, phase_continuous == phase_restarted, &
+                   "restart reconstruction changed the absolute forcing phase")
+        if (allocated(error)) return
+
+        call continuous%sim_time%set("2017-02-14 00:00:00")
+        call check(error, continuous%forcing_phase_at(0.0) == 0.0, &
+                   "forcing phase did not preserve the exact left endpoint")
+        if (allocated(error)) return
+
+        call check(error, continuous%forcing_phase_at(3600.0) == 1.0, &
+                   "forcing phase did not preserve the exact right endpoint")
+    end subroutine test_forcing_absolute_phase
 
 end module test_time

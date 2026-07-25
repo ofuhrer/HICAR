@@ -42,6 +42,7 @@ contains
         
         ! Call the parent type's init procedure
         call this%init_flow_obj(options, nest_indx)
+        this%forcing_interval_ready = .False.
 
         this%dx = options%domain%dx
 
@@ -3463,39 +3464,61 @@ contains
     end subroutine init_relax_filters
     
     
-    !> -------------------------------
-    !! Update the dQdt fields for all forced variables which force the whole domain
-    !! Forced variables which force just the boundary are handeled by a similar function called on the boundary object
-    !! 
-    !! For domain-forced variables, this routine is the partner of apply_forcing below.
-    !! update_delta_fields normalizes the difference by the time step of that difference field
-    !! apply_forcing multiplies that /second value and multiplies it by the current time step before adding it
+    !> Return the forcing interpolation phase at an offset from sim_time.
     !!
-    !! -------------------------------
+    !! The phase is reconstructed from absolute time rather than accumulated
+    !! step increments so continuous and restarted trajectories use the same
+    !! floating-point expression.
+    module function forcing_phase_at(this, offset_seconds) result(phase)
+        implicit none
+        class(domain_t), intent(in) :: this
+        real, intent(in)            :: offset_seconds
+        real                        :: phase
+        real(real64)                :: elapsed_seconds, interval_seconds, interval_start
+        real(real64), parameter     :: endpoint_tolerance_seconds = 1.0e-3_real64
+
+        interval_seconds = this%input_dt%seconds()
+        interval_start = this%next_input%seconds() - interval_seconds
+        elapsed_seconds = this%sim_time%seconds() + real(offset_seconds, real64) - &
+                          interval_start
+
+        ! Exact endpoint assignments below avoid evaluating left+(right-left)
+        ! at phases 0 and 1.  Snap only calendar-representation noise; normal
+        ! interior phases retain their absolute-time value.
+        if (abs(elapsed_seconds) <= endpoint_tolerance_seconds) then
+            phase = 0.0
+        else if (abs(elapsed_seconds - interval_seconds) <= endpoint_tolerance_seconds) then
+            phase = 1.0
+        else
+            phase = real(elapsed_seconds / interval_seconds)
+            phase = max(0.0, min(1.0, phase))
+        endif
+    end function forcing_phase_at
+
+    !> Update domain-variable dQ/dt fields used by existing consumers.
+    !!
+    !! forcing_hi itself retains exact left/right endpoint fields; it is not
+    !! converted into a rate or advanced here.
     module subroutine update_delta_fields(this)
         implicit none
         class(domain_t),    intent(inout) :: this
 
         ! temporary to hold the variable to be interpolated to
         integer :: i, k, j, n, var_indx
-        real :: dt_seconds, forcing_dt_seconds, forcing_elapsed_local
+        real :: dt_seconds
 
         dt_seconds = this%next_input%seconds() - this%sim_time%seconds()
-        forcing_dt_seconds = dt_seconds
         this%forcing_elapsed = 0.0
 
         ! check if the difference between the simulation time and next_input is less than an input_dt
         ! if so, this signals that we are in between two input times (restart scenario).
-        ! Forcing rates use full input_dt (actual interval between the two forcing states).
-        ! Domain variable rates use dt_seconds (remaining time to reach the target state).
-        ! After computing forcing rates, we advance forcing_hi%data by the elapsed time.
+        ! forcing_hi retains exact left/right endpoint values.  Only domain
+        ! variable rates use dt_seconds (remaining time to the target state).
 
         !include "-1" to accomodate rounding errors
         if (dt_seconds < (this%input_dt%seconds()-1)) then
-            forcing_dt_seconds = this%input_dt%seconds()
-            this%forcing_elapsed = forcing_dt_seconds - dt_seconds
+            this%forcing_elapsed = this%input_dt%seconds() - dt_seconds
         endif
-        forcing_elapsed_local = this%forcing_elapsed
 
         if (dt_seconds <= 10.0) then
             write(*,*) "WARNING: In domain_obj::update_delta_fields, dt_seconds <= 10.0"
@@ -3504,33 +3527,6 @@ contains
         ! Now iterate through the dictionary as long as there are more elements present
         do n = 1,size(this%forcing_hi)
             associate(forcing_hi => this%forcing_hi(n))
-            !Update delta fields on the high-resolution forcing varaibles...
-            ! Use forcing_dt_seconds (full input_dt) so rates are correct even on restart between forcing times.
-            ! Then advance data_*d by elapsed time so the base state matches the current sim_time.
-            if (this%forcing_hi(n)%two_d) then
-                associate(fh_dqdt => forcing_hi%dqdt_2d, fh_data => forcing_hi%data_2d)
-                !$acc kernels present(fh_dqdt, fh_data)
-                fh_dqdt = (fh_dqdt - fh_data) / forcing_dt_seconds
-                !$acc end kernels
-                if (forcing_elapsed_local > 0.0) then
-                    !$acc kernels present(fh_data, fh_dqdt)
-                    fh_data = fh_data + fh_dqdt * forcing_elapsed_local
-                    !$acc end kernels
-                endif
-                end associate
-            else if (this%forcing_hi(n)%three_d) then
-                associate(fh_dqdt => forcing_hi%dqdt_3d, fh_data => forcing_hi%data_3d)
-                !$acc kernels present(fh_dqdt, fh_data)
-                fh_dqdt = (fh_dqdt - fh_data) / forcing_dt_seconds
-                !$acc end kernels
-                if (forcing_elapsed_local > 0.0) then
-                    !$acc kernels present(fh_data, fh_dqdt)
-                    fh_data = fh_data + fh_dqdt * forcing_elapsed_local
-                    !$acc end kernels
-                endif
-                end associate
-            endif
-
             ! now update delta fields for domain variables
             var_indx = forcing_hi%id
             if (.not.(forcing_hi%force_boundaries)) then
@@ -3595,11 +3591,12 @@ contains
         type(meta_data_t) :: var_to_update
         integer :: i, k, j, p, var_indx, n
         integer, dimension(4) :: ims_b, ime_b, jms_b, jme_b
-        real    :: dt_h
+        real    :: dt_h, forcing_phase, forcing_value
         logical :: do_boundary, do_west, do_east, do_north, do_south, is_wind, is_w_real
 
         !calculate dt in units of hours
         dt_h = dt/3600.0
+        forcing_phase = this%forcing_phase_at(dt)
 
         do_west = (this%ims < this%ids+this%grid%halo_size+this%FILTER_WIDTH)
         do_east = (this%ime > this%ide-this%grid%halo_size-this%FILTER_WIDTH)
@@ -3650,7 +3647,14 @@ contains
                     !$acc parallel loop gang vector collapse(2) present(var_data, var_dqdt, f_data, f_dqdt)
                     do j = jms,jme
                         do i = ims,ime
-                            var_data(i,j) = var_data(i,j) + (var_dqdt(i,j) * dt)
+                            if (forcing_phase <= 0.0) then
+                                var_data(i,j) = f_data(i,j)
+                            else if (forcing_phase >= 1.0) then
+                                var_data(i,j) = f_dqdt(i,j)
+                            else
+                                var_data(i,j) = f_data(i,j) + &
+                                    (f_dqdt(i,j) - f_data(i,j)) * forcing_phase
+                            endif
                             var_data(i,j) = max(var_data(i,j),0.0)
                         enddo
                     enddo
@@ -3658,20 +3662,29 @@ contains
                     !$acc parallel present(var_data, f_data, f_dqdt, relax_filter, ims_b, ime_b, jms_b, jme_b)
                     do p = 1,4
                         if (ims_b(p)*ime_b(p)*jms_b(p)*jme_b(p) == 0) cycle
-                        !Update forcing data to current time step
-                        !$acc loop gang vector collapse(2)
+                        ! Reconstruct the forcing target at the exact
+                        ! post-step model time.  The scalar is private to
+                        ! each collapsed loop iteration.
+                        !$acc loop gang vector collapse(2) private(forcing_value)
                         do j = jms_b(p),jme_b(p)
                             do i = ims_b(p),ime_b(p)
                                 if (relax_filter(i,j) > 0.0) then
-                                    f_data(i,j) = f_data(i,j) + (f_dqdt(i,j) * dt)
-                                    f_data(i,j) = max(f_data(i,j),0.0)
+                                    if (forcing_phase <= 0.0) then
+                                        forcing_value = f_data(i,j)
+                                    else if (forcing_phase >= 1.0) then
+                                        forcing_value = f_dqdt(i,j)
+                                    else
+                                        forcing_value = f_data(i,j) + &
+                                            (f_dqdt(i,j) - f_data(i,j)) * forcing_phase
+                                    endif
+                                    forcing_value = max(forcing_value,0.0)
 
                                     if (relax_filter(i,j) == 1.0) then
-                                        var_data(i,j) = f_data(i,j)
+                                        var_data(i,j) = forcing_value
                                     else
                                         var_data(i,j) = var_data(i,j) + &
                                                         (relax_filter(i,j) * dt_h) * &
-                                                        (f_data(i,j) - var_data(i,j))
+                                                        (forcing_value - var_data(i,j))
 
                                         var_data(i,j) = max(var_data(i,j),0.0)
                                     endif
@@ -3703,13 +3716,17 @@ contains
                     do j = jms,jme
                         do k = kms, kme
                             do i = ims,ime
-                                f_data(i,k,j)    = f_data(i,k,j) + (f_dqdt(i,k,j) * dt)
-                                if (.not.(is_wind)) f_data(i,k,j) = max(f_data(i,k,j),0.0)
-
-                                if (.not.(is_w_real)) var_data(i,k,j) = var_data(i,k,j) + &
-                                                                (var_dqdt(i,k,j) * dt)
-
-                                if (.not.(is_wind)) var_data(i,k,j) = max(var_data(i,k,j),0.0)
+                                if (.not.(is_wind)) then
+                                    if (forcing_phase <= 0.0) then
+                                        var_data(i,k,j) = f_data(i,k,j)
+                                    else if (forcing_phase >= 1.0) then
+                                        var_data(i,k,j) = f_dqdt(i,k,j)
+                                    else
+                                        var_data(i,k,j) = f_data(i,k,j) + &
+                                            (f_dqdt(i,k,j) - f_data(i,k,j)) * forcing_phase
+                                    endif
+                                    var_data(i,k,j) = max(var_data(i,k,j),0.0)
+                                endif
                             enddo
                         enddo
                     enddo
@@ -3717,21 +3734,29 @@ contains
                     !$acc parallel present(var_data, f_data, f_dqdt, relax_filter, ims_b, ime_b, jms_b, jme_b)
                     do p = 1,4
                         if (ims_b(p)*ime_b(p)*jms_b(p)*jme_b(p) == 0) cycle
-                        !Update forcing data to current time step
-                        !$acc loop gang vector collapse(3)
+                        ! Reconstruct the forcing target at the exact
+                        ! post-step model time.
+                        !$acc loop gang vector collapse(3) private(forcing_value)
                         do j = jms_b(p),jme_b(p)
                             do k = kms, kme
                                 do i = ims_b(p),ime_b(p)
                                     if (relax_filter(i,k,j) > 0.0) then
-                                        f_data(i,k,j) = f_data(i,k,j) + (f_dqdt(i,k,j) * dt)
-                                        f_data(i,k,j) = max(f_data(i,k,j),0.0)
+                                        if (forcing_phase <= 0.0) then
+                                            forcing_value = f_data(i,k,j)
+                                        else if (forcing_phase >= 1.0) then
+                                            forcing_value = f_dqdt(i,k,j)
+                                        else
+                                            forcing_value = f_data(i,k,j) + &
+                                                (f_dqdt(i,k,j) - f_data(i,k,j)) * forcing_phase
+                                        endif
+                                        if (.not.(is_wind)) forcing_value = max(forcing_value,0.0)
 
                                         if (relax_filter(i,k,j) == 1.0) then
-                                            var_data(i,k,j) = f_data(i,k,j)
+                                            var_data(i,k,j) = forcing_value
                                         else
                                             var_data(i,k,j) = var_data(i,k,j) + &
                                                             (relax_filter(i,k,j) * dt_h) * &
-                                                            (f_data(i,k,j) - var_data(i,k,j))
+                                                            (forcing_value - var_data(i,k,j))
 
                                             var_data(i,k,j) = max(var_data(i,k,j),0.0)
                                         endif
@@ -3782,6 +3807,29 @@ contains
 
         update_only = .False.
         if (present(update)) update_only = update
+
+        ! Keep exact forcing endpoints instead of advancing an interpolated
+        ! field incrementally.  On every interval after the first, promote
+        ! the previous right endpoint before the new right endpoint is read.
+        if (update_only .and. this%forcing_interval_ready) then
+            do p = 1,size(this%forcing_hi)
+                if (this%forcing_hi(p)%two_d) then
+                    associate(fh_left => this%forcing_hi(p)%data_2d, &
+                              fh_right => this%forcing_hi(p)%dqdt_2d)
+                    !$acc kernels present(fh_left, fh_right)
+                    fh_left = fh_right
+                    !$acc end kernels
+                    end associate
+                else if (this%forcing_hi(p)%three_d) then
+                    associate(fh_left => this%forcing_hi(p)%data_3d, &
+                              fh_right => this%forcing_hi(p)%dqdt_3d)
+                    !$acc kernels present(fh_left, fh_right)
+                    fh_left = fh_right
+                    !$acc end kernels
+                    end associate
+                endif
+            enddo
+        endif
 
         ! Now iterate through the dictionary as long as there are more elements present
         do p = 1,size(this%forcing_hi)
@@ -3911,6 +3959,8 @@ contains
 
         !Ensure that input data for hydrometeors after interpolation have been forced to 0-minimum
         !call this%enforce_limits(update_in=update_only)
+
+        if (update_only) this%forcing_interval_ready = .True.
 
         !Perform a diagnostic_update to ensure that all diagnostic variables are set for the new forcing data
         !This will be overwriten as soon as we enter the physics loop, but it is necesery to compute density

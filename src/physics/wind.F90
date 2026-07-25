@@ -586,6 +586,7 @@ contains
         real, intent(in) :: wind_update_dt
 
         integer :: i, j, k
+        real :: forcing_phase
 
         associate(u => domain%vars_3d(domain%var_indx(kVARS%u)%v)%data_3d, &
                   v => domain%vars_3d(domain%var_indx(kVARS%v)%v)%data_3d, &
@@ -610,75 +611,67 @@ contains
                 enddo
             enddo
         end if
-        !Compute the forcing wind field at the next update step, assuming a linear interpolation through time
+        ! Reconstruct the wind target from exact forcing endpoints and
+        ! absolute model time.  The first solve targets the current time;
+        ! subsequent solves target the end of the wind-update interval.
         if (first_wind) then
-            !Compute the forcing wind field at the current step
-
-            !$acc parallel
-            !$acc loop gang vector collapse(3)
-            do j = jms, jme
-                do k = kms, kme
-                    do i = ims,ime+1
-                        u_dqdt_3d(i,k,j) = fu(i,k,j)
-                    enddo
-                enddo
-            enddo
-            !$acc loop gang vector collapse(3)
-            do j = jms, jme+1
-                do k = kms, kme
-                    do i = ims,ime
-                        v_dqdt_3d(i,k,j) = fv(i,k,j)
-                    enddo
-                enddo
-            enddo
-            !$acc end parallel
-
-            if (w_var_given) then
-                associate(fw => domain%forcing_hi(domain%forcing_var_indx(kVARS%w_real)%v)%data_3d)
-                !$acc parallel loop gang vector collapse(3) present(fw)
-                do j = jms, jme
-                    do k = kms, kme
-                        do i = ims,ime
-                            w(i,k,j) = fw(i,k,j)
-                        enddo
-                    enddo
-                enddo
-                end associate
-            endif
+            forcing_phase = domain%forcing_phase_at(0.0)
         else
-            !Compute the forcing wind field at the next update step, assuming a linear interpolation through time
-            !$acc parallel
-            !$acc loop gang vector collapse(3)
-            do i = ims,ime+1
-                do k = kms, kme
-                    do j = jms, jme
-                        u_dqdt_3d(i,k,j) = fu(i,k,j)+fu_dqdt_3d(i,k,j)*wind_update_dt
-                    enddo
+            forcing_phase = domain%forcing_phase_at(wind_update_dt)
+        endif
+
+        !$acc parallel
+        !$acc loop gang vector collapse(3)
+        do i = ims,ime+1
+            do k = kms, kme
+                do j = jms, jme
+                    if (forcing_phase <= 0.0) then
+                        u_dqdt_3d(i,k,j) = fu(i,k,j)
+                    else if (forcing_phase >= 1.0) then
+                        u_dqdt_3d(i,k,j) = fu_dqdt_3d(i,k,j)
+                    else
+                        u_dqdt_3d(i,k,j) = fu(i,k,j) + &
+                            (fu_dqdt_3d(i,k,j) - fu(i,k,j)) * forcing_phase
+                    endif
                 enddo
             enddo
-            !$acc loop gang vector collapse(3)
+        enddo
+        !$acc loop gang vector collapse(3)
+        do i = ims,ime
+            do k = kms, kme
+                do j = jms, jme+1
+                    if (forcing_phase <= 0.0) then
+                        v_dqdt_3d(i,k,j) = fv(i,k,j)
+                    else if (forcing_phase >= 1.0) then
+                        v_dqdt_3d(i,k,j) = fv_dqdt_3d(i,k,j)
+                    else
+                        v_dqdt_3d(i,k,j) = fv(i,k,j) + &
+                            (fv_dqdt_3d(i,k,j) - fv(i,k,j)) * forcing_phase
+                    endif
+                enddo
+            enddo
+        enddo
+        !$acc end parallel
+
+        if (w_var_given) then
+            associate(fw => domain%forcing_hi(domain%forcing_var_indx(kVARS%w_real)%v)%data_3d, &
+                      fw_dqdt_3d => domain%forcing_hi(domain%forcing_var_indx(kVARS%w_real)%v)%dqdt_3d)
+            !$acc parallel loop gang vector collapse(3) present(fw, fw_dqdt_3d)
             do i = ims,ime
                 do k = kms, kme
-                    do j = jms, jme+1
-                        v_dqdt_3d(i,k,j) = fv(i,k,j)+fv_dqdt_3d(i,k,j)*wind_update_dt
+                    do j = jms, jme
+                        if (forcing_phase <= 0.0) then
+                            w(i,k,j) = fw(i,k,j)
+                        else if (forcing_phase >= 1.0) then
+                            w(i,k,j) = fw_dqdt_3d(i,k,j)
+                        else
+                            w(i,k,j) = fw(i,k,j) + &
+                                (fw_dqdt_3d(i,k,j) - fw(i,k,j)) * forcing_phase
+                        endif
                     enddo
                 enddo
             enddo
-            !$acc end parallel
-
-            if (w_var_given) then
-                associate(fw => domain%forcing_hi(domain%forcing_var_indx(kVARS%w_real)%v)%data_3d, &
-                          fw_dqdt_3d => domain%forcing_hi(domain%forcing_var_indx(kVARS%w_real)%v)%dqdt_3d)
-                !$acc parallel loop gang vector collapse(3) present(fw, fw_dqdt_3d)
-                do i = ims,ime
-                    do k = kms, kme
-                        do j = jms, jme
-                            w(i,k,j) = fw(i,k,j)+fw_dqdt_3d(i,k,j)*wind_update_dt
-                        enddo
-                    enddo
-                enddo
-                end associate
-            endif
+            end associate
         endif
         !$acc end data
         end associate

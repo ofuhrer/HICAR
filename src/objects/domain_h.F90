@@ -54,6 +54,12 @@ module domain_interface
     ! complex(C_DOUBLE_COMPLEX),  allocatable :: terrain_frequency(:,:) ! FFT(terrain)
 
     type(variable_t), allocatable :: forcing_hi(:)
+    ! forcing_hi%data_*d and forcing_hi%dqdt_*d retain the exact
+    ! interpolated left and right forcing records, respectively.  This flag
+    ! distinguishes the first right-endpoint load from later interval
+    ! advances, when the previous right endpoint must be promoted to the
+    ! next interval's left endpoint.
+    logical :: forcing_interval_ready = .False.
 
     type(variable_t), allocatable :: vars_1d(:)
     type(variable_t), allocatable :: vars_2d(:)
@@ -118,6 +124,7 @@ module domain_interface
     procedure :: interpolate_forcing
     procedure :: update_delta_fields
     procedure :: apply_forcing
+    procedure :: forcing_phase_at
     procedure :: read_land_variables
 
     procedure :: update_device
@@ -218,6 +225,13 @@ module domain_interface
         type(options_t), intent(in)       :: options
         real, intent(in)                  :: dt
     end subroutine
+
+    module function forcing_phase_at(this, offset_seconds) result(phase)
+        implicit none
+        class(domain_t), intent(in) :: this
+        real, intent(in)            :: offset_seconds
+        real                        :: phase
+    end function
 
     module subroutine read_land_variables(this, options)
         implicit none
