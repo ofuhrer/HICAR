@@ -3476,11 +3476,20 @@ contains
         real                        :: phase
         real(real64)                :: elapsed_seconds, interval_seconds, interval_start
         real(real64), parameter     :: endpoint_tolerance_seconds = 1.0e-3_real64
+        real(real64), parameter     :: canonical_time_quantum_seconds = 1.0e-3_real64
 
         interval_seconds = this%input_dt%seconds()
         interval_start = this%next_input%seconds() - interval_seconds
         elapsed_seconds = this%sim_time%seconds() + real(offset_seconds, real64) - &
                           interval_start
+        ! Time_type stores modified Julian days. Repeatedly advancing an event
+        ! time and parsing the same restart timestamp can therefore differ by
+        ! a few microseconds after conversion back to seconds. Canonicalize to
+        ! the model's millisecond event-time resolution before constructing
+        ! the interpolation phase so both paths use the same value.
+        elapsed_seconds = anint( &
+            elapsed_seconds / canonical_time_quantum_seconds &
+        ) * canonical_time_quantum_seconds
 
         ! Exact endpoint assignments below avoid evaluating left+(right-left)
         ! at phases 0 and 1.  Snap only calendar-representation noise; normal

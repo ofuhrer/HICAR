@@ -181,24 +181,32 @@ contains
     subroutine test_forcing_absolute_phase(error)
         type(error_type), allocatable, intent(out) :: error
         type(domain_t) :: continuous, restarted
+        type(time_delta_t) :: model_step
         real :: phase_continuous, phase_restarted
 
         call continuous%sim_time%init("gregorian")
         call continuous%next_input%init("gregorian")
-        call continuous%sim_time%set("2017-02-14 00:20:00")
+        call continuous%sim_time%set("2017-02-14 00:00:00")
         call continuous%next_input%set("2017-02-14 01:00:00")
         call continuous%input_dt%set(seconds=3600.0)
+        call model_step%set(seconds=4.0)
+        call continuous%sim_time%set(continuous%sim_time%mjd() + model_step%days())
+        call continuous%sim_time%set(continuous%sim_time%mjd() + model_step%days())
 
         call restarted%sim_time%init("gregorian")
         call restarted%next_input%init("gregorian")
-        call restarted%sim_time%set("2017-02-14 00:20:00")
+        call restarted%sim_time%set("2017-02-14 00:00:08")
         call restarted%next_input%set("2017-02-14 01:00:00")
         call restarted%input_dt%set(seconds=3600.0)
 
-        phase_continuous = continuous%forcing_phase_at(10.0)
-        phase_restarted = restarted%forcing_phase_at(10.0)
+        phase_continuous = continuous%forcing_phase_at(4.0)
+        phase_restarted = restarted%forcing_phase_at(4.0)
         call check(error, phase_continuous == phase_restarted, &
-                   "restart reconstruction changed the absolute forcing phase")
+                   "accumulated and parsed restart times changed the forcing phase")
+        if (allocated(error)) return
+
+        call check(error, phase_continuous == real(12.0_real64 / 3600.0_real64), &
+                   "canonical forcing phase changed the intended 12-second phase")
         if (allocated(error)) return
 
         call continuous%sim_time%set("2017-02-14 00:00:00")
