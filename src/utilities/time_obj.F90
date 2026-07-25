@@ -20,7 +20,7 @@ submodule(time_object) time_implementation
     
 contains
 
-    module pure function canonical_time_seconds(seconds) result(canonical_seconds)
+    module function canonical_time_seconds(seconds) result(canonical_seconds)
         implicit none
         real(real64), intent(in) :: seconds
         real(real64)             :: canonical_seconds
