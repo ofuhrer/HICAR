@@ -2219,6 +2219,29 @@ contains
             var_meta%dtype       = kINTEGER
 
         !>------------------------------------------------------------
+        !!  Adaptive-step offset of the most recent LSM call from its
+        !!  ideal cadence boundary. Spatially constant and restart-only.
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%lsm_update_phase_offset) then
+            var_meta%name        = "lsm_update_phase_offset"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("long_name", "land-surface update phase offset"), &
+                                attribute_t("units",         "s"),                                &
+                                attribute_t("coordinates",   "lat lon")]
+
+        !>------------------------------------------------------------
+        !!  Adaptive-step offset of the most recent full-radiation call
+        !!  from its ideal cadence boundary. Spatially constant and
+        !!  restart-only.
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%radiation_update_phase_offset) then
+            var_meta%name        = "radiation_update_phase_offset"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("long_name", "radiation update phase offset"), &
+                                attribute_t("units",         "s"),                             &
+                                attribute_t("coordinates",   "lat lon")]
+
+        !>------------------------------------------------------------
         !!  Cumulative snowfall snapshot at the last SNOWPACK layer deposit;
         !!  used so SNOWPACK can hold sub-threshold (hn<0.001 m) snow mass
         !!  across calls until enough has accumulated to form a layer.

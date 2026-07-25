@@ -436,6 +436,10 @@ module icar_constants
         ! Restart-persistent Noah-MP call number. Keep this immediately before
         ! last_var so no existing variable identifier is renumbered.
         integer :: lsm_timestep_counter
+        ! Small offsets from the ideal physics cadence preserve the actual
+        ! adaptive-step call times across a process restart.
+        integer :: lsm_update_phase_offset
+        integer :: radiation_update_phase_offset
 
         integer :: last_var
     end type var_constants_type

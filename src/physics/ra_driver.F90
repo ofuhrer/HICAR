@@ -152,7 +152,7 @@ contains
         logical, optional, intent(in) :: context_chng
 
         logical :: context_change
-        integer :: i
+        integer :: i, j
         character(len=512) :: k_dist_sw_file = 'rrtmgp_support/rrtmgp-gas-sw-g112.nc'
         character(len=512) :: k_dist_lw_file = 'rrtmgp_support/rrtmgp-gas-lw-g128.nc'
         character(len=512) :: cloud_optics_sw_file = 'rrtmgp_support/rrtmgp-clouds-sw-bnd.nc'
@@ -194,6 +194,8 @@ contains
 
         !Saftey bound, in case update_interval is 0, or very small
         if (.not.(context_change)) then
+            associate(update_phase => &
+                domain%vars_2d(domain%var_indx(kVARS%radiation_update_phase_offset)%v)%data_2d)
             if (update_interval<=10) then
                 last_model_time(domain%nest_indx) = domain%sim_time%seconds()-10
                 next_update_time(domain%nest_indx) = domain%sim_time%seconds()
@@ -208,9 +210,20 @@ contains
                 ! add a small fraction of a second in the case of roundoff errors restart time
                 elapsed = (options%restart%restart_time%seconds() - 0.01) - options%general%start_time%seconds()
                 n_calls = int(elapsed / eff_interval)
-                last_model_time(domain%nest_indx) = options%general%start_time%seconds() + n_calls * eff_interval
-                next_update_time(domain%nest_indx) = last_model_time(domain%nest_indx) + eff_interval - 0.01
+                !$acc update self(update_phase(its,jts))
+                last_model_time(domain%nest_indx) = options%general%start_time%seconds() + &
+                    n_calls * eff_interval + dble(update_phase(its,jts))
+                next_update_time(domain%nest_indx) = options%general%start_time%seconds() + &
+                    (n_calls + 1) * eff_interval
+            else
+                !$acc parallel loop gang vector collapse(2) present(update_phase)
+                do j = jms, jme
+                    do i = ims, ime
+                        update_phase(i,j) = 0.0
+                    enddo
+                enddo
             endif
+            end associate
         endif
         
         ! if (options%rad%terrain_shading) then
@@ -779,6 +792,11 @@ contains
         implicit none
         type(options_t), intent(inout) :: options
 
+        if (options%physics%radiation > 0) then
+            call options%alloc_vars([kVARS%radiation_update_phase_offset])
+            call options%restart_vars([kVARS%radiation_update_phase_offset])
+        endif
+
         if (options%physics%radiation == kRA_SIMPLE) then
             call ra_simple_var_request(options)
         endif
@@ -937,6 +955,7 @@ contains
         integer :: di, dj, ii, jj
         ! Terrain-emitted LW local variables (LW-SVF correction)
         real :: lw_emit_sum, lw_weight_sum, lw_emit_terrain, local_emit
+        real(real64) :: phase_offset
         logical :: run_full_radiation = .False. ! Default to not running full radiation, but may be set to true below if we are over the update interval
         if (options%physics%radiation == 0) return
         
@@ -996,6 +1015,17 @@ contains
 
         !If we are not over the update interval, don't run any of this, since it contains allocations, etc...
         if (run_full_radiation) then
+
+            phase_offset = domain%sim_time%seconds() - next_update_time(domain%nest_indx)
+            associate(update_phase => &
+                domain%vars_2d(domain%var_indx(kVARS%radiation_update_phase_offset)%v)%data_2d)
+            !$acc parallel loop gang vector collapse(2) present(update_phase) firstprivate(phase_offset)
+            do j = jms, jme
+                do i = ims, ime
+                    update_phase(i,j) = real(phase_offset)
+                enddo
+            enddo
+            end associate
 
             associate(albedo_dom => domain%vars_2d(domain%var_indx(kVARS%albedo)%v)%data_2d, &
                       shortwave => domain%vars_2d(domain%var_indx(kVARS%shortwave)%v)%data_2d, &

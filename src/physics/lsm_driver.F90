@@ -179,7 +179,7 @@ contains
                          kVARS%snicar_bcphi_conc, kVARS%snicar_bcpho_conc, kVARS%snicar_ocphi_conc, kVARS%snicar_ocpho_conc,      &
                          kVARS%snicar_dust1_conc, kVARS%snicar_dust2_conc, kVARS%snicar_dust3_conc, kVARS%snicar_dust4_conc, kVARS%snicar_dust5_conc, &
                          kVARS%veg_type, kVARS%soil_type, kVARS%land_mask, kVARS%land_emissivity,                   &
-                         kVARS%lsm_timestep_counter])
+                         kVARS%lsm_timestep_counter, kVARS%lsm_update_phase_offset])
 
              call options%restart_vars( &
                          [kVARS%water_vapor, kVARS%potential_temperature, kVARS%precipitation, kVARS%temperature,       &
@@ -204,7 +204,7 @@ contains
                          kVARS%snicar_bcphi_conc, kVARS%snicar_bcpho_conc, kVARS%snicar_ocphi_conc, kVARS%snicar_ocpho_conc,      &
                          kVARS%snicar_dust1_conc, kVARS%snicar_dust2_conc, kVARS%snicar_dust3_conc, kVARS%snicar_dust4_conc, kVARS%snicar_dust5_conc, &
                          kVARS%mass_ag_grain, kVARS%growing_degree_days,                                &
-                         kVARS%lsm_timestep_counter])!, kVARS%veg_type])    ! BK uncommented 2021/03/20
+                         kVARS%lsm_timestep_counter, kVARS%lsm_update_phase_offset])!, kVARS%veg_type])    ! BK uncommented 2021/03/20
                          ! kVARS%soil_type, kVARS%land_mask, kVARS%vegetation_fraction]
         endif
 
@@ -853,6 +853,8 @@ contains
         call sm_init(domain, options, context_chng=context_change)
         update_interval=options%lsm%update_interval
         if (.not.(context_change)) then
+            associate(update_phase => &
+                domain%vars_2d(domain%var_indx(kVARS%lsm_update_phase_offset)%v)%data_2d)
             if (update_interval<=10) then
                 last_model_time(domain%nest_indx) = domain%sim_time%seconds()-10
                 next_update_time(domain%nest_indx) = domain%sim_time%seconds()
@@ -868,9 +870,20 @@ contains
                 ! add a small fraction of a second in the case of roundoff errors restart time
                 elapsed = (options%restart%restart_time%seconds() - 0.01) - options%general%start_time%seconds()
                 n_calls = int(elapsed / eff_interval)
-                last_model_time(domain%nest_indx) = options%general%start_time%seconds() + n_calls * eff_interval
-                next_update_time(domain%nest_indx) = last_model_time(domain%nest_indx) + eff_interval - 0.01
+                !$acc update self(update_phase(its,jts))
+                last_model_time(domain%nest_indx) = options%general%start_time%seconds() + &
+                    n_calls * eff_interval + dble(update_phase(its,jts))
+                next_update_time(domain%nest_indx) = options%general%start_time%seconds() + &
+                    (n_calls + 1) * eff_interval
+            else
+                !$acc parallel loop gang vector collapse(2) present(update_phase)
+                do j = jms, jme
+                    do i = ims, ime
+                        update_phase(i,j) = 0.0
+                    enddo
+                enddo
             endif
+            end associate
         endif
 
     end subroutine lsm_init
@@ -884,8 +897,19 @@ contains
         real, intent(in) :: dt
         integer :: i,j, k, month, dev_num
         logical :: monthly_vegfrac
+        real*8 :: phase_offset
 
         if ((domain%sim_time%seconds()) >= next_update_time(domain%nest_indx)) then
+            phase_offset = domain%sim_time%seconds() - next_update_time(domain%nest_indx)
+            associate(update_phase => &
+                domain%vars_2d(domain%var_indx(kVARS%lsm_update_phase_offset)%v)%data_2d)
+            !$acc parallel loop gang vector collapse(2) present(update_phase) firstprivate(phase_offset)
+            do j = jms, jme
+                do i = ims, ime
+                    update_phase(i,j) = real(phase_offset)
+                enddo
+            enddo
+            end associate
             lsm_dt = domain%sim_time%seconds() - last_model_time(domain%nest_indx)
             last_model_time(domain%nest_indx) = domain%sim_time%seconds() 
             next_update_time(domain%nest_indx) = next_update_time(domain%nest_indx) + update_interval
