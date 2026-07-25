@@ -178,7 +178,8 @@ contains
                          kVARS%snicar_dust1, kVARS%snicar_dust2, kVARS%snicar_dust3, kVARS%snicar_dust4, kVARS%snicar_dust5,      &
                          kVARS%snicar_bcphi_conc, kVARS%snicar_bcpho_conc, kVARS%snicar_ocphi_conc, kVARS%snicar_ocpho_conc,      &
                          kVARS%snicar_dust1_conc, kVARS%snicar_dust2_conc, kVARS%snicar_dust3_conc, kVARS%snicar_dust4_conc, kVARS%snicar_dust5_conc, &
-                         kVARS%veg_type, kVARS%soil_type, kVARS%land_mask, kVARS%land_emissivity])
+                         kVARS%veg_type, kVARS%soil_type, kVARS%land_mask, kVARS%land_emissivity,                   &
+                         kVARS%lsm_timestep_counter])
 
              call options%restart_vars( &
                          [kVARS%water_vapor, kVARS%potential_temperature, kVARS%precipitation, kVARS%temperature,       &
@@ -202,7 +203,8 @@ contains
                          kVARS%snicar_dust1, kVARS%snicar_dust2, kVARS%snicar_dust3, kVARS%snicar_dust4, kVARS%snicar_dust5,      &
                          kVARS%snicar_bcphi_conc, kVARS%snicar_bcpho_conc, kVARS%snicar_ocphi_conc, kVARS%snicar_ocpho_conc,      &
                          kVARS%snicar_dust1_conc, kVARS%snicar_dust2_conc, kVARS%snicar_dust3_conc, kVARS%snicar_dust4_conc, kVARS%snicar_dust5_conc, &
-                         kVARS%mass_ag_grain, kVARS%growing_degree_days])!, kVARS%veg_type])    ! BK uncommented 2021/03/20
+                         kVARS%mass_ag_grain, kVARS%growing_degree_days,                                &
+                         kVARS%lsm_timestep_counter])!, kVARS%veg_type])    ! BK uncommented 2021/03/20
                          ! kVARS%soil_type, kVARS%land_mask, kVARS%vegetation_fraction]
         endif
 
@@ -380,16 +382,38 @@ contains
             num_snow_layers=3!options%sm%num_snow_layers
             if (STD_OUT_PE .and. .not.context_change) write(*,*) "    num_soil_layers=", num_soil_layers, " num_snow_layers=", num_snow_layers
             call allocate_noah_data(num_soil_layers, num_snow_layers)
+
+            associate(lsm_timestep_counter => &
+                domain%vars_2d(domain%var_indx(kVARS%lsm_timestep_counter)%v)%data_2di)
+            if (restart) then
+                !$acc update self(lsm_timestep_counter(its,jts))
+                ITIMESTEP = lsm_timestep_counter(its,jts)
+                if (ITIMESTEP < 1) then
+                    stop "Invalid Noah-MP timestep counter in restart file"
+                endif
+            else
+                !$acc parallel loop gang vector collapse(2) present(lsm_timestep_counter)
+                do j = jms, jme
+                    do i = ims, ime
+                        lsm_timestep_counter(i,j) = ITIMESTEP
+                    enddo
+                enddo
+            endif
+            end associate
         endif
 
-        ! initial guesses
-        !$acc parallel loop gang vector collapse(2) present(temperature_2m, humidity_2m, temperature, water_vapor)
-        do j = jms, jme
-            do i = ims, ime
-                temperature_2m(i,j) = temperature(i,kms,j)
-                humidity_2m(i,j) = water_vapor(i,kms,j)
+        ! Initial guesses are cold-start state only. On restart, T2/Q2 have
+        ! already been restored and must not be replaced by the lowest model
+        ! level before the first surface/land update.
+        if (.not. restart) then
+            !$acc parallel loop gang vector collapse(2) present(temperature_2m, humidity_2m, temperature, water_vapor)
+            do j = jms, jme
+                do i = ims, ime
+                    temperature_2m(i,j) = temperature(i,kms,j)
+                    humidity_2m(i,j) = water_vapor(i,kms,j)
+                end do
             end do
-        end do
+        endif
         
         
         ! Noah-MP Land Surface Model
@@ -436,16 +460,20 @@ contains
                         VEGFRAC(i,j) = veg_frac(i, 1, j)
                     endif
 
-                    ! prevents init from failing when processing water points that may have "soil_t"=0
-                    !$acc loop
-                    do k=1,ubound(soil_temperature,2)
-                        if (soil_temperature(i,k,j) < 200) then
-                            soil_temperature(i,k,j) = 200.0
-                        end if
-                        if (soil_water_content(i,k,j) < 0.0001) then
-                            soil_water_content(i,k,j) = 0.0001
-                        end if
-                    end do
+                    ! Cold-start protection for water points whose static
+                    ! soil fields may be zero. Restart values are model state
+                    ! and must remain untouched.
+                    if (.not. restart) then
+                        !$acc loop
+                        do k=1,ubound(soil_temperature,2)
+                            if (soil_temperature(i,k,j) < 200) then
+                                soil_temperature(i,k,j) = 200.0
+                            end if
+                            if (soil_water_content(i,k,j) < 0.0001) then
+                                soil_water_content(i,k,j) = 0.0001
+                            end if
+                        end do
+                    endif
                 end do
             end do
 
@@ -833,8 +861,9 @@ contains
                 next_update_time(domain%nest_indx) = domain%sim_time%seconds()
             endif
             if (options%restart%restart) then
-                ! Determine when radiation was last called before the restart time,
-                ! based on the original simulation start time and the update interval
+                ! Determine when the LSM was last called before the restart time.
+                ! Noah-MP's independent call counter is restored from the
+                ! restart-persistent lsm_timestep_counter field above.
                 eff_interval = max(dble(update_interval), 10.0d0)
                 ! add a small fraction of a second in the case of roundoff errors restart time
                 elapsed = (options%restart%restart_time%seconds() - 0.01) - options%general%start_time%seconds()
@@ -1412,6 +1441,17 @@ contains
                 enddo
                 end associate
                 ITIMESTEP = ITIMESTEP + 1
+                if (options%physics%landsurface == kLSM_NOAHMP) then
+                    associate(lsm_timestep_counter => &
+                        domain%vars_2d(domain%var_indx(kVARS%lsm_timestep_counter)%v)%data_2di)
+                    !$acc parallel loop gang vector collapse(2) present(lsm_timestep_counter)
+                    do j = jms, jme
+                        do i = ims, ime
+                            lsm_timestep_counter(i,j) = ITIMESTEP
+                        enddo
+                    enddo
+                    end associate
+                endif
             endif
             !!
 

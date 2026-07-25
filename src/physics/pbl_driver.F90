@@ -106,7 +106,7 @@ contains
         its = domain%its ; ite = domain%ite ; jts = domain%jts ; jte = domain%jte ; kts = domain%kts ; kte = domain%kte
 
         allowed_to_read = .True.
-        restart = .False.
+        restart = context_change .or. options%restart%restart
         flag_qi = .true.
 
         if (STD_OUT_PE .and. .not.context_change) write(*,*) "Initializing PBL Scheme"
@@ -172,7 +172,7 @@ contains
             
             ! initialize tendencies (this is done in ysu init but only for tiles, not mem (ie its vs ims))
             ! BK: check if this actually matters ???
-            if(.not.context_change)then
+            if(.not.restart)then
                 do j = jms,jme
                 do k = kms,kme
                 do i = ims,ime
@@ -196,7 +196,7 @@ contains
                         ,rqiblten=domain%tend%qi_pbl            &
                         ,p_qi=1                                 &
                         ,p_first_scalar=1                       &
-                        ,restart=context_change                        &
+                        ,restart=restart                               &
                         ,allowed_to_read= allowed_to_read      &
                         ,ids=ids, ide=ide, jds=jds, jde=jde     &
                         ,kds=kds, kde=kde, ims=ims, ime=ime     &

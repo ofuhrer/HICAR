@@ -2205,6 +2205,20 @@ contains
                                 attribute_t("coordinates",   "lat lon")]
 
         !>------------------------------------------------------------
+        !!  Restart-persistent Noah-MP call number. The value is
+        !!  spatially constant; a 2-D integer field uses HICAR's normal
+        !!  restart-variable path without introducing a separate scalar
+        !!  checkpoint protocol.
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%lsm_timestep_counter) then
+            var_meta%name        = "lsm_timestep_counter"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("long_name", "next Noah-MP land-surface call number"), &
+                                attribute_t("units",         "1"),                                    &
+                                attribute_t("coordinates",   "lat lon")]
+            var_meta%dtype       = kINTEGER
+
+        !>------------------------------------------------------------
         !!  Cumulative snowfall snapshot at the last SNOWPACK layer deposit;
         !!  used so SNOWPACK can hold sub-threshold (hn<0.001 m) snow mass
         !!  across calls until enough has accumulated to form a layer.

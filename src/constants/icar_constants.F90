@@ -433,6 +433,10 @@ module icar_constants
         integer :: bs_swe_exchange       ! 2D: mass exchanged with snowpack (kg/m^2)
         integer :: bs_swe_erode_max      ! 2D: historical deepest cumulative erosion this LSM step (kg/m^2)
 
+        ! Restart-persistent Noah-MP call number. Keep this immediately before
+        ! last_var so no existing variable identifier is renumbered.
+        integer :: lsm_timestep_counter
+
         integer :: last_var
     end type var_constants_type
 
