@@ -32,7 +32,7 @@ module radiation
     use time_object,        only : Time_type
     use icar_constants, only : kVARS, kRA_BASIC, kRA_SIMPLE, kRA_RRTMG, kRA_RRTMGP, STD_OUT_PE, kMP_THOMP_AER, kMAX_NESTS
     use mod_wrf_constants, only : cp, R_d, gravity, DEGRAD, DPD, piconst, STBOLT
-    use mod_atm_utilities, only : cal_cldfra3, calc_solar_elevation, calc_solar_date
+    use mod_atm_utilities, only : cal_cldfra3_level, calc_solar_elevation, calc_solar_date
     use mpi
     use mpi_utils_module, only: allreduce_integer_min_in_place
 #ifdef USE_NCCL
@@ -865,10 +865,10 @@ contains
 
         real, dimension(:,:,:,:), pointer :: tauaer_sw=>null(), ssaaer_sw=>null(), asyaer_sw=>null()
         real, allocatable:: nbr_buffer(:,:), gsw(:,:)
-        real, allocatable:: t_1d(:), p_1d(:), Dz_1d(:), qv_1d(:), qc_1d(:), qi_1d(:), qs_1d(:), cf_1d(:)
         real, allocatable :: qi(:,:,:), qc(:,:,:), qs(:,:,:), cldfra(:,:,:), re_c(:,:,:), re_i(:,:,:), re_s(:,:,:)
 
         real :: gridkm, ra_dt, hour_frac, air_mass_lay, cld_frc, cf_col
+        real :: qvs_level, rh_level, rhoa_level
         real :: relmax, relmin, reimax, reimin
         real(real64) :: date_seconds, julian_day
         integer :: i, k, j, col_indx,sim_month
@@ -1058,15 +1058,6 @@ contains
             if (domain%var_indx(kVARS%re_ice)%v > 0) F_REI = 1
             if (domain%var_indx(kVARS%re_snow)%v > 0) F_RES = 1
 
-            allocate(t_1d(kms:kme))
-            allocate(p_1d(kms:kme))
-            allocate(Dz_1d(kms:kme))
-            allocate(qv_1d(kms:kme))
-            allocate(qc_1d(kms:kme))
-            allocate(qi_1d(kms:kme))
-            allocate(qs_1d(kms:kme))
-            allocate(cf_1d(kms:kme))
-
             allocate(qi(ims:ime,kms:kme,jms:jme))
             allocate(qc(ims:ime,kms:kme,jms:jme))
             allocate(qs(ims:ime,kms:kme,jms:jme))
@@ -1214,35 +1205,31 @@ contains
                                 cloud_fraction(i,j) = 0
                             enddo
                         enddo
-                        !$acc parallel loop gang collapse(2) present(qv_dom, pressure, temperature, &
-                        !$acc                    dz_interface, land_mask, cloud_fraction, qi, qc, qs, cldfra) &
-                        !$acc                    private(p_1d, t_1d, Dz_1d, qv_1d, qc_1d, qi_1d, qs_1d, cf_1d, cf_col)
+                        ! This call uses the level-local branch of cal_cldfra3
+                        ! (modify_qvapor=.false., use_multilayer=.false.).  Compute
+                        ! it directly over the 3-D field instead of creating eight
+                        ! dynamically private vertical arrays for every GPU column.
+                        !$acc parallel loop gang vector collapse(3) present(qv_dom, pressure, temperature, &
+                        !$acc                    dz_interface, land_mask, qi, qc, qs, cldfra) &
+                        !$acc                    private(qvs_level, rh_level, rhoa_level)
+                        DO j = jts,jte
+                            DO k = kts,kte
+                                DO i = its,ite
+                                    CALL cal_cldfra3_level(cldfra(i,k,j), qvs_level, rh_level, rhoa_level, &
+                                                          qv_dom(i,k,j), qc(i,k,j), qi(i,k,j), qs(i,k,j), &
+                                                          dz_interface(i,k,j), pressure(i,k,j), temperature(i,k,j), &
+                                                          real(land_mask(i,j)), gridkm, 1.5, .false.)
+                                ENDDO
+                            ENDDO
+                        ENDDO
+
+                        !$acc parallel loop gang collapse(2) present(cloud_fraction, cldfra) private(cf_col)
                         DO j = jts,jte
                             DO i = its,ite
-                                !$acc loop
-                                DO k = kms,kme
-                                    cf_1d(k) = cldfra(i,k,j)
-                                    qv_1d(k) = qv_dom(i,k,j)
-                                    qc_1d(k) = qc(i,k,j)
-                                    qi_1d(k) = qi(i,k,j)
-                                    qs_1d(k) = qs(i,k,j)
-                                    p_1d(k) = pressure(i,k,j)
-                                    t_1d(k) = temperature(i,k,j)
-                                    Dz_1d(k) = dz_interface(i,k,j)
-                                ENDDO
-                                CALL cal_cldfra3(cf_1d, qv_1d, &
-                                              qc_1d, qi_1d, qs_1d, &
-                                              Dz_1d, &
-                                              p_1d, &
-                                              t_1d, &
-                                              real(land_mask(i,j)), &
-                                              gridkm, 1.5, kms, kme,        &
-                                              modify_qvapor=.false., use_multilayer=.False.)
                                 cf_col = 0.0
-                                !$acc loop reduction(max:cf_col)
+                                !$acc loop seq
                                 DO k = kts,kte
-                                    cldfra(i,k,j) = cf_1d(k)
-                                    cf_col = max(cf_col, cf_1d(k))
+                                    cf_col = max(cf_col, cldfra(i,k,j))
                                 ENDDO
                                 cloud_fraction(i,j) = cf_col
                             ENDDO

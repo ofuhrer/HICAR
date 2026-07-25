@@ -850,6 +850,82 @@ contains
 
 !+---+-----------------------------------------------------------------+
 
+    SUBROUTINE cal_cldfra3_level(CLDFRA, qvs, rh, rhoa, qv, qc, qi, qs, dz, p, t, XLAND, gridkm, max_relh, modify_qvapor)
+        !$acc routine seq
+        IMPLICIT NONE
+
+        LOGICAL, INTENT(IN):: modify_qvapor
+        REAL, INTENT(OUT):: CLDFRA, qvs, rh, rhoa
+        REAL, INTENT(IN):: qv, qc, qi, qs, dz, p, t
+        REAL, INTENT(IN):: gridkm, XLAND, max_relh
+
+        REAL:: RH_00L, RH_00O, RH_00
+        REAL:: TC, qvsi, qvsw, RHUM, delz
+
+        CLDFRA = 0.0
+        qvsw = rslf(P, t)
+        qvsi = rsif(P, t)
+
+        tc = t - 273.15
+        if (tc .ge. -12.0) then
+            qvs = qvsw
+        elseif (tc .lt. -35.0) then
+            qvs = qvsi
+        else
+            qvs = qvsw - (qvsw-qvsi)*(-12.0-tc)/(-12.0+35.)
+        endif
+
+        rh = MAX(0.01, qv/qvs)
+        rhoa = p/(287.0*t)
+
+        delz = MAX(100., dz)
+        RH_00L = 0.77 + MIN(0.22,SQRT(1./(50.0+gridkm*gridkm*delz*0.01)))
+        RH_00O = 0.85 + MIN(0.14,SQRT(1./(50.0+gridkm*gridkm*delz*0.01)))
+        RHUM = rh
+
+        if (qc.gt.1.E-6 .or. qi.ge.1.E-7                         &
+    &                    .or. (qs.gt.1.E-6 .and. t.lt.273.)) then
+            CLDFRA = 1.0
+            qvs = qv
+        else if (((qc+qi).gt.1.E-10) .and.                        &
+    &                                    ((qc+qi).lt.1.E-6)) then
+            CLDFRA = MIN(0.99, 0.1*(11.0 + log10(qc+qi)))
+        else
+
+            IF ((XLAND-1.5).GT.0.) THEN                            !--- Ocean
+                RH_00 = RH_00O
+            ELSE                                                   !--- Land
+                RH_00 = RH_00L
+            ENDIF
+
+            tc = t - 273.15
+            if (tc .lt. -12.0) RH_00 = RH_00L
+
+            if (tc .ge. 25.0) then
+                CLDFRA = 0.0
+            elseif (tc .ge. -12.0) then
+                RHUM = MIN(rh, 1.0)
+                CLDFRA = MAX(0., 1.0-SQRT((1.001-RHUM)/(1.001-RH_00)))
+            else
+                if (max_relh.gt.1.12 .or. (.NOT.(modify_qvapor)) ) then
+                    RHUM = MIN(rh, 1.45)
+                    RH_00 = RH_00 + (1.45-RH_00)*(-12.0-tc)/(-12.0+85.)
+                    RH_00 = min(RH_00, 1.45)
+                    CLDFRA = MAX(0., 1.0-SQRT((1.46-RHUM)/(1.46-RH_00)))
+                else
+                    RHUM = MIN(rh, 1.05)
+                    RH_00 = RH_00 + (1.05-RH_00)*(-12.0-tc)/(-12.0+85.)
+                    if (RH_00 .ge. 1.05) then
+                        WRITE (*,*) ' FATAL: RH_00 too large (1.05): ', RH_00, RH_00L, tc
+                    endif
+                    CLDFRA = MAX(0., 1.0-SQRT((1.06-RHUM)/(1.06-RH_00)))
+                endif
+            endif
+            if (CLDFRA.gt.0.) CLDFRA = MAX(0.01, MIN(CLDFRA,0.99))
+        endif
+
+    END SUBROUTINE cal_cldfra3_level
+
     SUBROUTINE cal_cldfra3(CLDFRA, qv, qc, qi, qs, dz, p, t, XLAND, gridkm, max_relh, kts, kte, modify_qvapor, use_multilayer)
         !$acc routine vector
         IMPLICIT NONE
@@ -861,10 +937,8 @@ contains
         REAL, INTENT(IN):: gridkm, XLAND, max_relh
 
    !..Local vars.
-        REAL:: RH_00L, RH_00O, RH_00
         REAL:: entrmnt
         INTEGER:: k
-        REAL:: TC, qvsi, qvsw, RHUM, delz
         REAL, DIMENSION(kts:kte):: qvs, rh, rhoa
 
    !+---+
@@ -874,83 +948,9 @@ contains
 
         !$acc loop vector
         DO k = kts,kte
-            CLDFRA(K) = 0.0
-            qvsw = rslf(P(k), t(k))
-            qvsi = rsif(P(k), t(k))
-
-            tc = t(k) - 273.15
-            if (tc .ge. -12.0) then
-                qvs(k) = qvsw
-            elseif (tc .lt. -35.0) then
-                qvs(k) = qvsi
-            else
-                qvs(k) = qvsw - (qvsw-qvsi)*(-12.0-tc)/(-12.0+35.)
-            endif
-
-            rh(k) = MAX(0.01, qv(k)/qvs(k))
-            rhoa(k) = p(k)/(287.0*t(k))
-!         ENDDO
-
-
-!    !..First cut scale-aware. Higher resolution should require closer to
-!    !.. saturated grid box for higher cloud fraction.  Simple functions
-!    !.. chosen based on Mocko and Cotton (1995) starting point and desire
-!    !.. to get near 100% RH as grid spacing moves toward 1.0km, but higher
-!    !.. RH over ocean required as compared to over land.
-        
-!         !$acc loop vector
-!         DO k = kts,kte
-
-            delz = MAX(100., dz(k))
-            RH_00L = 0.77 + MIN(0.22,SQRT(1./(50.0+gridkm*gridkm*delz*0.01)))
-            RH_00O = 0.85 + MIN(0.14,SQRT(1./(50.0+gridkm*gridkm*delz*0.01)))
-            RHUM = rh(k)
-
-            if (qc(k).gt.1.E-6 .or. qi(k).ge.1.E-7                         &
-        &                    .or. (qs(k).gt.1.E-6 .and. t(k).lt.273.)) then
-               CLDFRA(K) = 1.0
-               qvs(k) = qv(k)
-            else if (((qc(k)+qi(k)).gt.1.E-10) .and.                        &
-     &                                    ((qc(k)+qi(k)).lt.1.E-6)) then
-               CLDFRA(K) = MIN(0.99, 0.1*(11.0 + log10(qc(k)+qi(k))))
-            else
-
-                IF ((XLAND-1.5).GT.0.) THEN                                  !--- Ocean
-                    RH_00 = RH_00O
-                ELSE                                                         !--- Land
-                    RH_00 = RH_00L
-                ENDIF
-
-                tc = t(k) - 273.15
-                if (tc .lt. -12.0) RH_00 = RH_00L
-
-                if (tc .ge. 25.0) then
-                    CLDFRA(K) = 0.0
-                elseif (tc .ge. -12.0) then
-                    RHUM = MIN(rh(k), 1.0)
-                    CLDFRA(K) = MAX(0., 1.0-SQRT((1.001-RHUM)/(1.001-RH_00)))
-                else
-                    if (max_relh.gt.1.12 .or. (.NOT.(modify_qvapor)) ) then
-   !..For HRRR model, the following look OK.
-                        RHUM = MIN(rh(k), 1.45)
-                        RH_00 = RH_00 + (1.45-RH_00)*(-12.0-tc)/(-12.0+85.)
-                        if (RH_00 .ge. 1.5) then
-                            ! WRITE (*,*) ' FATAL: RH_00 too large (1.5): ', RH_00, RH_00L, tc
-                        endif
-                        RH_00 = min(RH_00, 1.45)
-                        CLDFRA(K) = MAX(0., 1.0-SQRT((1.46-RHUM)/(1.46-RH_00)))
-                    else
-   !..but for the GFS model, RH is way lower.
-                        RHUM = MIN(rh(k), 1.05)
-                        RH_00 = RH_00 + (1.05-RH_00)*(-12.0-tc)/(-12.0+85.)
-                        if (RH_00 .ge. 1.05) then
-                            WRITE (*,*) ' FATAL: RH_00 too large (1.05): ', RH_00, RH_00L, tc
-                        endif
-                        CLDFRA(K) = MAX(0., 1.0-SQRT((1.06-RHUM)/(1.06-RH_00)))
-                    endif
-                endif
-                if (CLDFRA(K).gt.0.) CLDFRA(K) = MAX(0.01, MIN(CLDFRA(K),0.99))
-            endif
+            CALL cal_cldfra3_level(CLDFRA(k), qvs(k), rh(k), rhoa(k), &
+                                   qv(k), qc(k), qi(k), qs(k), dz(k), p(k), t(k), &
+                                   XLAND, gridkm, max_relh, modify_qvapor)
         ENDDO
 
         if (use_multilayer) then

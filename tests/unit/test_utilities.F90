@@ -19,7 +19,9 @@ module test_utilities
     use variable_interface,      only : variable_t
     use grid_interface,          only : grid_t
     use fftshifter,              only : fftshift, ifftshift
+    use mod_atm_utilities,       only : cal_cldfra3, cal_cldfra3_level
     use testdrive,               only : new_unittest, unittest_type, error_type, check
+    use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
 
     implicit none
     private
@@ -36,7 +38,8 @@ contains
             new_unittest("linear_space",     test_linear_space), &
             new_unittest("variable_dict",    test_variable_dict), &
             new_unittest("fftshift_1d",      test_fftshift_1d), &
-            new_unittest("fftshift_2d",      test_fftshift_2d) &
+            new_unittest("fftshift_2d",      test_fftshift_2d), &
+            new_unittest("cloud_fraction_level", test_cloud_fraction_level) &
           ]
 
     end subroutine collect_utilities_suite
@@ -212,5 +215,51 @@ contains
         call check(error, all(c2 == c2_orig), &
                    "2d complex ifftshift does not invert fftshift")
     end subroutine test_fftshift_2d
+
+
+    subroutine test_cloud_fraction_level(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        integer, parameter :: nlev = 5
+        real, parameter :: tol = 2.0e-7
+        real :: cldfra_column(nlev), cldfra_level(nlev)
+        real :: qv(nlev), qc(nlev), qi(nlev), qs(nlev)
+        real :: dz(nlev), pressure(nlev), temperature(nlev)
+        real :: qvs, rh, rhoa
+        integer :: k
+
+        qv = [0.010, 0.006, 0.002, 0.0005, 0.004]
+        qc = [0.0, 2.0e-6, 1.0e-8, 0.0, 0.0]
+        qi = [0.0, 0.0, 0.0, 2.0e-7, 0.0]
+        qs = 0.0
+        dz = [60.0, 100.0, 180.0, 300.0, 120.0]
+        pressure = [90000.0, 80000.0, 65000.0, 45000.0, 75000.0]
+        temperature = [300.0, 280.0, 260.0, 240.0, 270.0]
+        cldfra_column = -1.0
+
+        call cal_cldfra3(cldfra_column, qv, qc, qi, qs, dz, pressure, temperature, &
+                         1.0, 0.2, 1.5, 1, nlev, .false., .false.)
+
+        do k = 1, nlev
+            call cal_cldfra3_level(cldfra_level(k), qvs, rh, rhoa, &
+                                   qv(k), qc(k), qi(k), qs(k), dz(k), &
+                                   pressure(k), temperature(k), 1.0, 0.2, 1.5, .false.)
+        enddo
+
+        call check(error, all(ieee_is_finite(cldfra_level)), &
+                   "level-local cloud fractions must be finite")
+        if (allocated(error)) return
+        call check(error, maxval(abs(cldfra_level - cldfra_column)) < tol, &
+                   "level-local cloud fraction must match the column routine")
+        if (allocated(error)) return
+        call check(error, cldfra_level(1) == 0.0, &
+                   "warm clear air must have zero cloud fraction")
+        if (allocated(error)) return
+        call check(error, cldfra_level(2) == 1.0 .and. cldfra_level(4) == 1.0, &
+                   "resolved condensate must produce full cloud fraction")
+        if (allocated(error)) return
+        call check(error, cldfra_level(3) > 0.0 .and. cldfra_level(3) < 1.0, &
+                   "trace condensate must produce a bounded partial cloud fraction")
+    end subroutine test_cloud_fraction_level
 
 end module test_utilities
