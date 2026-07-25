@@ -660,6 +660,7 @@ contains
         integer ::ids,ide,jds,jde,kds,kde, itimestep=1
         integer ::ims,ime,jms,jme,kms,kme
         integer ::its,ite,jts,jte,kts,kte, nx,ny,nz
+        logical :: run_microphysics
 
         if(options%physics%microphysics==0) return
         
@@ -673,17 +674,26 @@ contains
         jde = domain%grid%jde;   jme = domain%grid%jme;   jte = domain%grid%jte
         ny  = domain%grid%ny
 
-        ! if this is the first time mp is called, set last time such that mp will update
-        if (last_model_time==-999) then
-            last_model_time = (domain%sim_time%seconds() - max(real(update_interval), dt_in))
+        ! The recommended/default update interval is zero, meaning that
+        ! microphysics runs on every model step.  In that case the integration
+        ! interval is exactly the caller's dt.  Reconstructing it as
+        ! sim_time-last_model_time is mathematically equivalent but follows a
+        ! different floating-point path after restart and perturbs Morrison by
+        ! one or more ulps on its very first call.
+        if (update_interval <= 0) then
+            run_microphysics = .true.
+            mp_dt = dt_in
+        else
+            ! if this is the first time mp is called, set last time such that mp will update
+            if (last_model_time==-999) then
+                last_model_time = domain%sim_time%seconds() - real(update_interval)
+            endif
+            ! only run the microphysics if the next time step would put it over the update interval
+            run_microphysics = ((domain%sim_time%seconds() + dt_in) - last_model_time >= update_interval)
+            if (run_microphysics) mp_dt = domain%sim_time%seconds() - last_model_time
         endif
 
-
-        ! only run the microphysics if the next time step would put it over the update_interval time
-        if (((domain%sim_time%seconds() + dt_in)-last_model_time)>=update_interval) then
-
-            ! calculate the actual time step for the microphysics
-            mp_dt = domain%sim_time%seconds()-last_model_time
+        if (run_microphysics) then
 
 
             ! set the current tile to the top layer to process microphysics for
