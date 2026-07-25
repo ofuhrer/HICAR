@@ -898,12 +898,14 @@ contains
         type(options_t),intent(in)    :: options
         real, intent(in) :: dt
         integer :: i,j, k, month, dev_num
-        logical :: monthly_vegfrac
+        logical :: monthly_vegfrac, ran_lsm
         real*8 :: phase_offset, next_update_offset_value
         real*8 :: model_time_seconds, post_step_seconds
 
+        ran_lsm = .False.
         model_time_seconds = canonical_time_seconds(domain%sim_time%seconds())
         if (model_time_seconds >= next_update_time(domain%nest_indx)) then
+            ran_lsm = .True.
             phase_offset = model_time_seconds - next_update_time(domain%nest_indx)
             associate(update_phase => &
                 domain%vars_2d(domain%var_indx(kVARS%lsm_update_phase_offset)%v)%data_2d)
@@ -1427,7 +1429,7 @@ contains
 
         call snow_model(domain, options, dt, NoahmpIO(domain%nest_indx))
 
-        if (last_model_time(domain%nest_indx) == domain%sim_time%seconds()) then ! if we just ran this call, update the precip tracking arrays, now that snowmodel has potentially been called
+        if (ran_lsm) then ! update tracking after the LSM and optional snow model
             if (options%physics%landsurface == kLSM_NOAHMP .or. options%physics%watersurface == kWATER_LAKE .or. options%physics%snowmodel > 0) then
                 associate(precipitation => domain%vars_2d(domain%var_indx(kVARS%precipitation)%v)%data_2d, &
                     lsm_last_precip => domain%vars_2d(domain%var_indx(kVARS%lsm_last_precip)%v)%data_2d)
