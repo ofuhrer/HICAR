@@ -2242,6 +2242,29 @@ contains
                                 attribute_t("coordinates",   "lat lon")]
 
         !>------------------------------------------------------------
+        !!  Time from the post-step checkpoint to the next scheduled
+        !!  LSM update. Spatially constant and restart-only.
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%lsm_next_update_offset) then
+            var_meta%name        = "lsm_next_update_offset"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("long_name", "time to next land-surface update"), &
+                                attribute_t("units",         "s"),                                &
+                                attribute_t("coordinates",   "lat lon")]
+
+        !>------------------------------------------------------------
+        !!  Time from the post-step checkpoint to the next scheduled
+        !!  full-radiation update. Spatially constant and
+        !!  restart-only.
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%radiation_next_update_offset) then
+            var_meta%name        = "radiation_next_update_offset"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("long_name", "time to next radiation update"), &
+                                attribute_t("units",         "s"),                            &
+                                attribute_t("coordinates",   "lat lon")]
+
+        !>------------------------------------------------------------
         !!  Cumulative snowfall snapshot at the last SNOWPACK layer deposit;
         !!  used so SNOWPACK can hold sub-threshold (hn<0.001 m) snow mass
         !!  across calls until enough has accumulated to form a layer.

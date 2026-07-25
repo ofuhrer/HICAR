@@ -179,7 +179,7 @@ contains
                          kVARS%snicar_bcphi_conc, kVARS%snicar_bcpho_conc, kVARS%snicar_ocphi_conc, kVARS%snicar_ocpho_conc,      &
                          kVARS%snicar_dust1_conc, kVARS%snicar_dust2_conc, kVARS%snicar_dust3_conc, kVARS%snicar_dust4_conc, kVARS%snicar_dust5_conc, &
                          kVARS%veg_type, kVARS%soil_type, kVARS%land_mask, kVARS%land_emissivity,                   &
-                         kVARS%lsm_timestep_counter, kVARS%lsm_update_phase_offset])
+                         kVARS%lsm_timestep_counter, kVARS%lsm_update_phase_offset, kVARS%lsm_next_update_offset])
 
              call options%restart_vars( &
                          [kVARS%water_vapor, kVARS%potential_temperature, kVARS%precipitation, kVARS%temperature,       &
@@ -204,7 +204,7 @@ contains
                          kVARS%snicar_bcphi_conc, kVARS%snicar_bcpho_conc, kVARS%snicar_ocphi_conc, kVARS%snicar_ocpho_conc,      &
                          kVARS%snicar_dust1_conc, kVARS%snicar_dust2_conc, kVARS%snicar_dust3_conc, kVARS%snicar_dust4_conc, kVARS%snicar_dust5_conc, &
                          kVARS%mass_ag_grain, kVARS%growing_degree_days,                                &
-                         kVARS%lsm_timestep_counter, kVARS%lsm_update_phase_offset])!, kVARS%veg_type])    ! BK uncommented 2021/03/20
+                         kVARS%lsm_timestep_counter, kVARS%lsm_update_phase_offset, kVARS%lsm_next_update_offset])!, kVARS%veg_type])    ! BK uncommented 2021/03/20
                          ! kVARS%soil_type, kVARS%land_mask, kVARS%vegetation_fraction]
         endif
 
@@ -285,8 +285,7 @@ contains
         logical, optional, intent(in) :: context_chng
         integer :: i, j, k, dev_num
         logical :: context_change, restart, monthly_vegfrac
-        real*8 :: elapsed, eff_interval
-        integer :: n_calls
+        real*8 :: eff_interval
 
         if (options%physics%landsurface > 0 .or. options%physics%watersurface > 0) then
 
@@ -854,7 +853,9 @@ contains
         update_interval=options%lsm%update_interval
         if (.not.(context_change)) then
             associate(update_phase => &
-                domain%vars_2d(domain%var_indx(kVARS%lsm_update_phase_offset)%v)%data_2d)
+                domain%vars_2d(domain%var_indx(kVARS%lsm_update_phase_offset)%v)%data_2d, &
+                      next_update_offset => &
+                domain%vars_2d(domain%var_indx(kVARS%lsm_next_update_offset)%v)%data_2d)
             if (update_interval<=10) then
                 last_model_time(domain%nest_indx) = domain%sim_time%seconds()-10
                 next_update_time(domain%nest_indx) = domain%sim_time%seconds()
@@ -863,23 +864,21 @@ contains
                 next_update_time(domain%nest_indx) = domain%sim_time%seconds()
             endif
             if (options%restart%restart) then
-                ! Determine when the LSM was last called before the restart time.
-                ! Noah-MP's independent call counter is restored from the
-                ! restart-persistent lsm_timestep_counter field above.
+                ! Reconstruct the exact cadence relative to the checkpoint.
+                ! start_date is the segment start on a restart and therefore
+                ! cannot serve as the original cadence anchor.
                 eff_interval = max(dble(update_interval), 10.0d0)
-                ! add a small fraction of a second in the case of roundoff errors restart time
-                elapsed = (options%restart%restart_time%seconds() - 0.01) - options%general%start_time%seconds()
-                n_calls = int(elapsed / eff_interval)
-                !$acc update self(update_phase(its,jts))
-                last_model_time(domain%nest_indx) = options%general%start_time%seconds() + &
-                    n_calls * eff_interval + dble(update_phase(its,jts))
-                next_update_time(domain%nest_indx) = options%general%start_time%seconds() + &
-                    (n_calls + 1) * eff_interval
+                !$acc update self(update_phase(its,jts), next_update_offset(its,jts))
+                next_update_time(domain%nest_indx) = options%restart%restart_time%seconds() + &
+                    dble(next_update_offset(its,jts))
+                last_model_time(domain%nest_indx) = next_update_time(domain%nest_indx) - &
+                    eff_interval + dble(update_phase(its,jts))
             else
-                !$acc parallel loop gang vector collapse(2) present(update_phase)
+                !$acc parallel loop gang vector collapse(2) present(update_phase, next_update_offset)
                 do j = jms, jme
                     do i = ims, ime
                         update_phase(i,j) = 0.0
+                        next_update_offset(i,j) = 0.0
                     enddo
                 enddo
             endif
@@ -897,7 +896,7 @@ contains
         real, intent(in) :: dt
         integer :: i,j, k, month, dev_num
         logical :: monthly_vegfrac
-        real*8 :: phase_offset
+        real*8 :: phase_offset, next_update_offset_value
 
         if ((domain%sim_time%seconds()) >= next_update_time(domain%nest_indx)) then
             phase_offset = domain%sim_time%seconds() - next_update_time(domain%nest_indx)
@@ -1480,6 +1479,20 @@ contains
             !!
 
         endif ! end if we just called the LSM this call
+
+        ! lsm() is called before sim_time is advanced. Persist the next
+        ! cadence boundary relative to the post-step checkpoint time.
+        next_update_offset_value = next_update_time(domain%nest_indx) - &
+            (domain%sim_time%seconds() + dble(dt))
+        associate(next_update_offset => &
+            domain%vars_2d(domain%var_indx(kVARS%lsm_next_update_offset)%v)%data_2d)
+        !$acc parallel loop gang vector collapse(2) present(next_update_offset) firstprivate(next_update_offset_value)
+        do j = jms, jme
+            do i = ims, ime
+                next_update_offset(i,j) = real(next_update_offset_value)
+            enddo
+        enddo
+        end associate
         
     end subroutine lsm
 

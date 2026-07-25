@@ -159,8 +159,7 @@ contains
         character(len=512) :: cloud_optics_lw_file = 'rrtmgp_support/rrtmgp-clouds-lw-bnd.nc'
         character(len=512) :: aerosol_optics_sw_file = ''
         character(len=512) :: aerosol_optics_lw_file = ''
-        real*8 :: elapsed, eff_interval
-        integer :: n_calls
+        real*8 :: eff_interval
 
         if (present(context_chng)) then
             context_change = context_chng
@@ -195,7 +194,9 @@ contains
         !Saftey bound, in case update_interval is 0, or very small
         if (.not.(context_change)) then
             associate(update_phase => &
-                domain%vars_2d(domain%var_indx(kVARS%radiation_update_phase_offset)%v)%data_2d)
+                domain%vars_2d(domain%var_indx(kVARS%radiation_update_phase_offset)%v)%data_2d, &
+                      next_update_offset => &
+                domain%vars_2d(domain%var_indx(kVARS%radiation_next_update_offset)%v)%data_2d)
             if (update_interval<=10) then
                 last_model_time(domain%nest_indx) = domain%sim_time%seconds()-10
                 next_update_time(domain%nest_indx) = domain%sim_time%seconds()
@@ -204,22 +205,21 @@ contains
                 next_update_time(domain%nest_indx) = domain%sim_time%seconds()
             endif
             if (options%restart%restart) then
-                ! Determine when radiation was last called before the restart time,
-                ! based on the original simulation start time and the update interval
+                ! Reconstruct the exact cadence relative to the checkpoint.
+                ! start_date is the segment start on a restart and therefore
+                ! cannot serve as the original cadence anchor.
                 eff_interval = max(dble(update_interval), 10.0d0)
-                ! add a small fraction of a second in the case of roundoff errors restart time
-                elapsed = (options%restart%restart_time%seconds() - 0.01) - options%general%start_time%seconds()
-                n_calls = int(elapsed / eff_interval)
-                !$acc update self(update_phase(its,jts))
-                last_model_time(domain%nest_indx) = options%general%start_time%seconds() + &
-                    n_calls * eff_interval + dble(update_phase(its,jts))
-                next_update_time(domain%nest_indx) = options%general%start_time%seconds() + &
-                    (n_calls + 1) * eff_interval
+                !$acc update self(update_phase(its,jts), next_update_offset(its,jts))
+                next_update_time(domain%nest_indx) = options%restart%restart_time%seconds() + &
+                    dble(next_update_offset(its,jts))
+                last_model_time(domain%nest_indx) = next_update_time(domain%nest_indx) - &
+                    eff_interval + dble(update_phase(its,jts))
             else
-                !$acc parallel loop gang vector collapse(2) present(update_phase)
+                !$acc parallel loop gang vector collapse(2) present(update_phase, next_update_offset)
                 do j = jms, jme
                     do i = ims, ime
                         update_phase(i,j) = 0.0
+                        next_update_offset(i,j) = 0.0
                     enddo
                 enddo
             endif
@@ -793,8 +793,8 @@ contains
         type(options_t), intent(inout) :: options
 
         if (options%physics%radiation > 0) then
-            call options%alloc_vars([kVARS%radiation_update_phase_offset])
-            call options%restart_vars([kVARS%radiation_update_phase_offset])
+            call options%alloc_vars([kVARS%radiation_update_phase_offset, kVARS%radiation_next_update_offset])
+            call options%restart_vars([kVARS%radiation_update_phase_offset, kVARS%radiation_next_update_offset])
         endif
 
         if (options%physics%radiation == kRA_SIMPLE) then
@@ -955,7 +955,7 @@ contains
         integer :: di, dj, ii, jj
         ! Terrain-emitted LW local variables (LW-SVF correction)
         real :: lw_emit_sum, lw_weight_sum, lw_emit_terrain, local_emit
-        real(real64) :: phase_offset
+        real(real64) :: phase_offset, next_update_offset_value
         logical :: run_full_radiation = .False. ! Default to not running full radiation, but may be set to true below if we are over the update interval
         if (options%physics%radiation == 0) return
         
@@ -2057,6 +2057,20 @@ contains
 
             endif
         endif
+
+        ! rad() is called before sim_time is advanced. Persist the next
+        ! cadence boundary relative to the post-step checkpoint time.
+        next_update_offset_value = next_update_time(domain%nest_indx) - &
+            (domain%sim_time%seconds() + dble(dt))
+        associate(next_update_offset => &
+            domain%vars_2d(domain%var_indx(kVARS%radiation_next_update_offset)%v)%data_2d)
+        !$acc parallel loop gang vector collapse(2) present(next_update_offset) firstprivate(next_update_offset_value)
+        do j = jms, jme
+            do i = ims, ime
+                next_update_offset(i,j) = real(next_update_offset_value)
+            enddo
+        enddo
+        end associate
     end subroutine rad
     
     subroutine rad_apply_dtheta(domain, options, dt)

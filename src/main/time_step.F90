@@ -330,12 +330,16 @@ contains
                 ! Note that there will currently be some discrepancy between using the current density and whatever density will be at 
                 ! the next time step, but we assume that it is negligable
                 ! and that using a CFL criterion < 1.0 will cover this
-                if (domain%restart_dt > 0.0) then
+                ! A restart between forcing records must retain the saved
+                ! numerical timestep. At an exact forcing boundary, however,
+                ! the uninterrupted run recomputes CFL after refreshing winds;
+                ! reusing the pre-boundary dt changes the complete trajectory.
+                if (domain%restart_dt > 0.0 .and. domain%forcing_elapsed > 0.0) then
                     call dt%set(seconds=domain%restart_dt)
-                    domain%restart_dt = 0.0
                 else
                     call update_dt(dt, options, domain)
                 endif
+                domain%restart_dt = 0.0
                 domain%dt = real(dt%seconds())
 
                 call update_wind_dqdt(domain, real(options%wind%update_dt%seconds()) - domain%forcing_elapsed)

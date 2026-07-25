@@ -440,6 +440,10 @@ module icar_constants
         ! adaptive-step call times across a process restart.
         integer :: lsm_update_phase_offset
         integer :: radiation_update_phase_offset
+        ! Offsets from the post-step checkpoint time to the next scheduled
+        ! update anchor the cadence without using the segment's start_date.
+        integer :: lsm_next_update_offset
+        integer :: radiation_next_update_offset
 
         integer :: last_var
     end type var_constants_type
