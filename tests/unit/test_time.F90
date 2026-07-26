@@ -43,7 +43,8 @@ contains
             new_unittest("calendar_360day",    test_cal_360day), &
             new_unittest("set_from_string",    test_set_from_string), &
             new_unittest("delta_accumulation", test_delta_accumulation), &
-            new_unittest("forcing_absolute_phase", test_forcing_absolute_phase) &
+            new_unittest("forcing_absolute_phase", test_forcing_absolute_phase), &
+            new_unittest("forcing_event_phase", test_forcing_event_phase) &
           ]
 
     end subroutine collect_time_suite
@@ -223,5 +224,38 @@ contains
         call check(error, continuous%forcing_phase_at(3600.0) == 1.0, &
                    "forcing phase did not preserve the exact right endpoint")
     end subroutine test_forcing_absolute_phase
+
+    !> Calendar construction may place the same forcing event a fraction of a
+    !! millisecond on either side of its exact timestamp.  Canonicalizing only
+    !! after subtraction can then round the elapsed time in opposite
+    !! directions.  The event itself must be canonicalized first.
+    subroutine test_forcing_event_phase(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(domain_t) :: continuous, restarted
+        real :: phase_continuous, phase_restarted
+        real(real64), parameter :: event_noise_seconds = 1.0e-4_real64
+        real(real64), parameter :: offset_seconds = 204.4675_real64
+
+        call continuous%sim_time%init("gregorian")
+        call continuous%next_input%init("gregorian")
+        call continuous%sim_time%set("2010-01-01 01:00:00")
+        call continuous%next_input%set("2010-01-01 02:00:00")
+        call continuous%next_input%set(continuous%next_input%mjd() + &
+            event_noise_seconds / 86400.0_real64)
+        call continuous%input_dt%set(seconds=3600.0)
+
+        call restarted%sim_time%init("gregorian")
+        call restarted%next_input%init("gregorian")
+        call restarted%sim_time%set("2010-01-01 01:00:00")
+        call restarted%next_input%set("2010-01-01 02:00:00")
+        call restarted%next_input%set(restarted%next_input%mjd() - &
+            event_noise_seconds / 86400.0_real64)
+        call restarted%input_dt%set(seconds=3600.0)
+
+        phase_continuous = continuous%forcing_phase_at(real(offset_seconds))
+        phase_restarted = restarted%forcing_phase_at(real(offset_seconds))
+        call check(error, phase_continuous == phase_restarted, &
+                   "sub-millisecond forcing-event noise changed the phase")
+    end subroutine test_forcing_event_phase
 
 end module test_time

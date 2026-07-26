@@ -3478,8 +3478,14 @@ contains
         real(real64)                :: elapsed_seconds, interval_seconds, interval_start
         real(real64), parameter     :: endpoint_tolerance_seconds = 1.0e-3_real64
 
-        interval_seconds = this%input_dt%seconds()
-        interval_start = this%next_input%seconds() - interval_seconds
+        interval_seconds = canonical_time_seconds(this%input_dt%seconds())
+        ! Canonicalize the event timestamp before subtracting the interval.
+        ! A continuously advanced next_input and the same timestamp parsed
+        ! during restart can differ by a few microseconds.  Subtracting first
+        ! can move the elapsed value across a millisecond rounding boundary,
+        ! producing a different single-precision interpolation phase.
+        interval_start = canonical_time_seconds(this%next_input%seconds()) - &
+                         interval_seconds
         elapsed_seconds = this%sim_time%seconds() + real(offset_seconds, real64) - &
                           interval_start
         ! Time_type stores modified Julian days. Repeatedly advancing an event
