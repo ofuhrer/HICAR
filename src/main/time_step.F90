@@ -363,6 +363,15 @@ contains
                 options%wind%wind_only) then
 
                 call domain%wind_timer%start()
+                ! Density is carried between physics calls but is also a
+                ! diagnostic of pressure, theta, and qv. Microphysics can
+                ! update the latter fields after the final thermodynamic
+                ! refresh in a step, leaving an uninterrupted run with a
+                ! stale density while restart initialization reconstructs
+                ! it. Refresh the complete thermodynamic tuple at the exact
+                ! wind-update boundary so both paths form the density-weighted
+                ! projection from the same model state.
+                call domain%diagnostic_update(thermo_only=.True.)
                 call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%density)%v),corners=.True.)
                 call update_winds(domain, options)
                 call domain%wind_timer%stop()
