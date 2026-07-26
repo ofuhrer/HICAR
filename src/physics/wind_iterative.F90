@@ -774,6 +774,14 @@ contains
         if (multilevel_requested .and. operator_probed .and. .not. multilevel_setup_attempted) &
             call setup_multilevel_preconditioner(domain)
 
+        ! x_sol is solver workspace, not model restart state.  Hierarchy
+        ! construction also uses it as scratch storage on the first solve in
+        ! a process, whereas an uninterrupted process reuses an existing
+        ! hierarchy.  Reset only after every setup path has completed so both
+        ! executions enter the finite-tolerance Krylov solve from the same
+        ! deterministic state.
+        call reset_wind_solver_guess()
+
         ! Build RHS on GPU (3D layout: rhs(i,k,j) = -2*div for interior, 0 at BCs)
         call compute_rhs_3d(domain)
 
