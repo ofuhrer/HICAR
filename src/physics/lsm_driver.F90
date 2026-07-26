@@ -200,12 +200,15 @@ contains
                          kVARS%Sliq,kVARS%snowfall_ground, kVARS%rainfall_ground, kVARS%storage_lake,&
                          kVARS%storage_gw, kVARS%water_table_depth, kVARS%water_aquifer, kVARS%soil_carbon_fast,        &
                          kVARS%soil_carbon_stable, kVARS%lai, kVARS%sai, kVARS%soil_water_content_liq, kVARS%xice,      &
+                         ! Noah-MP reads these groundwater/equilibrium fields back on every update.
+                         ! They are trajectory state, not reconstructible diagnostics.
+                         kVARS%eq_soil_moisture, kVARS%smc_watertable_deep, kVARS%recharge_deep, kVARS%recharge,        &
                          kVARS%wetland_sat_frac, kVARS%wetland_h20_store, kVARS%snicar_sn_rad, kVARS%snicar_sn_fr,      &
                          kVARS%snicar_bcphi, kVARS%snicar_bcpho, kVARS%snicar_ocphi, kVARS%snicar_ocpho,                &
                          kVARS%snicar_dust1, kVARS%snicar_dust2, kVARS%snicar_dust3, kVARS%snicar_dust4, kVARS%snicar_dust5,      &
                          kVARS%snicar_bcphi_conc, kVARS%snicar_bcpho_conc, kVARS%snicar_ocphi_conc, kVARS%snicar_ocpho_conc,      &
                          kVARS%snicar_dust1_conc, kVARS%snicar_dust2_conc, kVARS%snicar_dust3_conc, kVARS%snicar_dust4_conc, kVARS%snicar_dust5_conc, &
-                         kVARS%mass_ag_grain, kVARS%growing_degree_days,                                &
+                         kVARS%mass_ag_grain, kVARS%growing_degree_days, kVARS%plant_growth_stage,                      &
                          ! Noah-MP instantaneous output state. These fields do not feed the trajectory,
                          ! but preserving them makes output at a restart boundary identical to output
                          ! from an uninterrupted process until Noah-MP next refreshes the diagnostics.
