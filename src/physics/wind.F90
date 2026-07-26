@@ -766,6 +766,10 @@ contains
 
         if (( (options%wind%alpha_const<=0 .and. (options%physics%windtype==kITERATIVE_WINDS)) .or. options%wind%Sx) ) then
             call update_stability(domain, options)
+            ! Derived stability is valid on owned cells.  Synchronize its halos
+            ! before the terrain corrections use neighboring mass-cell values.
+            call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%blk_ri)%v), corners=.True.)
+            call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%froude)%v), corners=.True.)
         endif
 
 
