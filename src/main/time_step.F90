@@ -17,10 +17,12 @@ submodule(time_step) time_step_implementation
     use microphysics,               only : mp
     use advection,                  only : advect
     use convection,                 only : convect
-    use land_surface,               only : lsm, lsm_apply_fluxes
+    use land_surface,               only : lsm, lsm_apply_fluxes, &
+                                           lsm_sync_cadence_checkpoint
     use surface_layer,              only : sfc
     use planetary_boundary_layer,   only : pbl, pbl_apply_tend
-    use radiation,                  only : rad, rad_apply_dtheta
+    use radiation,                  only : rad, rad_apply_dtheta, &
+                                           rad_sync_cadence_checkpoint
     use snow_drift,                 only : snow_drift_apply_feedback
     use wind,                       only : balance_uvw, update_winds, update_wind_dqdt
     use debug_module,               only : domain_check
@@ -503,6 +505,11 @@ contains
             ! step model_time forward
             if (last_loop) then
                 call domain%set_sim_time(canonical_end_time)
+                ! rad()/lsm() run before sim_time advances. Their persisted
+                ! next-event offsets must therefore be refreshed after the
+                ! exact event-time snap, before any checkpoint is written.
+                call rad_sync_cadence_checkpoint(domain)
+                call lsm_sync_cadence_checkpoint(domain)
             else
                 call domain%increment_sim_time(dt)
             endif

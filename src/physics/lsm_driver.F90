@@ -50,7 +50,8 @@ module land_surface
     implicit none
 
     private
-    public :: lsm_init, lsm, lsm_var_request, lsm_apply_fluxes, NoahmpIO
+    public :: lsm_init, lsm, lsm_var_request, lsm_apply_fluxes, &
+              lsm_sync_cadence_checkpoint, NoahmpIO
 
     ! Noah LSM required variables.  Some of these should be stored in domain, but tested here for now
     integer :: ids,ide,jds,jde,kds,kde ! Domain dimensions
@@ -1529,6 +1530,40 @@ contains
         end associate
         
     end subroutine lsm
+
+
+    !> Refresh the restart cadence offset after the time step has snapped
+    !! sim_time to its canonical event timestamp. The ordinary lsm() update
+    !! occurs before that snap and can otherwise preserve a sub-second stale
+    !! offset at forcing/output/restart boundaries.
+    subroutine lsm_sync_cadence_checkpoint(domain)
+        implicit none
+
+        type(domain_t), intent(inout) :: domain
+        integer :: i, j, cadence_idx
+        real*8 :: checkpoint_seconds, next_update_offset_value
+
+        cadence_idx = domain%var_indx(kVARS%lsm_next_update_offset)%v
+        if (cadence_idx <= 0) return
+
+        checkpoint_seconds = canonical_time_seconds(domain%sim_time%seconds())
+        next_update_offset_value = canonical_time_seconds( &
+            next_update_time(domain%nest_indx) - checkpoint_seconds &
+        )
+        associate(next_update_offset => &
+            domain%vars_2d(cadence_idx)%data_2d, &
+                  ims_local => domain%grid%ims, &
+                  ime_local => domain%grid%ime, &
+                  jms_local => domain%grid%jms, &
+                  jme_local => domain%grid%jme)
+        !$acc parallel loop gang vector collapse(2) present(next_update_offset) firstprivate(next_update_offset_value)
+        do j = jms_local, jme_local
+            do i = ims_local, ime_local
+                next_update_offset(i,j) = real(next_update_offset_value)
+            enddo
+        enddo
+        end associate
+    end subroutine lsm_sync_cadence_checkpoint
 
     subroutine lsm_apply_fluxes(domain,options,dt)
         ! add sensible and latent heat fluxes to the first atm level

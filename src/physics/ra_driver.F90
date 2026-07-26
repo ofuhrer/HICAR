@@ -141,7 +141,8 @@ module radiation
 
 
     private
-    public :: radiation_init, ra_var_request, rad_apply_dtheta, rad
+    public :: radiation_init, ra_var_request, rad_apply_dtheta, rad, &
+              rad_sync_cadence_checkpoint
     
 contains
 
@@ -2082,7 +2083,41 @@ contains
         enddo
         end associate
     end subroutine rad
-    
+
+
+    !> Refresh the restart cadence offset after the time step has snapped
+    !! sim_time to its canonical event timestamp. The ordinary rad() update
+    !! occurs before that snap and can otherwise preserve a sub-second stale
+    !! offset at forcing/output/restart boundaries.
+    subroutine rad_sync_cadence_checkpoint(domain)
+        implicit none
+
+        type(domain_t), intent(inout) :: domain
+        integer :: i, j, cadence_idx
+        real*8 :: checkpoint_seconds, next_update_offset_value
+
+        cadence_idx = domain%var_indx(kVARS%radiation_next_update_offset)%v
+        if (cadence_idx <= 0) return
+
+        checkpoint_seconds = canonical_time_seconds(domain%sim_time%seconds())
+        next_update_offset_value = canonical_time_seconds( &
+            next_update_time(domain%nest_indx) - checkpoint_seconds &
+        )
+        associate(next_update_offset => &
+            domain%vars_2d(cadence_idx)%data_2d, &
+                  ims_local => domain%grid%ims, &
+                  ime_local => domain%grid%ime, &
+                  jms_local => domain%grid%jms, &
+                  jme_local => domain%grid%jme)
+        !$acc parallel loop gang vector collapse(2) present(next_update_offset) firstprivate(next_update_offset_value)
+        do j = jms_local, jme_local
+            do i = ims_local, ime_local
+                next_update_offset(i,j) = real(next_update_offset_value)
+            enddo
+        enddo
+        end associate
+    end subroutine rad_sync_cadence_checkpoint
+
     subroutine rad_apply_dtheta(domain, options, dt)
         implicit none
 
