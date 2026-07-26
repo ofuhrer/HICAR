@@ -272,8 +272,11 @@ module icar_constants
         integer :: blk_ri
         integer :: longwave_cloud_forcing
         integer :: shortwave_cloud_forcing
-        integer :: th_lwrad
-        integer :: th_swrad
+        ! Reuse two historically unreferenced registry slots for
+        ! restart-persistent water-budget observables. Reusing slots keeps
+        ! kMAX_STORAGE_VARS and every existing variable ID unchanged.
+        integer :: runoff_surface_cumulative
+        integer :: runoff_subsurface_cumulative
         integer :: land_emissivity
         integer :: temperature_interface
         integer :: runoff_tstep
@@ -397,7 +400,9 @@ module icar_constants
 
         ! FSM2trans variables
         integer :: dSWE_subl
-        integer :: dSWE_blow_subl
+        ! Historically unreferenced registry slot; retained in place so the
+        ! registry layout and all subsequent variable IDs remain unchanged.
+        integer :: evaporation_net_cumulative
         integer :: dSWE_slide
         integer :: meltflux_out_tstep
         integer :: meltflux_out_cumul

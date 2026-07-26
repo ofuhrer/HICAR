@@ -46,6 +46,7 @@ module land_surface
     use NoahmpIOVarType, only : NoahmpIO_type
     use snow_model_driver, only : sm_var_request, sm_init, snow_model
     use time_object, only : canonical_time_seconds
+    use water_budget_diagnostics, only : accumulate_water_budget
 
     implicit none
 
@@ -153,6 +154,8 @@ contains
                          kVARS%temperature_2m_bare, kVARS%mixing_ratio_2m_veg, kVARS%mixing_ratio_2m_bare,              &
                          kVARS%surface_rad_temperature, kVARS%net_ecosystem_exchange, kVARS%gross_primary_prod,         &
                          kVARS%net_primary_prod, kVARS%runoff_surface, kVARS%runoff_subsurface,                         &
+                         kVARS%runoff_surface_cumulative, kVARS%runoff_subsurface_cumulative,                          &
+                         kVARS%evaporation_net_cumulative,                                                            &
                          kVARS%evap_canopy, kVARS%evap_soil_surface, kVARS%rad_absorbed_total, kVARS%rad_net_longwave,  &
                          kVARS%apar, kVARS%photosynthesis_total, kVARS%rad_absorbed_veg, kVARS%rad_absorbed_bare,       &
                          kVARS%stomatal_resist_total, kVARS%stomatal_resist_sun, kVARS%stomatal_resist_shade,           &
@@ -198,7 +201,9 @@ contains
                          kVARS%mass_leaf, kVARS%mass_root, kVARS%mass_stem, kVARS%mass_wood, kVARS%snow_water_eq_prev,  &
                          kVARS%snow_albedo_prev, kVARS%snow_temperature, kVARS%snow_layer_depth,  kVARS%Sice, &
                          kVARS%Sliq,kVARS%snowfall_ground, kVARS%rainfall_ground, kVARS%storage_lake,&
-                         kVARS%storage_gw, kVARS%water_table_depth, kVARS%water_aquifer, kVARS%soil_carbon_fast,        &
+                         kVARS%storage_gw, kVARS%water_table_depth, kVARS%water_aquifer,                               &
+                         kVARS%runoff_surface_cumulative, kVARS%runoff_subsurface_cumulative,                          &
+                         kVARS%evaporation_net_cumulative, kVARS%soil_carbon_fast,                                     &
                          kVARS%soil_carbon_stable, kVARS%lai, kVARS%sai, kVARS%snow_age_factor,                         &
                          kVARS%soil_water_content_liq, kVARS%xice,                                                       &
                          ! Noah-MP reads these groundwater/equilibrium fields back on every update.
@@ -1464,6 +1469,13 @@ contains
         call snow_model(domain, options, dt, NoahmpIO(domain%nest_indx))
 
         if (ran_lsm) then ! update tracking after the LSM and optional snow model
+            if (options%physics%landsurface == kLSM_NOAHMP) then
+                call accumulate_water_budget( &
+                    domain, lsm_dt, land_mask, &
+                    ims, ime, jms, jme, its, ite, jts, jte &
+                )
+            endif
+
             if (options%physics%landsurface == kLSM_NOAHMP .or. options%physics%watersurface == kWATER_LAKE .or. options%physics%snowmodel > 0) then
                 associate(precipitation => domain%vars_2d(domain%var_indx(kVARS%precipitation)%v)%data_2d, &
                     lsm_last_precip => domain%vars_2d(domain%var_indx(kVARS%lsm_last_precip)%v)%data_2d)

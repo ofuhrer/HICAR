@@ -629,6 +629,10 @@ contains
             var_meta%dimensions  = two_d_t_dimensions
             var_meta%attributes  = [attribute_t("standard_name", "precipitation_amount"),                &
                                attribute_t("units",         "kg m-2"),                              &
+                               attribute_t("accumulation_semantics",                                    &
+                                           "cumulative since simulation start; no output reset; restart-persistent"), &
+                               attribute_t("interval_semantics",                                        &
+                                           "difference consecutive records gives amount over (previous_time, time]"), &
                                attribute_t("coordinates",   "lat lon")]
         
         !>------------------------------------------------------------
@@ -2766,23 +2770,70 @@ contains
                                attribute_t("coordinates",   "lat lon")]
         
         !>------------------------------------------------------------
-        !!  Surface Runoff Rate
+        !!  Surface runoff amount over the preceding Noah-MP soil timestep
         !!------------------------------------------------------------
         else if (var_idx==kVARS%runoff_surface) then
             var_meta%name        = "runoff_surface"
             var_meta%dimensions  = two_d_t_dimensions
-            var_meta%attributes  = [attribute_t("standard_name", "surface_runoff_flux"),                 &
-                               attribute_t("units",         "mm s-1"),                              &
+            var_meta%attributes  = [attribute_t("long_name",                                            &
+                                           "surface runoff amount over preceding Noah-MP soil timestep"), &
+                               attribute_t("units",         "kg m-2"),                              &
+                               attribute_t("sampling_semantics", "last completed soil timestep amount"), &
                                attribute_t("coordinates",   "lat lon")]
         
         !>------------------------------------------------------------
-        !!  Subsurface Runoff Rate
+        !!  Subsurface runoff amount over the preceding Noah-MP soil timestep
         !!------------------------------------------------------------
         else if (var_idx==kVARS%runoff_subsurface) then
             var_meta%name        = "runoff_subsurface"
             var_meta%dimensions  = two_d_t_dimensions
-            var_meta%attributes  = [attribute_t("long_name", "subsurface_runoff_flux"),          &
-                               attribute_t("units",         "mm s-1"),                              &
+            var_meta%attributes  = [attribute_t("long_name",                                            &
+                                           "subsurface runoff amount over preceding Noah-MP soil timestep"), &
+                               attribute_t("units",         "kg m-2"),                              &
+                               attribute_t("sampling_semantics", "last completed soil timestep amount"), &
+                               attribute_t("coordinates",   "lat lon")]
+
+        !>------------------------------------------------------------
+        !!  Restart-persistent cumulative surface runoff
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%runoff_surface_cumulative) then
+            var_meta%name        = "runoff_surface_cumulative"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("long_name", "cumulative surface runoff amount"),       &
+                               attribute_t("units",         "kg m-2"),                              &
+                               attribute_t("accumulation_semantics",                                    &
+                                           "cumulative since simulation start; no output reset; restart-persistent"), &
+                               attribute_t("interval_semantics",                                        &
+                                           "difference consecutive records gives amount over (previous_time, time]"), &
+                               attribute_t("coordinates",   "lat lon")]
+
+        !>------------------------------------------------------------
+        !!  Restart-persistent cumulative subsurface runoff
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%runoff_subsurface_cumulative) then
+            var_meta%name        = "runoff_subsurface_cumulative"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("long_name", "cumulative subsurface runoff amount"),    &
+                               attribute_t("units",         "kg m-2"),                              &
+                               attribute_t("accumulation_semantics",                                    &
+                                           "cumulative since simulation start; no output reset; restart-persistent"), &
+                               attribute_t("interval_semantics",                                        &
+                                           "difference consecutive records gives amount over (previous_time, time]"), &
+                               attribute_t("coordinates",   "lat lon")]
+
+        !>------------------------------------------------------------
+        !!  Restart-persistent cumulative signed net evaporation
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%evaporation_net_cumulative) then
+            var_meta%name        = "evaporation_net_cumulative"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("long_name", "cumulative signed net surface evaporation amount"), &
+                               attribute_t("units",         "kg m-2"),                              &
+                               attribute_t("positive",      "upward"),                              &
+                               attribute_t("accumulation_semantics",                                    &
+                                           "cumulative since simulation start; no output reset; restart-persistent"), &
+                               attribute_t("interval_semantics",                                        &
+                                           "difference consecutive records gives amount over (previous_time, time]"), &
                                attribute_t("coordinates",   "lat lon")]
         
         !>------------------------------------------------------------
@@ -2914,8 +2965,10 @@ contains
         else if (var_idx==kVARS%storage_gw) then
             var_meta%name        = "storage_gw"
             var_meta%dimensions  = two_d_t_dimensions
-            var_meta%attributes  = [attribute_t("long_name", "groundwater_storage"),              &
+            var_meta%attributes  = [attribute_t("long_name", "aquifer plus saturated-soil water diagnostic"), &
                                attribute_t("units",         "mm"),                                   &
+                               attribute_t("water_budget_role",                                      &
+                                           "diagnostic only; do not add to soil column plus water_aquifer"), &
                                attribute_t("coordinates",   "lat lon")]
         
         !>------------------------------------------------------------
@@ -3259,7 +3312,7 @@ contains
             var_meta%name        = "wetland_h20_store"
             var_meta%dimensions  = two_d_t_dimensions
             var_meta%attributes  = [attribute_t("long_name", "Wetland water storage"),     &
-                               attribute_t("units",         "1"),                               &
+                               attribute_t("units",         "mm"),                              &
                                attribute_t("coordinates",   "lat lon")]
 
         
