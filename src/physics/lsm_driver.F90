@@ -199,7 +199,8 @@ contains
                          kVARS%snow_albedo_prev, kVARS%snow_temperature, kVARS%snow_layer_depth,  kVARS%Sice, &
                          kVARS%Sliq,kVARS%snowfall_ground, kVARS%rainfall_ground, kVARS%storage_lake,&
                          kVARS%storage_gw, kVARS%water_table_depth, kVARS%water_aquifer, kVARS%soil_carbon_fast,        &
-                         kVARS%soil_carbon_stable, kVARS%lai, kVARS%sai, kVARS%soil_water_content_liq, kVARS%xice,      &
+                         kVARS%soil_carbon_stable, kVARS%lai, kVARS%sai, kVARS%snow_age_factor,                         &
+                         kVARS%soil_water_content_liq, kVARS%xice,                                                       &
                          ! Noah-MP reads these groundwater/equilibrium fields back on every update.
                          ! They are trajectory state, not reconstructible diagnostics.
                          kVARS%eq_soil_moisture, kVARS%smc_watertable_deep, kVARS%recharge_deep, kVARS%recharge,        &
