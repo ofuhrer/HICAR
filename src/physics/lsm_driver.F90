@@ -205,6 +205,27 @@ contains
                          kVARS%snicar_bcphi_conc, kVARS%snicar_bcpho_conc, kVARS%snicar_ocphi_conc, kVARS%snicar_ocpho_conc,      &
                          kVARS%snicar_dust1_conc, kVARS%snicar_dust2_conc, kVARS%snicar_dust3_conc, kVARS%snicar_dust4_conc, kVARS%snicar_dust5_conc, &
                          kVARS%mass_ag_grain, kVARS%growing_degree_days,                                &
+                         ! Noah-MP instantaneous output state. These fields do not feed the trajectory,
+                         ! but preserving them makes output at a restart boundary identical to output
+                         ! from an uninterrupted process until Noah-MP next refreshes the diagnostics.
+                         kVARS%apar, kVARS%ch_bare, kVARS%ch_bare_2m, kVARS%ch_leaf,                     &
+                         kVARS%ch_under_canopy, kVARS%ch_veg, kVARS%ch_veg_2m, kVARS%evap_canopy,       &
+                         kVARS%evap_heat_bare, kVARS%evap_heat_canopy, kVARS%evap_heat_veg,             &
+                         kVARS%evap_soil_surface, kVARS%frac_between_gap, kVARS%frac_within_gap,         &
+                         kVARS%gross_primary_prod, kVARS%ground_heat_bare, kVARS%ground_heat_veg,        &
+                         kVARS%ground_temperature_bare, kVARS%ground_temperature_canopy,                 &
+                         kVARS%mixing_ratio_2m_bare, kVARS%mixing_ratio_2m_veg,                          &
+                         kVARS%net_ecosystem_exchange, kVARS%net_longwave_bare,                          &
+                         kVARS%net_longwave_canopy, kVARS%net_longwave_veg, kVARS%net_primary_prod,      &
+                         kVARS%photosynthesis_total, kVARS%rad_absorbed_bare,                            &
+                         kVARS%rad_absorbed_total, kVARS%rad_absorbed_veg, kVARS%rad_net_longwave,       &
+                         kVARS%runoff_subsurface, kVARS%runoff_surface, kVARS%sensible_heat_bare,        &
+                         kVARS%sensible_heat_canopy, kVARS%sensible_heat_veg,                            &
+                         kVARS%stomatal_resist_shade, kVARS%stomatal_resist_sun,                         &
+                         kVARS%surface_rad_temperature, kVARS%temperature_2m_bare,                       &
+                         kVARS%temperature_2m_veg, kVARS%transpiration_heat,                             &
+                         kVARS%transpiration_rate, kVARS%vegetation_fraction,                            &
+                         kVARS%vegetation_fraction_out,                                                  &
                          kVARS%lsm_timestep_counter, kVARS%lsm_update_phase_offset, kVARS%lsm_next_update_offset])!, kVARS%veg_type])    ! BK uncommented 2021/03/20
                          ! kVARS%soil_type, kVARS%land_mask, kVARS%vegetation_fraction]
         endif
