@@ -867,6 +867,14 @@ contains
                 operator_calibrated(min(domain%nest_indx, size(operator_calibrated))) = .true.
             endif
 
+            ! x_sol is a solver-internal warm start and is not part of the
+            ! model restart state. Reusing it in an uninterrupted process but
+            ! starting from zero after restart changes the finite-tolerance
+            ! projection. Use the same deterministic initial guess for every
+            ! physical projection so restart boundaries cannot alter the
+            ! numerical trajectory.
+            call reset_wind_solver_guess()
+
             ! The adjoint path uses wind_iterations as bounded mixed-precision
             ! iterative refinement.  Pass one projects the forcing field;
             ! later passes recompute Bq from the actual single-precision winds
