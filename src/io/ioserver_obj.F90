@@ -1031,6 +1031,15 @@ contains
         ! Receive dt from compute rank 0 for restart file
         if (should_write_restart .or. this%first_write) then
             call MPI_Recv(this%dt, 1, MPI_REAL, 0, kIO_TAG_DT_RESTART, this%client_comms, MPI_STATUS_IGNORE, ierr)
+            call MPI_Recv(this%adv_theta_ref_n, 1, MPI_INTEGER, 0, kIO_TAG_ADV_THETA_N, &
+                          this%client_comms, MPI_STATUS_IGNORE, ierr)
+            if (this%adv_theta_ref_n <= 0 .or. this%adv_theta_ref_n > MAXLEVELS) then
+                error stop "Invalid advection theta reference profile received by IO server"
+            endif
+            call MPI_Recv(this%adv_theta_ref_z, this%adv_theta_ref_n, MPI_REAL, 0, &
+                          kIO_TAG_ADV_THETA_Z, this%client_comms, MPI_STATUS_IGNORE, ierr)
+            call MPI_Recv(this%adv_theta_ref_theta, this%adv_theta_ref_n, MPI_REAL, 0, &
+                          kIO_TAG_ADV_THETA_TH, this%client_comms, MPI_STATUS_IGNORE, ierr)
         endif
 
         ! Gather packed buffers from every child.  Matching Isend pairs are
@@ -1154,7 +1163,8 @@ contains
 
 
         if (should_write_restart) then
-            call this%outputer%save_rst_file(this%sim_time,this%IO_Comms,this%rst_var_indices,this%dt)
+            call this%outputer%save_rst_file(this%sim_time, this%IO_Comms, this%rst_var_indices, &
+                this%dt, this%adv_theta_ref_n, this%adv_theta_ref_z, this%adv_theta_ref_theta)
             this%restart_counter = 1
         endif
 
@@ -1580,6 +1590,7 @@ contains
 
         integer :: i, n_3d, n_2d, nx, ny, i_s_re, i_e_re, j_s_re, j_e_re
         integer :: ncid, file_var_id, dimid_3d(4), nz, err, varid, start_3d(4), cnt_3d(4), start_2d(3), cnt_2d(3)
+        integer :: theta_ref_schema, theta_ref_z_n, theta_ref_theta_n
         integer :: nx_c, ny_c, nz_c, ierr
 
         integer :: IO_Comms_info
@@ -1635,6 +1646,37 @@ contains
         ! Read saved dt for restart reproducibility (graceful fallback for old restart files)
         err = nf90_get_att(ncid, NF90_GLOBAL, "dt_seconds", this%restart_dt)
         if (err /= NF90_NOERR) this%restart_dt = 0.0
+
+        ! The split-theta advection reference is process-persistent numerical
+        ! state.  Rebuilding it from the later checkpoint atmosphere changes
+        ! the first post-restart advection step, so do not silently accept an
+        ! older restart file that lacks the compact profile.
+        call check_ncdf(nf90_get_att(ncid, NF90_GLOBAL, &
+                        "advection_theta_reference_schema", theta_ref_schema), &
+                        "Reading advection theta reference schema")
+        if (theta_ref_schema /= 1) then
+            error stop "Unsupported advection theta reference schema"
+        endif
+        call check_ncdf(nf90_inquire_attribute(ncid, NF90_GLOBAL, &
+                        "advection_theta_reference_z", len=theta_ref_z_n), &
+                        "Reading advection theta reference height count")
+        call check_ncdf(nf90_inquire_attribute(ncid, NF90_GLOBAL, &
+                        "advection_theta_reference_potential_temperature", &
+                        len=theta_ref_theta_n), &
+                        "Reading advection theta reference theta count")
+        if (theta_ref_z_n <= 0 .or. theta_ref_z_n > MAXLEVELS .or. &
+            theta_ref_theta_n /= theta_ref_z_n) then
+            error stop "Invalid advection theta reference profile in restart file"
+        endif
+        this%adv_theta_ref_n = theta_ref_z_n
+        call check_ncdf(nf90_get_att(ncid, NF90_GLOBAL, &
+                        "advection_theta_reference_z", &
+                        this%adv_theta_ref_z(1:this%adv_theta_ref_n)), &
+                        "Reading advection theta reference heights")
+        call check_ncdf(nf90_get_att(ncid, NF90_GLOBAL, &
+                        "advection_theta_reference_potential_temperature", &
+                        this%adv_theta_ref_theta(1:this%adv_theta_ref_n)), &
+                        "Reading advection theta reference potential temperature")
 
         ! setup start/count arrays accordingly. k_s_w and k_e_w forseen to always cover the bounds of what k_s_re and k_e_re would be
         ! This is because the domain is only decomposed in 2D.

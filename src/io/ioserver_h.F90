@@ -160,6 +160,9 @@ module ioserver_interface
         integer :: restart_counter = 0
         integer :: output_counter = 0
         integer :: frames_per_outfile, restart_count
+        integer, public :: adv_theta_ref_n = 0
+        real, public :: adv_theta_ref_z(MAXLEVELS) = 0.0
+        real, public :: adv_theta_ref_theta(MAXLEVELS) = 0.0
         
         !the indices of the output buffer corresponding to the restart vars
         integer, public, allocatable :: out_var_indices(:), rst_var_indices(:)

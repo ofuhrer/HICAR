@@ -419,6 +419,15 @@ contains
             if (my_rank == 0) then
                 call MPI_Comm_Size(this%parent_comms, comm_size, ierr)
                 call MPI_Send(domain%dt, 1, MPI_REAL, comm_size-1, kIO_TAG_DT_RESTART, this%parent_comms, ierr)
+                if (domain%adv_theta_ref_n <= 0 .or. domain%adv_theta_ref_n > MAXLEVELS) then
+                    error stop "Advection theta reference profile is not initialized"
+                endif
+                call MPI_Send(domain%adv_theta_ref_n, 1, MPI_INTEGER, comm_size-1, &
+                              kIO_TAG_ADV_THETA_N, this%parent_comms, ierr)
+                call MPI_Send(domain%adv_theta_ref_z, domain%adv_theta_ref_n, MPI_REAL, comm_size-1, &
+                              kIO_TAG_ADV_THETA_Z, this%parent_comms, ierr)
+                call MPI_Send(domain%adv_theta_ref_theta, domain%adv_theta_ref_n, MPI_REAL, comm_size-1, &
+                              kIO_TAG_ADV_THETA_TH, this%parent_comms, ierr)
             endif
 
             do i = 1, kMAX_STORAGE_VARS

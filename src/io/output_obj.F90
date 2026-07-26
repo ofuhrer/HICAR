@@ -280,12 +280,15 @@ contains
 
     end subroutine
     
-    module subroutine save_rst_file(this, time, par_comms, rst_var_indices, dt_seconds)
+    module subroutine save_rst_file(this, time, par_comms, rst_var_indices, dt_seconds, &
+                                    adv_theta_ref_n, adv_theta_ref_z, adv_theta_ref_theta)
         class(output_t),  intent(inout) :: this
         type(Time_type),  intent(in)  :: time
         integer,   intent(in)     :: par_comms
         integer,          intent(in)  :: rst_var_indices(:)
         real,             intent(in), optional :: dt_seconds
+        integer,          intent(in), optional :: adv_theta_ref_n
+        real,             intent(in), optional :: adv_theta_ref_z(:), adv_theta_ref_theta(:)
 
         this%active_nc_id = this%rst_ncfile_id
         
@@ -304,6 +307,34 @@ contains
             call check_ncdf(nf90_put_att(this%rst_ncfile_id, NF90_GLOBAL, "dt_seconds", dt_seconds), &
                             "Writing dt_seconds global attribute")
             call check_ncdf(nf90_enddef(this%rst_ncfile_id), "Leaving redef after dt_seconds attribute")
+        endif
+
+        ! Preserve the compact definition of the static theta_bar(z)
+        ! advection reference.  This is intentionally metadata rather than a
+        ! replicated 3-D restart variable: its size is O(nz), independent of
+        ! horizontal domain size.
+        if (present(adv_theta_ref_n) .and. present(adv_theta_ref_z) .and. &
+            present(adv_theta_ref_theta)) then
+            if (adv_theta_ref_n <= 0 .or. &
+                adv_theta_ref_n > size(adv_theta_ref_z) .or. &
+                adv_theta_ref_n > size(adv_theta_ref_theta)) then
+                error stop "Invalid advection theta reference profile"
+            endif
+            call check_ncdf(nf90_redef(this%rst_ncfile_id), &
+                            "Entering redef for advection theta reference attributes")
+            call check_ncdf(nf90_put_att(this%rst_ncfile_id, NF90_GLOBAL, &
+                            "advection_theta_reference_schema", 1), &
+                            "Writing advection theta reference schema")
+            call check_ncdf(nf90_put_att(this%rst_ncfile_id, NF90_GLOBAL, &
+                            "advection_theta_reference_z", &
+                            adv_theta_ref_z(1:adv_theta_ref_n)), &
+                            "Writing advection theta reference heights")
+            call check_ncdf(nf90_put_att(this%rst_ncfile_id, NF90_GLOBAL, &
+                            "advection_theta_reference_potential_temperature", &
+                            adv_theta_ref_theta(1:adv_theta_ref_n)), &
+                            "Writing advection theta reference potential temperature")
+            call check_ncdf(nf90_enddef(this%rst_ncfile_id), &
+                            "Leaving redef after advection theta reference attributes")
         endif
 
         ! store output

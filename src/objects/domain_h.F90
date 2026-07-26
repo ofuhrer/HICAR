@@ -9,7 +9,7 @@ module domain_interface
   use halo_interface,           only : halo_t
   use timer_interface,          only : timer_t
   use flow_object_interface,    only : flow_obj_t
-  use icar_constants,               only : kMAX_STORAGE_VARS, kVARS, kMAX_NAME_LENGTH
+  use icar_constants,               only : kMAX_STORAGE_VARS, kVARS, kMAX_NAME_LENGTH, MAXLEVELS
   implicit none
 
   private
@@ -60,6 +60,15 @@ module domain_interface
     ! advances, when the previous right endpoint must be promoted to the
     ! next interval's left endpoint.
     logical :: forcing_interval_ready = .False.
+
+    ! Compact, restart-persistent definition of the static theta_bar(z)
+    ! reference used by split-potential-temperature advection.  The expanded
+    ! 3-D field is reconstructed from these two one-dimensional tables after
+    ! every process start.  Without this state, a restart rebuilds theta_bar
+    ! from the later atmospheric state and changes the first advection step.
+    integer :: adv_theta_ref_n = 0
+    real :: adv_theta_ref_z(MAXLEVELS) = 0.0
+    real :: adv_theta_ref_theta(MAXLEVELS) = 0.0
 
     type(variable_t), allocatable :: vars_1d(:)
     type(variable_t), allocatable :: vars_2d(:)

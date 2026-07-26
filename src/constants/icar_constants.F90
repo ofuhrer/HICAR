@@ -515,6 +515,9 @@ module icar_constants
     integer, parameter :: kIO_TAG_RST_3D       = 501   ! server -> clients (restart read, 3D)
     integer, parameter :: kIO_TAG_RST_2D       = 502   ! server -> clients (restart read, 2D)
     integer, parameter :: kIO_TAG_DT_RESTART   = 42    ! server <- rank-0 child (existing use)
+    integer, parameter :: kIO_TAG_ADV_THETA_N  = 43    ! server <- rank-0 child
+    integer, parameter :: kIO_TAG_ADV_THETA_Z  = 44    ! server <- rank-0 child
+    integer, parameter :: kIO_TAG_ADV_THETA_TH = 45    ! server <- rank-0 child
 
     ! Maximum number of dimensions
     ! Note this is defined in NetCDF, though not enforced (a file can have more than 1024 dimensions)

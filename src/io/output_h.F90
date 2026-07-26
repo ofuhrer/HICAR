@@ -172,13 +172,16 @@ module output_interface
       !! Save a new timestep (time) to the restart file 
       !!
       !!----------------------------------------------------------
-      module subroutine save_rst_file(this, time, par_comms, rst_var_indices, dt_seconds)
+      module subroutine save_rst_file(this, time, par_comms, rst_var_indices, dt_seconds, &
+                                      adv_theta_ref_n, adv_theta_ref_z, adv_theta_ref_theta)
         implicit none
         class(output_t),  intent(inout) :: this
         type(Time_type),  intent(in)    :: time
         integer,   intent(in)    :: par_comms
         integer,          intent(in)    :: rst_var_indices(:)
         real,             intent(in), optional :: dt_seconds
+        integer,          intent(in), optional :: adv_theta_ref_n
+        real,             intent(in), optional :: adv_theta_ref_z(:), adv_theta_ref_theta(:)
     end subroutine
 
       module subroutine close_output_files(this)

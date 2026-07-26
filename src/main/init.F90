@@ -392,6 +392,15 @@ contains
             call MPI_Comm_Size(ioclient%parent_comms, comm_size, ierr)
             call MPI_Bcast(domain%restart_dt, 1, MPI_REAL, comm_size-1, &
                            ioclient%parent_comms, ierr)
+            call MPI_Bcast(domain%adv_theta_ref_n, 1, MPI_INTEGER, comm_size-1, &
+                           ioclient%parent_comms, ierr)
+            if (domain%adv_theta_ref_n <= 0 .or. domain%adv_theta_ref_n > MAXLEVELS) then
+                error stop "Invalid advection theta reference profile count on restart"
+            endif
+            call MPI_Bcast(domain%adv_theta_ref_z, domain%adv_theta_ref_n, MPI_REAL, &
+                           comm_size-1, ioclient%parent_comms, ierr)
+            call MPI_Bcast(domain%adv_theta_ref_theta, domain%adv_theta_ref_n, MPI_REAL, &
+                           comm_size-1, ioclient%parent_comms, ierr)
         endif
 
         if (STD_OUT_PE) write(*,*) "Initializing physics"

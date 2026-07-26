@@ -62,7 +62,7 @@ contains
 
     subroutine adv_std_init(domain,options)
         implicit none
-        type(domain_t), intent(in) :: domain
+        type(domain_t), intent(inout) :: domain
         type(options_t),intent(in) :: options
 
 
@@ -1385,7 +1385,7 @@ contains
     !!------------------------------------------------------------
     subroutine adv_std_init_theta_ref(domain)
         implicit none
-        type(domain_t), intent(in) :: domain
+        type(domain_t), intent(inout) :: domain
         integer :: zv, thv, i, j, k, nz, nbins, b, nc, m, ierr
         ! th_sum/z_sum/bcnt accumulate in DOUBLE precision so the per-bin mean is
         ! decomposition-invariant: single-precision summation of the same cells in
@@ -1397,6 +1397,7 @@ contains
         double precision, allocatable :: th_sum(:), z_sum(:), bcnt(:)
         real, allocatable :: zb_c(:), th_c(:)
         real :: zmin, zmax, dzbin, zt, w1
+        logical :: use_saved_profile
 
         if (allocated(adv_theta_ref)) return
         zv  = domain%var_indx(kVARS%z)%v
@@ -1411,6 +1412,16 @@ contains
 
         associate(z  => domain%vars_3d(zv )%data_3d, &
                   th => domain%vars_3d(thv)%data_3d)
+
+        use_saved_profile = domain%adv_theta_ref_n > 0
+        if (use_saved_profile) then
+            nc = domain%adv_theta_ref_n
+            if (nc > nbins .or. nc > MAXLEVELS) then
+                error stop "Saved advection theta reference profile exceeds vertical bounds"
+            endif
+            zb_c(1:nc) = domain%adv_theta_ref_z(1:nc)
+            th_c(1:nc) = domain%adv_theta_ref_theta(1:nc)
+        else
 
         ! ---- theta_bar(z) = horizontal mean of theta binned by PHYSICAL
         ! HEIGHT (NOT by terrain-following index k). A constant-k surface
@@ -1481,6 +1492,14 @@ contains
                 th_c(nc) = real(th_sum(b) / bcnt(b))
             endif
         enddo
+
+        if (nc <= 0 .or. nc > MAXLEVELS) then
+            error stop "Invalid newly constructed advection theta reference profile"
+        endif
+        domain%adv_theta_ref_n = nc
+        domain%adv_theta_ref_z(1:nc) = zb_c(1:nc)
+        domain%adv_theta_ref_theta(1:nc) = th_c(1:nc)
+        endif
 
         ! ---- adv_theta_ref(i,k,j) = theta_bar at physical height z(i,k,j),
         ! linearly interpolated on (zb_c, th_c). Out-of-range -> nearest

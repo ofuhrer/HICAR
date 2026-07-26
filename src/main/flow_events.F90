@@ -91,6 +91,11 @@ subroutine wake_component(comp_arr, options, boundary, ioclient)
                 call comp%read_restart_file(options)
                 call MPI_Comm_Size(comp%client_comms, comm_size, ierr)
                 call MPI_Bcast(comp%restart_dt, 1, MPI_REAL, comm_size-1, comp%client_comms, ierr)
+                call MPI_Bcast(comp%adv_theta_ref_n, 1, MPI_INTEGER, comm_size-1, comp%client_comms, ierr)
+                call MPI_Bcast(comp%adv_theta_ref_z, comp%adv_theta_ref_n, MPI_REAL, &
+                               comm_size-1, comp%client_comms, ierr)
+                call MPI_Bcast(comp%adv_theta_ref_theta, comp%adv_theta_ref_n, MPI_REAL, &
+                               comm_size-1, comp%client_comms, ierr)
             else
                 call component_write(comp,ioclient)
             endif
