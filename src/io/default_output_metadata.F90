@@ -2242,6 +2242,17 @@ contains
                                 attribute_t("coordinates",   "lat lon")]
 
         !>------------------------------------------------------------
+        !!  Elapsed time since the last variational-wind update.
+        !!  Spatially constant and restart-only.
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%wind_update_elapsed) then
+            var_meta%name        = "wind_update_elapsed"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("long_name", "elapsed time since wind update"), &
+                                attribute_t("units",         "s"),                            &
+                                attribute_t("coordinates",   "lat lon")]
+
+        !>------------------------------------------------------------
         !!  Time from the post-step checkpoint to the next scheduled
         !!  LSM update. Spatially constant and restart-only.
         !!------------------------------------------------------------

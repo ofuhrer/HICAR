@@ -79,6 +79,9 @@ contains
 
         call options%alloc_vars([kVARS%blk_ri, kVARS%froude])
 
+        call options%alloc_vars([kVARS%wind_update_elapsed])
+        call options%restart_vars([kVARS%wind_update_elapsed])
+
         if (options%physics%windtype == kITERATIVE_WINDS) then
             call options%alloc_vars([kVARS%wind_alpha])
 

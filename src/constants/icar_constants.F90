@@ -444,6 +444,10 @@ module icar_constants
         ! update anchor the cadence without using the segment's start_date.
         integer :: lsm_next_update_offset
         integer :: radiation_next_update_offset
+        ! Elapsed time since the last variational-wind update. Persisting this
+        ! scalar-as-field prevents a process restart from forcing an extra
+        ! wind solve at a time where the uninterrupted run would not.
+        integer :: wind_update_elapsed
 
         integer :: last_var
     end type var_constants_type

@@ -289,9 +289,9 @@ contains
         type(options_t),    intent(in)      :: options
 
         real            :: last_print_time
-        real, save      :: last_wind_update
+        real, save      :: last_wind_update = 0.0
         real            :: remaining_step_seconds
-        logical         :: last_loop, force_update_winds
+        logical         :: last_loop, force_update_winds, restart_entry
 
         type(time_delta_t) :: time_step_size, max_dt
         type(Time_type) :: tmp_time, canonical_end_time
@@ -314,12 +314,38 @@ contains
 
         time_step_size = canonical_end_time - domain%sim_time
 
-        force_update_winds = domain%sim_time%equals(options%general%start_time, precision=max_dt)
-        if (options%restart%restart) force_update_winds = domain%sim_time%equals(options%restart%restart_time, precision=max_dt)
+        restart_entry = options%restart%restart .and. &
+            domain%sim_time%equals(options%restart%restart_time, precision=max_dt)
+        force_update_winds = domain%sim_time%equals(options%general%start_time, precision=max_dt) .and. &
+            .not. restart_entry
+
+        associate(wind_update_elapsed => &
+            domain%vars_2d(domain%var_indx(kVARS%wind_update_elapsed)%v)%data_2d)
+            if (restart_entry) then
+                !$acc update self(wind_update_elapsed(domain%its,domain%jts))
+                last_wind_update = wind_update_elapsed(domain%its,domain%jts)
+                force_update_winds = last_wind_update >= options%wind%update_dt%seconds()
+            else if (force_update_winds) then
+                last_wind_update = 0.0
+                !$acc kernels present(wind_update_elapsed)
+                wind_update_elapsed = 0.0
+                !$acc end kernels
+            endif
+        end associate
 
         call tmp_time%set(domain%next_input%mjd() - domain%input_dt%days())
 
         force_update_winds = (force_update_winds .or. domain%sim_time%equals(tmp_time, precision=max_dt) )
+
+        ! A restart inside a wind/forcing interval must resume with the saved
+        ! CFL timestep even though no wind solve is due. Previously the
+        ! unconditional restart wind solve also initialized dt, masking this
+        ! separate dependency.
+        if (restart_entry .and. .not. force_update_winds .and. domain%restart_dt > 0.0) then
+            call dt%set(seconds=domain%restart_dt)
+            domain%dt = real(dt%seconds())
+            domain%restart_dt = 0.0
+        endif
         
         last_loop = .False.
 
@@ -481,6 +507,12 @@ contains
                 call domain%increment_sim_time(dt)
             endif
             last_wind_update = last_wind_update + dt%seconds()
+            associate(wind_update_elapsed => &
+                domain%vars_2d(domain%var_indx(kVARS%wind_update_elapsed)%v)%data_2d)
+                !$acc kernels present(wind_update_elapsed)
+                wind_update_elapsed = last_wind_update
+                !$acc end kernels
+            end associate
         enddo
 
         !If we overwrote dt to edge up to the next output/input step, revert here
