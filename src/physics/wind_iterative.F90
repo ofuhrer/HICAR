@@ -357,7 +357,23 @@ contains
 
 
     subroutine reset_wind_solver_guess()
-        if (allocated(x_sol)) call vec_zero(x_sol)
+        integer :: i, j, k
+
+        if (.not. allocated(x_sol)) return
+
+        ! A cold start must include the local halo and physical-boundary
+        ! cells.  fgmres_line_solve exchanges inter-rank faces before A*x,
+        ! but physical-boundary halos are not overwritten by that exchange.
+        ! Leaving probe/previous-solve values there therefore changes r0
+        ! across a process restart even when every owned cell is zero.
+        !$acc parallel loop gang vector collapse(3) present(x_sol)
+        do j = j_s-1, j_e+1
+            do k = k_s-1, k_e+1
+                do i = i_s-1, i_e+1
+                    x_sol(i,k,j) = 0.0_c_double
+                enddo
+            enddo
+        enddo
     end subroutine reset_wind_solver_guess
 
 
