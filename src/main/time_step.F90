@@ -25,6 +25,7 @@ submodule(time_step) time_step_implementation
     use wind,                       only : balance_uvw, update_winds, update_wind_dqdt
     use debug_module,               only : domain_check
     use time_delta_object,          only : time_delta_t
+    use time_object,                only : canonical_time_seconds
     use icar_constants,             only : STD_OUT_PE, kVARS
     use snow_drift,                 only : snow_drift_step
 
@@ -293,13 +294,25 @@ contains
         logical         :: last_loop, force_update_winds
 
         type(time_delta_t) :: time_step_size, max_dt
-        type(Time_type) :: tmp_time
+        type(Time_type) :: tmp_time, canonical_end_time
         type(time_delta_t), save      :: dt
 
         last_print_time = 0.0
         call max_dt%set(seconds=1.0)
 
-        time_step_size = end_time - domain%sim_time
+        ! Time_type stores absolute Modified Julian days. A time reached by
+        ! repeated additions and the same time parsed from a restart timestamp
+        ! can differ by a few microseconds. Start each event-bounded step from
+        ! the established millisecond event-time lattice, and canonicalize its
+        ! requested end in the same way. Normal adaptive timesteps between the
+        ! two events retain their full precision.
+        tmp_time = domain%sim_time
+        call tmp_time%set(canonical_time_seconds(domain%sim_time%seconds()) / 86400.0D0)
+        call domain%set_sim_time(tmp_time)
+        canonical_end_time = end_time
+        call canonical_end_time%set(canonical_time_seconds(end_time%seconds()) / 86400.0D0)
+
+        time_step_size = canonical_end_time - domain%sim_time
 
         force_update_winds = domain%sim_time%equals(options%general%start_time, precision=max_dt)
         if (options%restart%restart) force_update_winds = domain%sim_time%equals(options%restart%restart_time, precision=max_dt)
@@ -311,10 +324,10 @@ contains
         last_loop = .False.
 
         ! now just loop over internal timesteps computing all physics in order (operator splitting...)
-        do while (domain%sim_time < end_time .and. .not.(last_loop))
+        do while (domain%sim_time < canonical_end_time .and. .not.(last_loop))
             
             !Determine dt
-            remaining_step_seconds = real(end_time%seconds() - domain%sim_time%seconds())
+            remaining_step_seconds = real(canonical_end_time%seconds() - domain%sim_time%seconds())
 
             if (force_update_winds .or. &
                 (last_wind_update >= options%wind%update_dt%seconds() .and. &
@@ -351,7 +364,7 @@ contains
                 force_update_winds = .False.
 
                 if (options%wind%wind_only) then
-                    domain%sim_time = end_time
+                    domain%sim_time = canonical_end_time
                     exit
                 endif
             endif
@@ -359,11 +372,17 @@ contains
             ! Make sure we don't over step the forcing or output period
             call tmp_time%set(domain%sim_time%mjd() + dt%days())
 
-            if (tmp_time > end_time) then
-                dt = end_time - domain%sim_time
+            if (tmp_time >= canonical_end_time) then
+                if (tmp_time > canonical_end_time) dt = canonical_end_time - domain%sim_time
 
-                ! Sometimes, due to very small time differences, in the inequality controling the loop,
-                ! the physics loop can run again. Stop that from happening here
+                ! The final physics step reaches a forcing/output/restart event.
+                ! Mark exact hits as final too, and after the physics below set
+                ! sim_time from the canonical event object rather than by adding
+                ! dt to a large Modified Julian day. Otherwise an uninterrupted
+                ! process accumulates a few microseconds of calendar roundoff
+                ! while a restarted process parses the event timestamp exactly;
+                ! the next clipped step can then differ by one single-precision
+                ! bit and perturb an otherwise identical trajectory.
                 last_loop = .True.
             endif
             
@@ -379,7 +398,7 @@ contains
 
             ! if an interactive run was requested than print status updates everytime at least 5% of the progress has been made
             if (options%general%interactive .and. (STD_OUT_PE)) then
-                call print_progress(domain%sim_time, end_time, time_step_size, dt, last_print_time)
+                call print_progress(domain%sim_time, canonical_end_time, time_step_size, dt, last_print_time)
             endif
             ! this if is to avoid round off errors causing an additional physics call that won't really do anything
 
@@ -456,7 +475,11 @@ contains
 
             endif
             ! step model_time forward
-            call domain%increment_sim_time(dt)
+            if (last_loop) then
+                call domain%set_sim_time(canonical_end_time)
+            else
+                call domain%increment_sim_time(dt)
+            endif
             last_wind_update = last_wind_update + dt%seconds()
         enddo
 
