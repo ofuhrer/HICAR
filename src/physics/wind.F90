@@ -611,66 +611,114 @@ contains
                 enddo
             enddo
         end if
-        ! Reconstruct the wind target from exact forcing endpoints and
-        ! absolute model time.  The first solve targets the current time;
-        ! subsequent solves target the end of the wind-update interval.
+        ! The cold-start forcing record is the exact current-time endpoint.
+        ! next_input still equals start_time during physics initialization,
+        ! so forcing_phase_at(0) would describe the preceding interval and
+        ! incorrectly select the as-yet unloaded right endpoint.  Restart
+        ! initialization returns before this routine.  Later wind solves use
+        ! absolute time to target the end of their update interval.
         if (first_wind) then
-            forcing_phase = domain%forcing_phase_at(0.0)
+            forcing_phase = 0.0
         else
             forcing_phase = domain%forcing_phase_at(wind_update_dt)
         endif
 
-        !$acc parallel
-        !$acc loop gang vector collapse(3)
-        do i = ims,ime+1
-            do k = kms, kme
-                do j = jms, jme
-                    if (forcing_phase <= 0.0) then
+        ! Select the interpolation regime on the host.  In particular, keep
+        ! exact forcing endpoints on the established direct-copy path rather
+        ! than evaluating a device-side branch for every grid cell.
+        if (forcing_phase <= 0.0) then
+            !$acc parallel
+            !$acc loop gang vector collapse(3)
+            do j = jms, jme
+                do k = kms, kme
+                    do i = ims,ime+1
                         u_dqdt_3d(i,k,j) = fu(i,k,j)
-                    else if (forcing_phase >= 1.0) then
+                    enddo
+                enddo
+            enddo
+            !$acc loop gang vector collapse(3)
+            do j = jms, jme+1
+                do k = kms, kme
+                    do i = ims,ime
+                        v_dqdt_3d(i,k,j) = fv(i,k,j)
+                    enddo
+                enddo
+            enddo
+            !$acc end parallel
+        else if (forcing_phase >= 1.0) then
+            !$acc parallel
+            !$acc loop gang vector collapse(3)
+            do j = jms, jme
+                do k = kms, kme
+                    do i = ims,ime+1
                         u_dqdt_3d(i,k,j) = fu_dqdt_3d(i,k,j)
-                    else
+                    enddo
+                enddo
+            enddo
+            !$acc loop gang vector collapse(3)
+            do j = jms, jme+1
+                do k = kms, kme
+                    do i = ims,ime
+                        v_dqdt_3d(i,k,j) = fv_dqdt_3d(i,k,j)
+                    enddo
+                enddo
+            enddo
+            !$acc end parallel
+        else
+            !$acc parallel
+            !$acc loop gang vector collapse(3)
+            do j = jms, jme
+                do k = kms, kme
+                    do i = ims,ime+1
                         u_dqdt_3d(i,k,j) = fu(i,k,j) + &
                             (fu_dqdt_3d(i,k,j) - fu(i,k,j)) * forcing_phase
-                    endif
+                    enddo
                 enddo
             enddo
-        enddo
-        !$acc loop gang vector collapse(3)
-        do i = ims,ime
-            do k = kms, kme
-                do j = jms, jme+1
-                    if (forcing_phase <= 0.0) then
-                        v_dqdt_3d(i,k,j) = fv(i,k,j)
-                    else if (forcing_phase >= 1.0) then
-                        v_dqdt_3d(i,k,j) = fv_dqdt_3d(i,k,j)
-                    else
+            !$acc loop gang vector collapse(3)
+            do j = jms, jme+1
+                do k = kms, kme
+                    do i = ims,ime
                         v_dqdt_3d(i,k,j) = fv(i,k,j) + &
                             (fv_dqdt_3d(i,k,j) - fv(i,k,j)) * forcing_phase
-                    endif
+                    enddo
                 enddo
             enddo
-        enddo
-        !$acc end parallel
+            !$acc end parallel
+        endif
 
         if (w_var_given) then
             associate(fw => domain%forcing_hi(domain%forcing_var_indx(kVARS%w_real)%v)%data_3d, &
                       fw_dqdt_3d => domain%forcing_hi(domain%forcing_var_indx(kVARS%w_real)%v)%dqdt_3d)
-            !$acc parallel loop gang vector collapse(3) present(fw, fw_dqdt_3d)
-            do i = ims,ime
-                do k = kms, kme
-                    do j = jms, jme
-                        if (forcing_phase <= 0.0) then
+            if (forcing_phase <= 0.0) then
+                !$acc parallel loop gang vector collapse(3) present(fw)
+                do j = jms, jme
+                    do k = kms, kme
+                        do i = ims,ime
                             w(i,k,j) = fw(i,k,j)
-                        else if (forcing_phase >= 1.0) then
-                            w(i,k,j) = fw_dqdt_3d(i,k,j)
-                        else
-                            w(i,k,j) = fw(i,k,j) + &
-                                (fw_dqdt_3d(i,k,j) - fw(i,k,j)) * forcing_phase
-                        endif
+                        enddo
                     enddo
                 enddo
-            enddo
+            else if (forcing_phase >= 1.0) then
+                !$acc parallel loop gang vector collapse(3) present(fw_dqdt_3d)
+                do j = jms, jme
+                    do k = kms, kme
+                        do i = ims,ime
+                            w(i,k,j) = fw_dqdt_3d(i,k,j)
+                        enddo
+                    enddo
+                enddo
+            else
+                !$acc parallel loop gang vector collapse(3) present(fw, fw_dqdt_3d)
+                do j = jms, jme
+                    do k = kms, kme
+                        do i = ims,ime
+                            w(i,k,j) = fw(i,k,j) + &
+                                (fw_dqdt_3d(i,k,j) - fw(i,k,j)) * forcing_phase
+                        enddo
+                    enddo
+                enddo
+            endif
             end associate
         endif
         !$acc end data
