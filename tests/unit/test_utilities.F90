@@ -19,8 +19,12 @@ module test_utilities
     use variable_interface,      only : variable_t
     use grid_interface,          only : grid_t
     use fftshifter,              only : fftshift, ifftshift
-    use mod_atm_utilities,       only : cal_cldfra3, cal_cldfra3_level
+    use io_routines,             only : io_read, io_write
+    use mod_atm_utilities,       only : cal_cldfra3, cal_cldfra3_level, horizon_azimuth_index
+    use domain_interface,        only : auto_dz
+    use options_interface,       only : options_t
     use testdrive,               only : new_unittest, unittest_type, error_type, check
+    use mpi,                     only : MPI_COMM_WORLD, MPI_Comm_rank
     use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
 
     implicit none
@@ -37,6 +41,9 @@ contains
             new_unittest("string_roundtrip", test_string_roundtrip), &
             new_unittest("linear_space",     test_linear_space), &
             new_unittest("variable_dict",    test_variable_dict), &
+            new_unittest("io_read_extra_dimension", test_io_read_extra_dimension), &
+            new_unittest("horizon_azimuth_index", test_horizon_azimuth_index), &
+            new_unittest("manual_vertical_grid", test_manual_vertical_grid), &
             new_unittest("fftshift_1d",      test_fftshift_1d), &
             new_unittest("fftshift_2d",      test_fftshift_2d), &
             new_unittest("cloud_fraction_level", test_cloud_fraction_level) &
@@ -136,6 +143,90 @@ contains
         call check(error, all(output_var%dim_len == var2%dim_len), &
                    "var_dict returned wrong dim_len")
     end subroutine test_variable_dict
+
+
+    subroutine test_io_read_extra_dimension(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        real :: source(2,3,4,2)
+        real, allocatable :: selected(:,:,:)
+        character(len=128) :: filename
+        integer :: i, j, k, n, rank, ierr, unit
+
+        call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
+        write(filename, '(".tmp_io_extra_dimension_",I0,".nc")') rank
+
+        do n = 1, size(source, 4)
+            do k = 1, size(source, 3)
+                do j = 1, size(source, 2)
+                    do i = 1, size(source, 1)
+                        source(i,j,k,n) = real(i + 10*j + 100*k + 1000*n)
+                    enddo
+                enddo
+            enddo
+        enddo
+
+        call io_write(filename, "sample", source)
+        call io_read(filename, "sample", selected, extradim_start=2)
+
+        call check(error, allocated(selected), "io_read must allocate the selected record")
+        if (allocated(error)) return
+        call check(error, all(shape(selected) == shape(source(:,:,:,2))), &
+                   "io_read selected record has the wrong shape")
+        if (allocated(error)) return
+        call check(error, all(selected == source(:,:,:,2)), &
+                   "io_read must select one trailing record without explicit spatial counts")
+
+        open(newunit=unit, file=filename, status="old")
+        close(unit, status="delete")
+    end subroutine test_io_read_extra_dimension
+
+
+    subroutine test_horizon_azimuth_index(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        real, parameter :: deg = acos(-1.0)/180.0
+
+        call check(error, horizon_azimuth_index(0.0, 90) == 1, &
+                   "zero azimuth starts the first horizon sector")
+        if (allocated(error)) return
+        call check(error, horizon_azimuth_index(3.9*deg, 90) == 1, &
+                   "the first four-degree sector has no off-by-one shift")
+        if (allocated(error)) return
+        call check(error, horizon_azimuth_index(4.1*deg, 90) == 2, &
+                   "azimuth past four degrees advances to sector two")
+        if (allocated(error)) return
+        call check(error, horizon_azimuth_index(359.9*deg, 90) == 90, &
+                   "azimuth near 360 degrees uses the last sector")
+        if (allocated(error)) return
+        call check(error, horizon_azimuth_index(361.0*deg, 90) == 90 .and. &
+                          horizon_azimuth_index(-1.0*deg, 90) == 1, &
+                   "out-of-range azimuths clamp to the horizon axis")
+    end subroutine test_horizon_azimuth_index
+
+
+    subroutine test_manual_vertical_grid(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        type(options_t), allocatable :: options
+        real, parameter :: manual(5) = [100.0, 200.0, 300.0, 400.0, 500.0]
+
+        allocate(options)
+        call options%init()
+        options%domain%auto_level = 0
+        options%domain%nz = size(manual)
+        if (allocated(options%domain%dz_levels)) deallocate(options%domain%dz_levels)
+        allocate(options%domain%dz_levels(size(manual)), source=manual)
+
+        call auto_dz(options)
+
+        call check(error, allocated(options%domain%dz_levels), &
+                   "manual dz_levels remain allocated")
+        if (allocated(error)) return
+        call check(error, size(options%domain%dz_levels) == size(manual) .and. &
+                          all(options%domain%dz_levels == manual), &
+                   "auto_level=0 preserves supplied dz_levels")
+    end subroutine test_manual_vertical_grid
 
 
     subroutine test_fftshift_1d(error)

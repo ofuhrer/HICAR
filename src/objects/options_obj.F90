@@ -2735,6 +2735,7 @@ contains
                       kVARS%terrain,                kVARS%pressure,                 &
                       kVARS%temperature,            kVARS%pressure_interface,       &
                       kVARS%exner,                  kVARS%potential_temperature,    &
+                      kVARS%water_vapor,                                            &
                       kVARS%latitude,               kVARS%longitude,                &
                       kVARS%u_latitude,             kVARS%u_longitude,              &
                       kVARS%v_latitude,             kVARS%v_longitude,              &

@@ -452,8 +452,9 @@ contains
 
             dimcnt(1:size(counts))=counts(1:size(counts))
             dimstart(1:size(starts))=starts(1:size(starts))
-            if (size(dimcnt)>nominal_dim) dimcnt(nominal_dim+1:size(dimcnt))=1 ! set count for extra dims to 1
         endif
+
+        if (size(dimcnt)>nominal_dim) dimcnt(nominal_dim+1:size(dimcnt))=1 ! set count for extra dims to 1
 
         ! Open the file. IOR(NF90_NOWRITE,NF90_NETCDF4) tells netCDF we want read-only access to the file.
         call check(nf90_open(trim(filename), IOR(NF90_NOWRITE,NF90_NETCDF4), ncid),trim(filename))

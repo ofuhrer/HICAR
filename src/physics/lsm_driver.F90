@@ -314,6 +314,12 @@ contains
         logical :: context_change, restart, monthly_vegfrac
         real*8 :: eff_interval, initial_time
 
+        if (present(context_chng)) then
+            context_change = context_chng
+        else
+            context_change = .false.
+        endif
+
         if (options%physics%landsurface > 0 .or. options%physics%watersurface > 0) then
 
         associate(temperature_2m => domain%vars_2d(domain%var_indx(kVARS%temperature_2m)%v)%data_2d, &
@@ -321,12 +327,6 @@ contains
                   temperature    => domain%vars_3d(domain%var_indx(kVARS%temperature)%v)%data_3d,    &
                   water_vapor    => domain%vars_3d(domain%var_indx(kVARS%water_vapor)%v)%data_3d)
 
-
-        if (present(context_chng)) then
-            context_change = context_chng
-        else
-            context_change = .false.
-        endif
 
         restart = context_change .or. options%restart%restart
 

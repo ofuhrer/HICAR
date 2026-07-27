@@ -16,8 +16,10 @@ module data_structures
 ! ------------------------------------------------
 
     type :: dim_arrays_type
-        integer :: dims(10)
-        integer :: num_dims
+        ! Only dims(1:num_dims) is populated by the namelist reader. Default
+        ! the tail so callers that pass the full array never consume garbage.
+        integer :: dims(10) = 0
+        integer :: num_dims = 0
     end type dim_arrays_type
 
     type index_type

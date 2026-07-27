@@ -2533,7 +2533,7 @@ contains
         !!  similarity stability function for momentum
         !!------------------------------------------------------------
         else if (var_idx==kVARS%psim) then
-            var_meta%name        = "psih"
+            var_meta%name        = "psim"
             var_meta%dimensions  = two_d_t_dimensions
             var_meta%attributes  = [attribute_t("long_name", "similarity stability function for momentum"),                    &
                                 attribute_t("units",         "1"),                                   &

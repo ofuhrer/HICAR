@@ -13,7 +13,7 @@ module domain_interface
   implicit none
 
   private
-  public :: domain_t
+  public :: domain_t, auto_dz
 
   type , extends(flow_obj_t) :: domain_t
     type(grid_t)         :: grid,   grid8w,  u_grid,   v_grid
@@ -256,6 +256,11 @@ module domain_interface
     module subroutine update_host(this)
         implicit none
         class(domain_t), intent(inout) :: this
+    end subroutine
+
+    module subroutine auto_dz(options)
+        implicit none
+        type(options_t), intent(inout) :: options
     end subroutine
 
   end interface

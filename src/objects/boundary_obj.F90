@@ -895,7 +895,7 @@ contains
 
             data_flipped = io_var_reversed(this%firstfile, options%zvar)
             if (data_flipped) then
-                temp_z_trans = temp_z_trans(:,:,size(temp_z_trans,3):1:-1)
+                temp_z_trans = temp_z_trans(:,size(temp_z_trans,2):1:-1,:)
             endif
 
             if (z_staggered) call interpolate_in_z(temp_z_trans)

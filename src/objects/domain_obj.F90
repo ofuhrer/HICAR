@@ -68,7 +68,9 @@ contains
         !$acc                   this%ihs, this%ihe, this%jhs, this%jhe, &
         !$acc                   this%ids, this%ide, this%kds, this%kde, this%jds, this%jde, this%filter_width, &
         !$acc                   this%var_indx, this%forcing_var_indx, &
-        !$acc                   this%adv_vars, this%exch_vars, this%tend, this%halo)
+        !$acc                   this%adv_vars, this%exch_vars, this%tend, this%halo, &
+        !$acc                   this%mapfac_mx_u, this%mapfac_my_u, this%mapfac_mx_v, &
+        !$acc                   this%mapfac_my_v, this%mapfac_mxy)
         
         !update all relevant data_2d/data_3d fields of vars_2d/vars_3d to device
         call this%update_device()
@@ -210,8 +212,6 @@ contains
         endif
         end associate
 
-        !$acc enter data copyin(this%mapfac_mx_u, this%mapfac_my_u, this%mapfac_mx_v, &
-        !$acc                   this%mapfac_my_v, this%mapfac_mxy)
     end subroutine init_map_factors
 
 
@@ -317,6 +317,7 @@ contains
             write(*,*) "ERROR: Different number of advected variables on different PEs!"
         end if
         ! pack adv_vars with the variables to advect
+        this%n_adv_3d = 0
         do i = 1,n
             tmp_var = get_varmeta(this%adv_vars(i)%id)
             if (tmp_var%three_d) then
@@ -332,7 +333,8 @@ contains
             write(*,*) "ERROR: Different number of advected variables on different PEs!"
         end if
 
-        ! pack adv_vars with the variables to advect
+        ! pack exch_vars with the variables to exchange
+        this%n_exch_3d = 0
         do i = 1,n
             tmp_var = get_varmeta(this%exch_vars(i)%id)
             if (tmp_var%three_d) then
@@ -438,7 +440,9 @@ contains
         !$acc                   this%ims, this%ime, this%kms, this%kme, this%jms, this%jme, &
         !$acc                   this%ids, this%ide, this%kds, this%kde, this%jds, this%jde, &
         !$acc                   this%vars_2d, this%vars_3d, this%var_indx, this%forcing_var_indx, this%forcing_hi, &
-        !$acc                   this%adv_vars, this%exch_vars, this%tend, this%halo)
+        !$acc                   this%adv_vars, this%exch_vars, this%tend, this%halo, &
+        !$acc                   this%mapfac_mx_u, this%mapfac_my_u, this%mapfac_mx_v, &
+        !$acc                   this%mapfac_my_v, this%mapfac_mxy)
         
         do i = 1, size(this%vars_2d)
             if (allocated(this%vars_2d(i)%data_2d)) then
@@ -1504,7 +1508,7 @@ contains
     !!   If auto_level == 3, uses exponential stretching (eta-style as in WRF).
     !!   If auto_level == 4, uses an arccosine-based distribution (COSMO-like, ICON itype_laydistr==1).
     !! --------------------------------
-    subroutine auto_dz(options)
+    module subroutine auto_dz(options)
         implicit none
         type(options_t), intent(inout) :: options
 
@@ -1513,6 +1517,10 @@ contains
         real :: x1, a, b, c, alpha, exp_alpha, x_lin
         integer :: nlevp1, jk
         logical :: auto_level_warnings
+
+        ! Preserve the namelist-supplied layer thicknesses for a manual grid.
+        ! Reallocating first would replace them with uninitialized storage.
+        if (options%domain%auto_level == 0) return
 
         if(allocated(options%domain%dz_levels)) deallocate(options%domain%dz_levels)
         allocate(options%domain%dz_levels(options%domain%nz))
@@ -1524,8 +1532,6 @@ contains
             top_height    => options%domain%model_top_height,         &
             stretch_fac   => options%domain%stretch_fac,              &
             dz_lev        => options%domain%dz_levels)
-
-            if (auto_level == 0) return
 
             nlevp1 = nz + 1
             allocate(vct_a(nlevp1))
@@ -2449,6 +2455,10 @@ contains
 
         if (STD_OUT_PE) write (*,*) "Reading Land Variables"
         if (STD_OUT_PE) flush(output_unit)
+
+        ! These thicknesses mirror the hard-coded Noah/Noah-MP soil layers.
+        soil_thickness = 1.0
+        soil_thickness(1:4) = [0.1, 0.2, 0.4, 0.8]
 
         call this%update_host()
         
