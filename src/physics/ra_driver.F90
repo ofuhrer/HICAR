@@ -32,7 +32,7 @@ module radiation
     use time_object,        only : Time_type, canonical_time_seconds
     use icar_constants, only : kVARS, kRA_BASIC, kRA_SIMPLE, kRA_RRTMG, kRA_RRTMGP, STD_OUT_PE, kMP_THOMP_AER, kMAX_NESTS
     use mod_wrf_constants, only : cp, R_d, gravity, DEGRAD, DPD, piconst, STBOLT
-    use mod_atm_utilities, only : cal_cldfra3_level, calc_solar_elevation, calc_solar_date
+    use mod_atm_utilities, only : cal_cldfra3_level, calc_solar_elevation, calc_solar_date, horizon_azimuth_index
     use mpi
     use mpi_utils_module, only: allreduce_integer_min_in_place
 #ifdef USE_NCCL
@@ -1824,7 +1824,7 @@ contains
                     enddo                
                 endif
                 !!
-                zdx_max = ubound(domain%vars_3d(domain%var_indx(kVARS%hlm)%v)%data_3d,1)
+                zdx_max = ubound(domain%vars_3d(domain%var_indx(kVARS%hlm)%v)%data_3d,2)
 
                 associate(shortwave => domain%vars_2d(domain%var_indx(kVARS%shortwave)%v)%data_2d, &
                         shortwave_direct => domain%vars_2d(domain%var_indx(kVARS%shortwave_direct)%v)%data_2d, &
@@ -1838,9 +1838,7 @@ contains
                         shortwave_direct(i,j) = max( shortwave_cached(i,j) - shortwave_diffuse(i,j),0.0)
 
                         !!
-                        zdx=floor(solar_azimuth_store(i,j)*(180./piconst)/4.0) !! MJ added= we have 90 by 4 deg for hlm ...zidx is the right index based on solar azimuthal angle
-
-                        zdx = max(min(zdx,zdx_max),1)
+                        zdx = horizon_azimuth_index(solar_azimuth_store(i,j), zdx_max)
                         elev_th=(90.-hlm(i,zdx,j))*DEGRAD !! MJ added: it is the solar elevation threshold above which we see the sun from the pixel  
                         if (solar_elevation_store(i,j)>=elev_th) then
                             ! determin maximum allowed direct swr

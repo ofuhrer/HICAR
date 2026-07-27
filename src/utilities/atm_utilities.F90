@@ -23,6 +23,18 @@ module mod_atm_utilities
 
 contains
 
+    !> Map an azimuth in radians clockwise from north to one of the equal
+    !! sectors in a horizon-line matrix. The first sector starts at zero.
+    pure function horizon_azimuth_index(azimuth, n_azimuths) result(indx)
+        !$acc routine seq
+        real, intent(in)    :: azimuth
+        integer, intent(in) :: n_azimuths
+        integer             :: indx
+
+        indx = floor(azimuth*RADDEG/(360.0/n_azimuths)) + 1
+        indx = max(min(indx, n_azimuths), 1)
+    end function horizon_azimuth_index
+
     !>----------------------------------------------------------
     !! Compute column integrated vapor transport (non-directional)
     !!

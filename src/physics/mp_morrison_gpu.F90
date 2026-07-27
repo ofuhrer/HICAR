@@ -707,7 +707,6 @@ SUBROUTINE MP_MORR_TWO_MOMENT_gpu(ITIMESTEP,                       &
   integer :: iinum ! wrf-chem
 
 ! wrf-chem
-   REAL, DIMENSION(kts:kte) :: nc1d, nc_tend1d
    !REAL, DIMENSION(kts:kte) :: rainprod1d, evapprod1d
 ! HM add reflectivity
    !REAL, DIMENSION(kts:kte) :: dBZ
@@ -1038,7 +1037,7 @@ SUBROUTINE MP_MORR_TWO_MOMENT_gpu(ITIMESTEP,                       &
    !$acc             QG3DTEN, NG3DTEN, QG3D, NG3D, &
    !$acc             qrcu1d, qscu1d, qicu1d, &
    !$acc             QGSTEN, QRSTEN, QISTEN, QNISTEN, QCSTEN, LTRUE_COL, &
-   !$acc             nc1d, nc_tend1d, C2PREC,ISED,SSED, &
+   !$acc             C2PREC,ISED,SSED, &
    !$acc             lamg,acn,arn,ain,agn,ltrue,n0s,n0i,pgam, &
    !$acc             cdist1,xlf,xxlv,xxls,nc3d,lams,asn, &
    !$acc             n0g,cpm,lamr,n0rr,lami,nc3dten,mu,lamc,dap, &
@@ -1088,7 +1087,6 @@ SUBROUTINE MP_MORR_TWO_MOMENT_gpu(ITIMESTEP,                       &
           NR3DTEN(I,K,J)  = 0.
           T3DTEN(I,K,J)   = 0.
           QV3DTEN(I,K,J)  = 0.
-          nc_tend1d = 0. ! wrf-chem
 
           QC3D(I,K,J)       = QC(i,k,j)
           QI3D(I,K,J)       = QI(i,k,j)
@@ -1116,7 +1114,6 @@ SUBROUTINE MP_MORR_TWO_MOMENT_gpu(ITIMESTEP,                       &
           qrcu1d(I,K,J)     = qrcuten(i,k,j) ! /mu(i,j) ! not coupled with mu in ICAR
           qscu1d(I,K,J)     = qscuten(i,k,j) ! /mu(i,j) ! not coupled with mu in ICAR
           qicu1d(I,K,J)     = qicuten(i,k,j) ! /mu(i,j) ! not coupled with mu in ICAR
-          nc1d=0. ! temporary placeholder, set to constant in microphysics subroutine
       ENDDO
       ENDDO
       ENDDO
@@ -3490,17 +3487,19 @@ SUBROUTINE MP_MORR_TWO_MOMENT_gpu(ITIMESTEP,                       &
               QGSTEN(I,KTE,J)  = QGSTEN(I,KTE,J) - FALTNDG*DUM2
               NG3DTEN(I,KTE,J) = NG3DTEN(I,KTE,J) - FALTNDNG*DUM2
 
+              ! Top layer only loses mass to fallout (no inflow from above),
+              ! so the substep state depletes: matches the CPU version's `-`.
               DUMT = DT/NSTEP_COL
-              DUMR_loc(KTE)   = DUMR_loc(KTE)   + FALTNDR*DUMT
-              DUMI_loc(KTE)   = DUMI_loc(KTE)   + FALTNDI*DUMT
-              DUMFNI_loc(KTE) = DUMFNI_loc(KTE) + FALTNDNI*DUMT
-              DUMQS_loc(KTE)  = DUMQS_loc(KTE)  + FALTNDS*DUMT
-              DUMFNS_loc(KTE) = DUMFNS_loc(KTE) + FALTNDNS*DUMT
-              DUMFNR_loc(KTE) = DUMFNR_loc(KTE) + FALTNDNR*DUMT
-              DUMC_loc(KTE)   = DUMC_loc(KTE)   + FALTNDC*DUMT
-              DUMFNC_loc(KTE) = DUMFNC_loc(KTE) + FALTNDNC*DUMT
-              DUMG_loc(KTE)   = DUMG_loc(KTE)   + FALTNDG*DUMT
-              DUMFNG_loc(KTE) = DUMFNG_loc(KTE) + FALTNDNG*DUMT
+              DUMR_loc(KTE)   = DUMR_loc(KTE)   - FALTNDR*DUMT
+              DUMI_loc(KTE)   = DUMI_loc(KTE)   - FALTNDI*DUMT
+              DUMFNI_loc(KTE) = DUMFNI_loc(KTE) - FALTNDNI*DUMT
+              DUMQS_loc(KTE)  = DUMQS_loc(KTE)  - FALTNDS*DUMT
+              DUMFNS_loc(KTE) = DUMFNS_loc(KTE) - FALTNDNS*DUMT
+              DUMFNR_loc(KTE) = DUMFNR_loc(KTE) - FALTNDNR*DUMT
+              DUMC_loc(KTE)   = DUMC_loc(KTE)   - FALTNDC*DUMT
+              DUMFNC_loc(KTE) = DUMFNC_loc(KTE) - FALTNDNC*DUMT
+              DUMG_loc(KTE)   = DUMG_loc(KTE)   - FALTNDG*DUMT
+              DUMFNG_loc(KTE) = DUMFNG_loc(KTE) - FALTNDNG*DUMT
 
         ELSE
               ! Interior: inflow from above minus outflow

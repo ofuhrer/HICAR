@@ -563,8 +563,8 @@ contains
         sintheta_vstag = (sintheta(ims:ime,jms+1:jme)+sintheta(ims:ime,jms:jme-1))/2
 
         do k = kms,kme
-            u(ims,k,:)       = u(ims,k,:) * costheta_ustag(ims+1,:) + v_ustag(ims+1,k,:) * sintheta_ustag(ims+1,:)
-            u(ime+1,k,:)     = u(ime+1,k,:) * costheta_ustag(ime,:) + v_ustag(ime,k,:) * sintheta_ustag(ime,:)
+            u(ims,k,:)       = u(ims,k,:) * costheta_ustag(ims+1,:) - v_ustag(ims+1,k,:) * sintheta_ustag(ims+1,:)
+            u(ime+1,k,:)     = u(ime+1,k,:) * costheta_ustag(ime,:) - v_ustag(ime,k,:) * sintheta_ustag(ime,:)
         
             v(:,k,jms)       = v(:,k,jms) * costheta_vstag(:,jms+1) + u_vstag(:,k,jms+1) * sintheta_vstag(:,jms+1)
             v(:,k,jme+1)     = v(:,k,jme+1) * costheta_vstag(:,jme) + u_vstag(:,k,jme) * sintheta_vstag(:,jme)
@@ -758,6 +758,10 @@ contains
             first_wind = .False.
             return
         endif
+
+        ! Keep density consistent across process halos for both cold-start and
+        ! time-step calls before forming the density-weighted wind correction.
+        call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%density)%v), corners=.True.)
 
         !do this now, so that we will have some values in data_3d when calling update_stability
         if (options%general%debug) call domain_check_winds(domain, "Pre update_winds::apply_base_from_forcing",dqdt=.True.)
