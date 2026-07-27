@@ -245,7 +245,7 @@ message(STATUS "Setting up compiler flags...")
 # buffer types in the same source file (for example REAL and INTEGER RMA puts).
 set(_gnu_legacy_mpi_flag -fallow-argument-mismatch)
 # Optimization flag tail shared by the gnu release + profile builds.
-set(_gnu_opt_tail ${_gnu_legacy_mpi_flag} -ffast-math -ffree-line-length-none -ftree-vectorize -fimplicit-none -funroll-loops -march=native -fno-protect-parens)
+set(_gnu_opt_tail ${_gnu_legacy_mpi_flag} -ffast-math -fno-associative-math -ffree-line-length-none -ftree-vectorize -fimplicit-none -funroll-loops -march=native)
 if(MODE STREQUAL "debug")
 	set(CMAKE_BUILD_TYPE Debug)
 
@@ -293,6 +293,22 @@ if(NOT DEFINED HICAR_Fortran_FLAGS)
 	message(FATAL_ERROR "No compiler flags for MODE='${MODE}' with COMPILER='${COMPILER}'. "
 		"Supported: debug/release (gnu + nvfortran); debugslow/profile (gnu only).")
 endif()
+
+# Avoid decomposition-dependent rounding in the advection kernels: vectorized
+# loop bodies otherwise contract a +/- b*c while scalar remainders do not.
+if (COMPILER STREQUAL "gnu")
+	set(_no_fma_flags -ffp-contract=off)
+elseif (COMPILER STREQUAL "nvfortran")
+	set(_no_fma_flags -Mnofma)
+	if(OPENACC)
+		list(APPEND _no_fma_flags -gpu=nofma)
+	endif()
+endif()
+set_source_files_properties(
+	${PROJECT_SOURCE_DIR}/src/physics/advect.F90
+	${PROJECT_SOURCE_DIR}/src/physics/adv_fluxcorr.F90
+	PROPERTIES COMPILE_OPTIONS "${_no_fma_flags}")
+unset(_no_fma_flags)
 
 # Convert list to space-separated string for display and external projects
 string(REPLACE ";" " " HICAR_Fortran_FLAGS_STR "${HICAR_Fortran_FLAGS}")
