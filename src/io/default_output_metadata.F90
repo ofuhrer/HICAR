@@ -1524,7 +1524,7 @@ contains
             var_meta%maxval    = 500.0
             var_meta%minval    = 0.0
             var_meta%dimensions  = two_d_t_dimensions
-            var_meta%attributes  = [attribute_t("standard_name", "surface_net_downward_longwave_flux"), &
+            var_meta%attributes  = [attribute_t("standard_name", "surface_downwelling_longwave_flux_in_air"), &
                                attribute_t("units",         "W m-2"),                                    &
                                attribute_t("coordinates",   "lat lon")]
             if (present(force_boundaries)) force_boundaries = .False.
@@ -2511,21 +2511,22 @@ contains
                                attribute_t("coordinates",   "lat lon")]
         
         !>------------------------------------------------------------
-        !!  Monin-Obukhov Length
+        !!  Surface-layer temperature scale
         !!------------------------------------------------------------
         else if (var_idx==kVARS%mol) then
             var_meta%name        = "mol"
             var_meta%dimensions  = two_d_t_dimensions
-            var_meta%attributes  = [attribute_t("long_name", "Monin-Obukhov Length"),                    &
-                               attribute_t("units",         "m"),                                   &
+            var_meta%attributes  = [attribute_t("long_name", "Surface-layer temperature scale"),       &
+                               attribute_t("units",         "K"),                                   &
                                attribute_t("coordinates",   "lat lon")]
         !>------------------------------------------------------------
-        !!  Shear velocity
+        !!  Friction velocity
         !!------------------------------------------------------------
         else if (var_idx==kVARS%ustar) then
             var_meta%name        = "ustar"
             var_meta%dimensions  = two_d_t_dimensions
-            var_meta%attributes  = [attribute_t("long_name", "Shear velocity"),                    &
+            var_meta%attributes  = [attribute_t("standard_name", "magnitude_of_surface_friction_velocity_in_air"), &
+                                attribute_t("long_name", "Magnitude of surface friction velocity in air"),         &
                                 attribute_t("units",         "m s-1"),                                   &
                                 attribute_t("coordinates",   "lat lon")]
                     
@@ -2921,7 +2922,7 @@ contains
             var_meta%maxval    = 100.0
             var_meta%minval    = 0.0
             var_meta%dimensions  = two_d_t_dimensions
-            var_meta%attributes  = [attribute_t("standard_name", "surface_roughness_length"),            &
+            var_meta%attributes  = [attribute_t("standard_name", "surface_roughness_length_for_momentum_in_air"), &
                                attribute_t("long_name",     "Surface roughness length"),            &
                                attribute_t("units",         "m"),                                   &
                                attribute_t("coordinates",   "lat lon")]
@@ -3008,7 +3009,8 @@ contains
         else if (var_idx==kVARS%v_10m) then
             var_meta%name        = "v10m"
             var_meta%dimensions  = two_d_t_dimensions
-            var_meta%attributes  = [attribute_t("long_name", "Northward wind component at 10m"),            &
+            var_meta%attributes  = [attribute_t("standard_name", "northward_wind"),                          &
+                               attribute_t("long_name", "Northward wind component at 10m"),            &
                                attribute_t("units",         "m s-1"),                               &
                                attribute_t("coordinates",   "lat lon")]
         
@@ -3018,7 +3020,8 @@ contains
         else if (var_idx==kVARS%u_10m) then
             var_meta%name        = "u10m"
             var_meta%dimensions  = two_d_t_dimensions
-            var_meta%attributes  = [attribute_t("long_name", "Eastward wind component at 10m"),             &
+            var_meta%attributes  = [attribute_t("standard_name", "eastward_wind"),                           &
+                               attribute_t("long_name", "Eastward wind component at 10m"),             &
                                attribute_t("units",         "m s-1"),                               &
                                attribute_t("coordinates",   "lat lon")]
         !>------------------------------------------------------------
@@ -3040,7 +3043,46 @@ contains
             var_meta%attributes  = [attribute_t("long_name", "Eastward wind averaged to mass grid"),             &
                                 attribute_t("units",         "m s-1"),                               &
                                 attribute_t("coordinates",   "lat lon")]
-                    
+
+        !>------------------------------------------------------------
+        !!  Eastward wind at wind-climatology heights above ground
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%wind_u_agl) then
+            var_meta%name        = "u_agl"
+            var_meta%dimensions  = three_d_t_wind_height_dimensions
+            var_meta%dim_len(2)  = kWIND_HEIGHT_Z
+            var_meta%attributes  = [attribute_t("standard_name", "eastward_wind"),                         &
+                               attribute_t("long_name", "Eastward wind at fixed height above ground"),    &
+                               attribute_t("units", "m s-1"),                                            &
+                               attribute_t("coordinates", "height_agl lat lon"),                          &
+                               attribute_t("interpolation", "linear in geometric height AGL; no extrapolation")]
+
+        !>------------------------------------------------------------
+        !!  Northward wind at wind-climatology heights above ground
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%wind_v_agl) then
+            var_meta%name        = "v_agl"
+            var_meta%dimensions  = three_d_t_wind_height_dimensions
+            var_meta%dim_len(2)  = kWIND_HEIGHT_Z
+            var_meta%attributes  = [attribute_t("standard_name", "northward_wind"),                        &
+                               attribute_t("long_name", "Northward wind at fixed height above ground"),   &
+                               attribute_t("units", "m s-1"),                                            &
+                               attribute_t("coordinates", "height_agl lat lon"),                          &
+                               attribute_t("interpolation", "linear in geometric height AGL; no extrapolation")]
+
+        !>------------------------------------------------------------
+        !!  Air density at wind-climatology heights above ground
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%density_agl) then
+            var_meta%name        = "rho_agl"
+            var_meta%dimensions  = three_d_t_wind_height_dimensions
+            var_meta%dim_len(2)  = kWIND_HEIGHT_Z
+            var_meta%attributes  = [attribute_t("standard_name", "air_density"),                            &
+                               attribute_t("long_name", "Air density at fixed height above ground"),       &
+                               attribute_t("units", "kg m-3"),                                             &
+                               attribute_t("coordinates", "height_agl lat lon"),                           &
+                               attribute_t("interpolation", "linear in geometric height AGL; no extrapolation")]
+
         !>------------------------------------------------------------
         !!  10 meter height wind speed magnitude, sqrt(u_10m**2+v_10m**2)
         !!------------------------------------------------------------
@@ -3062,7 +3104,7 @@ contains
                                attribute_t("coordinates",   "lat lon")]
         
         !>------------------------------------------------------------
-        !!  Sensible Heat Exchange Coefficient
+        !!  Surface-layer bulk Richardson number
         !!------------------------------------------------------------
         else if (var_idx==kVARS%chs) then
             var_meta%name        = "coeff_heat_exchange"
@@ -3097,7 +3139,7 @@ contains
         else if (var_idx==kVARS%br) then
             var_meta%name        = "sfc_Ri"
             var_meta%dimensions  = two_d_t_dimensions
-            var_meta%attributes  = [attribute_t("long_name", "bulk_richardson_num_from_SFC_scheme"), &
+            var_meta%attributes  = [attribute_t("long_name", "Surface-layer bulk Richardson number"), &
                                attribute_t("units",         "1"),                                      &
                                attribute_t("coordinates",   "lat lon")]
         
@@ -3118,7 +3160,8 @@ contains
         else if (var_idx==kVARS%hpbl) then
             var_meta%name        = "hpbl"
             var_meta%dimensions  = two_d_t_dimensions
-            var_meta%attributes  = [attribute_t("long_name", "height_of_planetary_boundary_layer"), &
+            var_meta%attributes  = [attribute_t("standard_name", "atmosphere_boundary_layer_thickness"), &
+                               attribute_t("long_name", "Height of planetary boundary layer"), &
                                attribute_t("units",         "m"),                                      &
                                attribute_t("coordinates",   "lat lon")]
         

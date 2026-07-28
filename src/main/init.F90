@@ -408,7 +408,13 @@ contains
         call init_physics(options, domain)
         if (STD_OUT_PE) flush(output_unit)
 
-        if (.not.(options%restart%restart)) call ioclient%push(domain)
+        if (.not.(options%restart%restart)) then
+            if (domain%var_indx(kVARS%wind_u_agl)%v > 0) then
+                call domain%diagnostic_update()
+                call domain%update_wind_height_diagnostics()
+            endif
+            call ioclient%push(domain)
+        endif
 
 
     end subroutine init_model_state

@@ -244,6 +244,12 @@ subroutine component_write(component, ioclient)
             if (STD_OUT_PE) write(*,*) "Writing output file"
             if (STD_OUT_PE) flush(output_unit)
             call component%output_timer%start()
+            ! Refresh mass-grid diagnostics at the exact output time, then
+            ! calculate compact wind-climatology fields only for this event.
+            if (component%var_indx(kVARS%wind_u_agl)%v > 0) then
+                call component%diagnostic_update()
+                call component%update_wind_height_diagnostics()
+            endif
             call ioclient%push(component)
             call component%output_timer%stop()
         type is (ioserver_t)

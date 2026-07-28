@@ -978,6 +978,67 @@ contains
 
     end subroutine diagnostic_update
 
+    !>------------------------------------------------------------
+    !! Diagnose the compact wind-climatology state at fixed AGL heights.
+    !!
+    !! Called at output events, not at every model timestep. The target
+    !! heights are ordered, so each model column is traversed only once.
+    !!------------------------------------------------------------
+    module subroutine update_wind_height_diagnostics(this)
+        implicit none
+        class(domain_t), intent(inout) :: this
+
+        integer :: i, j, k, kh
+        real :: height, z_lower, z_upper, weight
+
+        if (this%var_indx(kVARS%wind_u_agl)%v <= 0) return
+
+        associate(ims => this%ims, ime => this%ime,                           &
+                  jms => this%jms, jme => this%jme,                           &
+                  kms => this%kms, kme => this%kme,                           &
+                  z => this%vars_3d(this%var_indx(kVARS%z)%v)%data_3d,       &
+                  terrain => this%vars_2d(this%var_indx(kVARS%terrain)%v)%data_2d, &
+                  u_mass => this%vars_3d(this%var_indx(kVARS%u_mass)%v)%data_3d,    &
+                  v_mass => this%vars_3d(this%var_indx(kVARS%v_mass)%v)%data_3d,    &
+                  density => this%vars_3d(this%var_indx(kVARS%density)%v)%data_3d,  &
+                  u_agl => this%vars_3d(this%var_indx(kVARS%wind_u_agl)%v)%data_3d, &
+                  v_agl => this%vars_3d(this%var_indx(kVARS%wind_v_agl)%v)%data_3d, &
+                  rho_agl => this%vars_3d(this%var_indx(kVARS%density_agl)%v)%data_3d)
+
+        !$acc parallel loop gang vector collapse(2) default(present) &
+        !$acc& private(k,kh,height,z_lower,z_upper,weight)
+        do j = jms, jme
+            do i = ims, ime
+                k = kms
+                do kh = 1, kWIND_HEIGHT_Z
+                    height = kWIND_HEIGHTS_AGL(kh)
+                    do while (k < kme-1 .and. z(i,k+1,j)-terrain(i,j) <= height)
+                        k = k + 1
+                    enddo
+
+                    z_lower = z(i,k,j) - terrain(i,j)
+                    z_upper = z(i,k+1,j) - terrain(i,j)
+                    if (height < z_lower .or. height > z_upper .or. z_upper <= z_lower) then
+                        u_agl(i,kh,j) = kEMPT_BUFF
+                        v_agl(i,kh,j) = kEMPT_BUFF
+                        rho_agl(i,kh,j) = kEMPT_BUFF
+                    else
+                        weight = (height-z_lower)/(z_upper-z_lower)
+                        u_agl(i,kh,j) = u_mass(i,k,j) + weight * &
+                            (u_mass(i,k+1,j)-u_mass(i,k,j))
+                        v_agl(i,kh,j) = v_mass(i,k,j) + weight * &
+                            (v_mass(i,k+1,j)-v_mass(i,k,j))
+                        rho_agl(i,kh,j) = density(i,k,j) + weight * &
+                            (density(i,k+1,j)-density(i,k,j))
+                    endif
+                enddo
+            enddo
+        enddo
+        !$acc end parallel loop
+
+        end associate
+    end subroutine update_wind_height_diagnostics
+
    
     !> -------------------------------
     !! Allocate and or initialize all domain variables if they have been requested
@@ -1079,6 +1140,8 @@ contains
                                 grid = this%grid8w
                             case ("level_fm")
                                 grid = this%grid_fm
+                            case ("height_agl")
+                                grid = this%grid_wind_height
                             case ("nsoil")
                                 grid = this%grid_soil
                             case ("nsnow")
@@ -2932,7 +2995,7 @@ contains
                           kSOIL_GRID_Z, kFM_GRID_Z, kSOILCOMP_GRID_Z,        &
                           kGECROS_GRID_Z, kCROP_GRID_Z, kMONTH_GRID_Z,       &
                           kLAKE_Z, kLAKE_SOISNO_Z, kLAKE_SOI_Z,              &
-                          kLAKE_SOISNO_1_Z, 90)
+                          kLAKE_SOISNO_1_Z, kWIND_HEIGHT_Z, 90)
 
         call this%grid%set_grid_dimensions(     nx_global, ny_global, nz_global, image=my_index, comms=this%compute_comms, global_nz=max_halo_nz, adv_order=adv_order)
         call this%grid8w%set_grid_dimensions(   nx_global, ny_global, nz_global+1, image=my_index, comms=this%compute_comms, global_nz=max_halo_nz, adv_order=adv_order)
@@ -2957,6 +3020,7 @@ contains
         call this%grid_snow_i%set_grid_dimensions(         nx_global, ny_global, kSNOW_GRID_Z+1, image=my_index, comms=this%compute_comms, global_nz=max_halo_nz, adv_order=adv_order)
         call this%grid_snowsoil%set_grid_dimensions(     nx_global, ny_global, kSNOWSOIL_GRID_Z, image=my_index, comms=this%compute_comms, global_nz=max_halo_nz, adv_order=adv_order)
         call this%grid_fm%set_grid_dimensions(           nx_global, ny_global, kFM_GRID_Z, image=my_index, comms=this%compute_comms, global_nz=max_halo_nz, adv_order=adv_order)
+        call this%grid_wind_height%set_grid_dimensions(  nx_global, ny_global, kWIND_HEIGHT_Z, image=my_index, comms=this%compute_comms, global_nz=max_halo_nz, adv_order=adv_order)
         call this%grid_soilcomp%set_grid_dimensions(     nx_global, ny_global, kSOILCOMP_GRID_Z, image=my_index, comms=this%compute_comms, global_nz=max_halo_nz, adv_order=adv_order)
         call this%grid_gecros%set_grid_dimensions(       nx_global, ny_global, kGECROS_GRID_Z, image=my_index, comms=this%compute_comms, global_nz=max_halo_nz, adv_order=adv_order)
         call this%grid_croptype%set_grid_dimensions(     nx_global, ny_global, kCROP_GRID_Z, image=my_index, comms=this%compute_comms, global_nz=max_halo_nz, adv_order=adv_order)

@@ -477,7 +477,8 @@ contains
         integer,                  intent(in)    :: par_comms
         integer,                         intent(in)    :: var_indx_list(:)
         integer :: par_comm_info
-        integer :: err
+        integer :: err, height_dim_id, height_var_id, par_rank
+        integer :: height_count(1)
         logical :: is_file_parallel
         
         ! open file
@@ -513,12 +514,48 @@ contains
         ! define variables or find variable IDs (and dimensions)
         call setup_variables(this, time, var_indx_list)
 
+        ! Define the CF vertical coordinate used by the compact fixed-height
+        ! wind diagnostics when that dimension is present in this profile.
+        height_var_id = -1
+        err = nf90_inq_dimid(this%active_nc_id, "height_agl", height_dim_id)
+        if (err == NF90_NOERR) then
+            err = nf90_inq_varid(this%active_nc_id, "height_agl", height_var_id)
+            if (err /= NF90_NOERR) then
+                call check_ncdf(nf90_def_var(this%active_nc_id, "height_agl", NF90_REAL, &
+                                [height_dim_id], height_var_id), &
+                                "Defining variable:height_agl")
+                call check_ncdf(nf90_put_att(this%active_nc_id, height_var_id, &
+                                "standard_name", "height"), &
+                                "Saving height_agl standard_name")
+                call check_ncdf(nf90_put_att(this%active_nc_id, height_var_id, &
+                                "long_name", "height above ground"), &
+                                "Saving height_agl long_name")
+                call check_ncdf(nf90_put_att(this%active_nc_id, height_var_id, &
+                                "units", "m"), "Saving height_agl units")
+                call check_ncdf(nf90_put_att(this%active_nc_id, height_var_id, &
+                                "positive", "up"), "Saving height_agl positive")
+                call check_ncdf(nf90_put_att(this%active_nc_id, height_var_id, &
+                                "axis", "Z"), "Saving height_agl axis")
+            endif
+        endif
 
         !Set creating to true, so that we will output any static variables on the first pass.
         this%creating=.True.
 
         ! End define mode. This tells netCDF we are done defining metadata.
         call check_ncdf( nf90_enddef(this%active_nc_id), "end define mode" )
+
+        if (height_var_id >= 0) then
+            call MPI_Comm_rank(par_comms, par_rank, ierr)
+            call check_ncdf(nf90_var_par_access(this%active_nc_id, height_var_id, &
+                            nf90_collective), &
+                            "Setting collective access for height_agl")
+            height_count = 0
+            if (par_rank == 0) height_count = size(kWIND_HEIGHTS_AGL)
+            call check_ncdf(nf90_put_var(this%active_nc_id, height_var_id, &
+                            kWIND_HEIGHTS_AGL, start=[1], count=height_count), &
+                            "Writing height_agl")
+        endif
     
 
     end subroutine

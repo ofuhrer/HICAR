@@ -249,6 +249,9 @@ module icar_constants
         integer :: tend_th_swrad
         integer :: u_mass
         integer :: v_mass
+        integer :: wind_u_agl
+        integer :: wind_v_agl
+        integer :: density_agl
         integer :: re_cloud
         integer :: re_ice
         integer :: re_snow
@@ -474,6 +477,7 @@ module icar_constants
     character(len=18) :: three_d_global_interface_dimensions(3)       = [character(len=18) :: "lon_x_global","level_i","lat_y_global"]
     character(len=18) :: three_d_neighbor_interface_dimensions(3)     = [character(len=18) :: "lon_x_neighbor","level_i","lat_y_neighbor"]
     character(len=18) :: three_d_t_dimensions(4)            = [character(len=18) :: "lon_x","level","lat_y","time"]
+    character(len=18) :: three_d_t_wind_height_dimensions(4)= [character(len=18) :: "lon_x","height_agl","lat_y","time"]
     character(len=18) :: three_d_interface_dimensions(3)    = [character(len=18) :: "lon_x","level_i","lat_y"]
     character(len=18) :: three_d_t_interface_dimensions(4)  = [character(len=18) :: "lon_x","level_i","lat_y","time"]
     character(len=18) :: three_d_hlm_dimensions(3)          = [character(len=18) :: "lon_x","azimuth","lat_y"]
@@ -608,6 +612,9 @@ module icar_constants
     integer, parameter :: kCROP_GRID_Z       = 5
     integer, parameter :: kMONTH_GRID_Z      = 12
     integer, parameter :: kGECROS_GRID_Z     = 60
+    integer, parameter :: kWIND_HEIGHT_Z     = 6
+    real, parameter :: kWIND_HEIGHTS_AGL(kWIND_HEIGHT_Z) = &
+        [50.0, 75.0, 100.0, 125.0, 150.0, 200.0]
     integer, parameter :: kSOILCOMP_GRID_Z   = 8
     
     integer, parameter :: kLAKE_Z            = 10

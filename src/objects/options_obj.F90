@@ -165,6 +165,25 @@ contains
             endif
         endif
 
+        ! Fixed-height wind fields are a coupled diagnostic. Allocate all
+        ! source-complete fields when any member is requested, while retaining
+        ! the user's requested subset for output.
+        if (this%output%vars_for_output(kVARS%wind_u_agl) > 0 .or. &
+            this%output%vars_for_output(kVARS%wind_v_agl) > 0 .or. &
+            this%output%vars_for_output(kVARS%density_agl) > 0) then
+            call this%alloc_vars([kVARS%wind_u_agl, kVARS%wind_v_agl, kVARS%density_agl])
+        endif
+
+        ! The two 10 m components are another coupled diagnostic. Physics
+        ! schemes allocate them when needed internally, but an output-only
+        ! request must do so as well or the cleanup below silently drops the
+        ! requested fields. Their source fields (mass-grid winds, geometric
+        ! height, terrain, and roughness length) are default allocations.
+        if (this%output%vars_for_output(kVARS%u_10m) > 0 .or. &
+            this%output%vars_for_output(kVARS%v_10m) > 0) then
+            call this%alloc_vars([kVARS%u_10m, kVARS%v_10m])
+        endif
+
         !clean output var list
         do i=1, size(this%output%vars_for_output)
             if ((this%output%vars_for_output(i)+this%vars_for_restart(i) > 0) .and. (this%vars_to_allocate(i) <= 0)) then
@@ -184,7 +203,9 @@ contains
                     this%vars_for_restart(i) = 0
                     cycle
                 endif
-                if (tmp_meta%three_d .and. this%output%vars_for_output(i) > 0) output_zvar = .True.
+                if (tmp_meta%three_d .and. this%output%vars_for_output(i) > 0 .and. &
+                    (tmp_meta%dimensions(2) == "level" .or. &
+                     tmp_meta%dimensions(2) == "level_i")) output_zvar = .True.
             endif
         enddo
         ! Force the output of lat/lon, since these should always be present with output data

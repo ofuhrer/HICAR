@@ -23,6 +23,7 @@ module domain_interface
     type(grid_t)         :: grid2d, u_grid2d, v_grid2d
     type(grid_t)         :: grid_monthly, grid_soil
     type(grid_t)         :: grid_snow, grid_snow_i, grid_snowsoil, grid_fm
+    type(grid_t)         :: grid_wind_height
     type(grid_t)         :: grid_soilcomp, grid_gecros, grid_croptype
     type(grid_t)         :: grid_hlm, grid_Sx !! MJ added
     type(grid_t)         :: grid_lake , grid_lake_soisno, grid_lake_soi, grid_lake_soisno_1
@@ -130,6 +131,7 @@ module domain_interface
 
     procedure :: get_initial_conditions
     procedure :: diagnostic_update
+    procedure :: update_wind_height_diagnostics
     procedure :: interpolate_forcing
     procedure :: update_delta_fields
     procedure :: apply_forcing
@@ -200,6 +202,11 @@ module domain_interface
       class(domain_t),  intent(inout)   :: this
       logical, intent(in), optional    :: forcing_update
       logical, intent(in), optional    :: thermo_only
+    end subroutine
+
+    module subroutine update_wind_height_diagnostics(this)
+      implicit none
+      class(domain_t), intent(inout) :: this
     end subroutine
 
     module subroutine interpolate_forcing(this, forcing, update)
