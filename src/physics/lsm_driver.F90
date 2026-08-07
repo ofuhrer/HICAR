@@ -521,6 +521,14 @@ contains
             IOPT_RSF = options%lsm%nmp_opt_rsf
             IOPT_SOIL = options%lsm%nmp_opt_soil
             IOPT_PEDO = options%lsm%nmp_opt_pedo
+            if (IOPT_SOIL == 2) then
+                if (options%domain%soiltexture_var == "") then
+                    error stop "nmp_opt_soil=2 requires domain soiltexture_var"
+                endif
+                if (num_soil_layers /= 4) then
+                    error stop "nmp_opt_soil=2 requires four Noah-MP soil layers"
+                endif
+            endif
             IOPT_CROP = options%lsm%nmp_opt_crop
             IOPT_IRR = options%lsm%nmp_opt_irr
             IOPT_IRRM = options%lsm%nmp_opt_irrm

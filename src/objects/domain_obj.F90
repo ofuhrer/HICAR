@@ -2608,6 +2608,26 @@ contains
             endif
         endif
 
+        if (options%domain%soiltexture_var /= "") then
+            call io_read(options%domain%init_conditions_file,   &
+                           options%domain%soiltexture_var,      &
+                           temporary_data_3d)
+            if (size(temporary_data_3d, 3) /= 4) then
+                if (STD_OUT_PE) write(*,*) "Error: soiltexture_var must contain exactly four Noah-MP soil layers"
+                error stop
+            endif
+            if (this%var_indx(kVARS%soil_texture_1)%v > 0) then
+                this%vars_2d(this%var_indx(kVARS%soil_texture_1)%v)%data_2d(:,:) = &
+                    temporary_data_3d(this%grid%ims:this%grid%ime, this%grid%jms:this%grid%jme, 1)
+                this%vars_2d(this%var_indx(kVARS%soil_texture_2)%v)%data_2d(:,:) = &
+                    temporary_data_3d(this%grid%ims:this%grid%ime, this%grid%jms:this%grid%jme, 2)
+                this%vars_2d(this%var_indx(kVARS%soil_texture_3)%v)%data_2d(:,:) = &
+                    temporary_data_3d(this%grid%ims:this%grid%ime, this%grid%jms:this%grid%jme, 3)
+                this%vars_2d(this%var_indx(kVARS%soil_texture_4)%v)%data_2d(:,:) = &
+                    temporary_data_3d(this%grid%ims:this%grid%ime, this%grid%jms:this%grid%jme, 4)
+            endif
+        endif
+
         if (options%domain%cropcategory_var /= "") then
             call io_read(options%domain%init_conditions_file,   &
                            options%domain%cropcategory_var,         &
