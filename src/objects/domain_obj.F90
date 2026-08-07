@@ -3635,8 +3635,15 @@ contains
     module subroutine synchronize_sparse_lbc(this)
         implicit none
         class(domain_t), intent(inout) :: this
+        integer :: previous_left
         if (.not. this%sparse_lbc%active) return
+        previous_left = this%sparse_lbc%left_index
         call this%sparse_lbc%ensure_right_time(this%next_input%seconds())
+        if (STD_OUT_PE .and. this%sparse_lbc%left_index /= previous_left) then
+            write(*,*) "Sparse LBC bracket advanced: left=", &
+                       this%sparse_lbc%left_index, " right=", &
+                       this%sparse_lbc%right_index
+        endif
     end subroutine synchronize_sparse_lbc
 
     module subroutine apply_sparse_lbc(this, dt)
