@@ -3825,7 +3825,15 @@ contains
                     do j = jms,jme
                         do k = kms, kme
                             do i = ims,ime
-                                if (.not.(is_wind)) then
+                                if (is_wind .and. .not.(is_w_real)) then
+                                    ! update_winds stores the next adjusted U/V
+                                    ! target in dqdt_3d and update_wind_dqdt
+                                    ! converts it to a tendency.  Preserve that
+                                    ! modeled tendency here; forcing_hi retains
+                                    ! exact endpoints only for source fields.
+                                    var_data(i,k,j) = var_data(i,k,j) + &
+                                        var_dqdt(i,k,j) * dt
+                                else if (.not.(is_wind)) then
                                     if (forcing_phase <= 0.0) then
                                         var_data(i,k,j) = f_data(i,k,j)
                                     else if (forcing_phase >= 1.0) then
