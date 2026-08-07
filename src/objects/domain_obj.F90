@@ -3619,6 +3619,7 @@ contains
         u_bounds = [this%u_grid%ims, this%u_grid%ime, this%u_grid%jms, this%u_grid%jme]
         v_bounds = [this%v_grid%ims, this%v_grid%ime, this%v_grid%jms, this%v_grid%jme]
         call this%sparse_lbc%init(options%forcing%sparse_lbc_files, this%nz, &
+             this%grid%ide, this%grid%jde, &
              mass_bounds, u_bounds, v_bounds, &
              canonical_time_seconds(this%sim_time%seconds()), &
              canonical_time_seconds(this%end_time%seconds()), &

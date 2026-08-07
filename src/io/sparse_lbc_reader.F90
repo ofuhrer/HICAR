@@ -11,6 +11,7 @@ module sparse_lbc_reader
     real(real64), parameter :: TIME_TOLERANCE = 1.0e-3_real64
 
     type, public :: sparse_lbc_points_t
+        integer :: global_count = 0
         integer, allocatable :: i(:), j(:), file_position(:)
         real, allocatable :: weight(:)
     contains
@@ -31,6 +32,10 @@ module sparse_lbc_reader
         integer :: right_index = 0
         integer :: nz = 0
         real :: relaxation_timescale_seconds = 3600.0
+        character(len=256) :: static_sha256 = ""
+        character(len=256) :: target_grid_fingerprint = ""
+        character(len=256) :: relaxation_profile = ""
+        character(len=256) :: lateral_w_policy = ""
         character(len=kMAX_FILE_LENGTH), allocatable :: files(:)
         real(real64), allocatable :: valid_seconds(:)
         type(sparse_lbc_points_t) :: mass, u, v
@@ -39,7 +44,7 @@ module sparse_lbc_reader
         procedure :: init
         procedure :: ensure_right_time
         procedure :: field_index
-        procedure :: release
+        procedure :: release => release_reader
     end type sparse_lbc_reader_t
 
 contains
@@ -148,8 +153,9 @@ contains
         call nc_check(nf90_get_var(ncid, varid, values), "reading "//trim(name))
     end subroutine read_index_variable
 
-    subroutine initialize_points(ncid, prefix, ids, ide, jds, jde, points)
-        integer, intent(in) :: ncid, ids, ide, jds, jde
+    subroutine initialize_points(ncid, prefix, ids, ide, jds, jde, &
+                                 global_nx, global_ny, points)
+        integer, intent(in) :: ncid, ids, ide, jds, jde, global_nx, global_ny
         character(len=*), intent(in) :: prefix
         type(sparse_lbc_points_t), intent(inout) :: points
         integer, allocatable :: rows(:), columns(:)
@@ -167,9 +173,14 @@ contains
                       "finding "//trim(weight_name))
         allocate(weights(size(rows)))
         call nc_check(nf90_get_var(ncid, varid, weights), "reading "//trim(weight_name))
+        if (any(columns < 0) .or. any(columns >= global_nx) .or. &
+            any(rows < 0) .or. any(rows >= global_ny)) then
+            error stop "Sparse LBC support index lies outside its global grid"
+        endif
         if (any(weights < 0.0) .or. any(weights > 1.0)) then
             error stop "Sparse LBC relaxation weights must lie in [0,1]"
         endif
+        points%global_count = size(rows)
         n = count(columns + 1 >= ids .and. columns + 1 <= ide .and. &
                   rows + 1 >= jds .and. rows + 1 <= jde .and. weights > 0.0)
         allocate(points%i(n), points%j(n), points%file_position(n), points%weight(n))
@@ -185,6 +196,16 @@ contains
         enddo
         deallocate(rows, columns, weights)
     end subroutine initialize_points
+
+    logical function same_points(left, right) result(same)
+        type(sparse_lbc_points_t), intent(in) :: left, right
+        same = left%global_count == right%global_count .and. &
+               size(left%i) == size(right%i)
+        if (.not. same) return
+        same = all(left%i == right%i) .and. all(left%j == right%j) .and. &
+               all(left%file_position == right%file_position) .and. &
+               all(abs(left%weight - right%weight) <= 1.0e-7)
+    end function same_points
 
     logical function variable_present(ncid, name)
         integer, intent(in) :: ncid
@@ -255,6 +276,9 @@ contains
         if (dim2 /= nz) then
             write(*,*) trim(name), ": expected ", nz, " levels but found ", dim2
             error stop "Sparse LBC vertical dimension does not match HICAR"
+        endif
+        if (dim1 /= points%global_count) then
+            error stop "Sparse LBC field point dimension does not match its support"
         endif
         allocate(values(size(points%file_position), nz))
         if (size(points%file_position) == 0) return
@@ -334,17 +358,19 @@ contains
         call nc_check(nf90_close(ncid), "closing sparse LBC frame")
     end subroutine read_frame
 
-    subroutine init(this, files, nz, mass_bounds, u_bounds, v_bounds, &
+    subroutine init(this, files, nz, domain_nx, domain_ny, &
+                    mass_bounds, u_bounds, v_bounds, &
                     start_seconds, end_seconds, interval_seconds)
         class(sparse_lbc_reader_t), intent(inout) :: this
         character(len=*), intent(in) :: files(:)
-        integer, intent(in) :: nz
+        integer, intent(in) :: nz, domain_nx, domain_ny
         integer, intent(in) :: mass_bounds(4), u_bounds(4), v_bounds(4)
         real(real64), intent(in) :: start_seconds, end_seconds, interval_seconds
-        integer :: ncid, n, bracket
+        integer :: ncid, n, bracket, frame_nx, frame_ny
         character(len=256) :: valid_time
         real(real64) :: delta
         real :: frame_timescale
+        type(sparse_lbc_points_t) :: frame_mass, frame_u, frame_v
 
         call this%release()
         if (size(files) < 2) error stop "Sparse LBC requires at least two frames"
@@ -355,22 +381,67 @@ contains
             call nc_check(nf90_open(trim(files(n)), nf90_nowrite, ncid), &
                           "opening sparse LBC metadata")
             call validate_contract(ncid, files(n))
+            call nc_check(nf90_get_att(ncid, nf90_global, "domain_nx", frame_nx), &
+                          "reading domain_nx")
+            call nc_check(nf90_get_att(ncid, nf90_global, "domain_ny", frame_ny), &
+                          "reading domain_ny")
+            if (frame_nx /= domain_nx .or. frame_ny /= domain_ny) then
+                error stop "Sparse LBC target dimensions do not match HICAR"
+            endif
             call read_relaxation_timescale(ncid, frame_timescale)
             if (n == 1) then
                 this%relaxation_timescale_seconds = frame_timescale
+                this%static_sha256 = global_attribute(ncid, "static_sha256")
+                this%target_grid_fingerprint = &
+                    global_attribute(ncid, "target_grid_fingerprint")
+                this%relaxation_profile = global_attribute(ncid, "relaxation_profile")
+                this%lateral_w_policy = global_attribute(ncid, "lateral_w_policy")
             else if (abs(frame_timescale - this%relaxation_timescale_seconds) > 1.0e-6) then
                 error stop "Sparse LBC relaxation timescale changed between frames"
+            endif
+            if (n > 1) then
+                if (trim(global_attribute(ncid, "static_sha256")) /= &
+                    trim(this%static_sha256) .or. &
+                    trim(global_attribute(ncid, "target_grid_fingerprint")) /= &
+                    trim(this%target_grid_fingerprint) .or. &
+                    trim(global_attribute(ncid, "relaxation_profile")) /= &
+                    trim(this%relaxation_profile) .or. &
+                    trim(global_attribute(ncid, "lateral_w_policy")) /= &
+                    trim(this%lateral_w_policy)) then
+                    error stop "Sparse LBC product contract changed between frames"
+                endif
             endif
             valid_time = global_attribute(ncid, "valid_time")
             this%valid_seconds(n) = iso_time_seconds(valid_time)
             if (n == 1) then
                 call initialize_points(ncid, "", mass_bounds(1), mass_bounds(2), &
-                                       mass_bounds(3), mass_bounds(4), this%mass)
+                                       mass_bounds(3), mass_bounds(4), &
+                                       domain_nx, domain_ny, this%mass)
                 call initialize_points(ncid, "u_", u_bounds(1), u_bounds(2), &
-                                       u_bounds(3), u_bounds(4), this%u)
+                                       u_bounds(3), u_bounds(4), &
+                                       domain_nx + 1, domain_ny, this%u)
                 call initialize_points(ncid, "v_", v_bounds(1), v_bounds(2), &
-                                       v_bounds(3), v_bounds(4), this%v)
+                                       v_bounds(3), v_bounds(4), &
+                                       domain_nx, domain_ny + 1, this%v)
                 call configure_fields(this, ncid)
+            else
+                call initialize_points(ncid, "", mass_bounds(1), mass_bounds(2), &
+                                       mass_bounds(3), mass_bounds(4), &
+                                       domain_nx, domain_ny, frame_mass)
+                call initialize_points(ncid, "u_", u_bounds(1), u_bounds(2), &
+                                       u_bounds(3), u_bounds(4), &
+                                       domain_nx + 1, domain_ny, frame_u)
+                call initialize_points(ncid, "v_", v_bounds(1), v_bounds(2), &
+                                       v_bounds(3), v_bounds(4), &
+                                       domain_nx, domain_ny + 1, frame_v)
+                if (.not. same_points(this%mass, frame_mass) .or. &
+                    .not. same_points(this%u, frame_u) .or. &
+                    .not. same_points(this%v, frame_v)) then
+                    error stop "Sparse LBC support or weights changed between frames"
+                endif
+                call frame_mass%release()
+                call frame_u%release()
+                call frame_v%release()
             endif
             call nc_check(nf90_close(ncid), "closing sparse LBC metadata")
             if (n > 1) then
@@ -459,6 +530,7 @@ contains
         if (allocated(this%j)) deallocate(this%j)
         if (allocated(this%file_position)) deallocate(this%file_position)
         if (allocated(this%weight)) deallocate(this%weight)
+        this%global_count = 0
     end subroutine release_points
 
     subroutine release_field(this)
@@ -468,7 +540,7 @@ contains
         this%name = ""
     end subroutine release_field
 
-    subroutine release(this)
+    subroutine release_reader(this)
         class(sparse_lbc_reader_t), intent(inout) :: this
         integer :: n
         if (this%active) then
@@ -496,6 +568,10 @@ contains
         this%left_index = 0
         this%right_index = 0
         this%relaxation_timescale_seconds = 3600.0
-    end subroutine release
+        this%static_sha256 = ""
+        this%target_grid_fingerprint = ""
+        this%relaxation_profile = ""
+        this%lateral_w_policy = ""
+    end subroutine release_reader
 
 end module sparse_lbc_reader
