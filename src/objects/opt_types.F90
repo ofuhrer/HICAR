@@ -389,6 +389,7 @@ module options_types
         type(dim_arrays_type) :: dim_list(kMAX_STORAGE_VARS)
 
         character (len=kMAX_FILE_LENGTH), dimension(:), allocatable :: boundary_files
+        character (len=kMAX_FILE_LENGTH), dimension(:), allocatable :: sparse_lbc_files
         type(time_delta_t) :: input_dt  ! store in_dt as a time delta object
         logical :: compute_z            ! flag that we need to compute z from p, this is determined from the vars specified (not read)
 

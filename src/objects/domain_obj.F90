@@ -63,6 +63,8 @@ contains
 
         call init_map_factors(this, options)
 
+        call this%initialize_sparse_lbc(options)
+
         !$acc enter data copyin(this%dx, this%grid, this%its, this%ite, this%kts, this%kte, this%jts, this%jte, &
         !$acc                   this%ims, this%ime, this%kms, this%kme, this%jms, this%jme, &
         !$acc                   this%ihs, this%ihe, this%jhs, this%jhe, &
@@ -427,6 +429,8 @@ contains
         class(domain_t), intent(inout) :: this
 
         integer :: i
+
+        call this%sparse_lbc%release()
 
         ! Clean up halo MPI windows and GPU data (must happen before removing halo from device)
         call this%halo%finalize()
@@ -3603,6 +3607,200 @@ contains
             phase = max(0.0, min(1.0, phase))
         endif
     end function forcing_phase_at
+
+    module subroutine initialize_sparse_lbc(this, options)
+        implicit none
+        class(domain_t), intent(inout) :: this
+        type(options_t), intent(in) :: options
+        integer :: mass_bounds(4), u_bounds(4), v_bounds(4)
+
+        if (.not. allocated(options%forcing%sparse_lbc_files)) return
+        mass_bounds = [this%grid%ims, this%grid%ime, this%grid%jms, this%grid%jme]
+        u_bounds = [this%u_grid%ims, this%u_grid%ime, this%u_grid%jms, this%u_grid%jme]
+        v_bounds = [this%v_grid%ims, this%v_grid%ime, this%v_grid%jms, this%v_grid%jme]
+        call this%sparse_lbc%init(options%forcing%sparse_lbc_files, this%nz, &
+             mass_bounds, u_bounds, v_bounds, &
+             canonical_time_seconds(this%sim_time%seconds()), &
+             canonical_time_seconds(this%end_time%seconds()), &
+             canonical_time_seconds(this%input_dt%seconds()))
+        if (STD_OUT_PE) then
+            write(*,*) "Sparse target-grid LBC runtime enabled"
+            write(*,*) "  local mass points: ", size(this%sparse_lbc%mass%i)
+            write(*,*) "  local U points   : ", size(this%sparse_lbc%u%i)
+            write(*,*) "  local V points   : ", size(this%sparse_lbc%v%i)
+        endif
+    end subroutine initialize_sparse_lbc
+
+    module subroutine synchronize_sparse_lbc(this)
+        implicit none
+        class(domain_t), intent(inout) :: this
+        if (.not. this%sparse_lbc%active) return
+        call this%sparse_lbc%ensure_right_time(this%next_input%seconds())
+    end subroutine synchronize_sparse_lbc
+
+    module subroutine apply_sparse_lbc(this, dt)
+        implicit none
+        class(domain_t), intent(inout) :: this
+        real, intent(in) :: dt
+        integer :: t_index, p_index, n, k, point, variable_id
+        real :: phase, target_p, target_t, target_theta, alpha
+
+        if (.not. this%sparse_lbc%active) return
+        phase = this%forcing_phase_at(dt)
+        t_index = this%sparse_lbc%field_index("T")
+        p_index = this%sparse_lbc%field_index("P")
+        if (t_index == 0 .or. p_index == 0) error stop "Sparse LBC lacks T/P basis"
+
+        associate(points => this%sparse_lbc%mass, &
+                  t_left => this%sparse_lbc%fields(t_index)%left, &
+                  t_right => this%sparse_lbc%fields(t_index)%right, &
+                  p_left => this%sparse_lbc%fields(p_index)%left, &
+                  p_right => this%sparse_lbc%fields(p_index)%right, &
+                  pressure => this%vars_3d(this%var_indx(kVARS%pressure)%v)%data_3d, &
+                  theta => this%vars_3d(this%var_indx(kVARS%potential_temperature)%v)%data_3d)
+        !$acc parallel loop gang vector collapse(2) &
+        !$acc present(points%i, points%j, points%weight, t_left, t_right, &
+        !$acc         p_left, p_right, pressure, theta) &
+        !$acc private(target_p, target_t, target_theta, alpha)
+        do k = this%kms, this%kme
+            do point = 1, size(points%i)
+                target_p = endpoint_value(p_left(point,k-this%kms+1), &
+                                          p_right(point,k-this%kms+1), phase)
+                target_t = endpoint_value(t_left(point,k-this%kms+1), &
+                                          t_right(point,k-this%kms+1), phase)
+                target_theta = target_t / exner_function(target_p)
+                alpha = sparse_relaxation_alpha(points%weight(point), dt, &
+                         this%sparse_lbc%relaxation_timescale_seconds)
+                if (points%weight(point) >= 1.0) then
+                    pressure(points%i(point),k,points%j(point)) = target_p
+                    theta(points%i(point),k,points%j(point)) = target_theta
+                else
+                    pressure(points%i(point),k,points%j(point)) = &
+                        pressure(points%i(point),k,points%j(point)) + alpha * &
+                        (target_p - pressure(points%i(point),k,points%j(point)))
+                    theta(points%i(point),k,points%j(point)) = &
+                        theta(points%i(point),k,points%j(point)) + alpha * &
+                        (target_theta - theta(points%i(point),k,points%j(point)))
+                endif
+            enddo
+        enddo
+        !$acc end parallel
+        end associate
+
+        do n = 1, size(this%sparse_lbc%fields)
+            select case(trim(this%sparse_lbc%fields(n)%name))
+            case("T", "P")
+                cycle
+            case("QV")
+                variable_id = kVARS%water_vapor
+            case("QC")
+                variable_id = kVARS%cloud_water_mass
+            case("QI")
+                variable_id = kVARS%ice_mass
+            case("QR")
+                variable_id = kVARS%rain_mass
+            case("QS")
+                variable_id = kVARS%snow_mass
+            case("QG")
+                variable_id = kVARS%graupel_mass
+            case("U")
+                variable_id = kVARS%u
+            case("V")
+                variable_id = kVARS%v
+            case("W")
+                variable_id = kVARS%w_real
+            case default
+                cycle
+            end select
+            if (this%var_indx(variable_id)%v <= 0) then
+                write(*,*) "Sparse LBC field has no allocated HICAR target: ", &
+                           trim(this%sparse_lbc%fields(n)%name)
+                error stop "Sparse LBC/model variable mismatch"
+            endif
+            select case(this%sparse_lbc%fields(n)%grid_kind)
+            case(2)
+                call relax_sparse_field(&
+                    this%vars_3d(this%var_indx(variable_id)%v)%data_3d, &
+                    this%u_grid%ims, this%u_grid%kms, this%u_grid%jms, &
+                    this%sparse_lbc%fields(n)%left, this%sparse_lbc%fields(n)%right, &
+                    this%sparse_lbc%u%i, this%sparse_lbc%u%j, &
+                    this%sparse_lbc%u%weight, phase, dt, &
+                    this%sparse_lbc%relaxation_timescale_seconds, .False.)
+            case(3)
+                call relax_sparse_field(&
+                    this%vars_3d(this%var_indx(variable_id)%v)%data_3d, &
+                    this%v_grid%ims, this%v_grid%kms, this%v_grid%jms, &
+                    this%sparse_lbc%fields(n)%left, this%sparse_lbc%fields(n)%right, &
+                    this%sparse_lbc%v%i, this%sparse_lbc%v%j, &
+                    this%sparse_lbc%v%weight, phase, dt, &
+                    this%sparse_lbc%relaxation_timescale_seconds, .False.)
+            case default
+                call relax_sparse_field(&
+                    this%vars_3d(this%var_indx(variable_id)%v)%data_3d, &
+                    this%grid%ims, this%grid%kms, this%grid%jms, &
+                    this%sparse_lbc%fields(n)%left, this%sparse_lbc%fields(n)%right, &
+                    this%sparse_lbc%mass%i, this%sparse_lbc%mass%j, &
+                    this%sparse_lbc%mass%weight, phase, dt, &
+                    this%sparse_lbc%relaxation_timescale_seconds, &
+                    trim(this%sparse_lbc%fields(n)%name) /= "W")
+            end select
+        enddo
+    end subroutine apply_sparse_lbc
+
+    elemental real function endpoint_value(left, right, phase) result(value)
+        !$acc routine seq
+        real, intent(in) :: left, right, phase
+        if (phase <= 0.0) then
+            value = left
+        else if (phase >= 1.0) then
+            value = right
+        else
+            value = left + (right - left) * phase
+        endif
+    end function endpoint_value
+
+    elemental real function sparse_relaxation_alpha(weight, dt, timescale) result(alpha)
+        !$acc routine seq
+        real, intent(in) :: weight, dt, timescale
+        if (weight >= 1.0) then
+            alpha = 1.0
+        else
+            alpha = 1.0 - exp(-max(weight, 0.0) * max(dt, 0.0) / timescale)
+        endif
+    end function sparse_relaxation_alpha
+
+    subroutine relax_sparse_field(values, ims, kms, jms, left, right, &
+                                  point_i, point_j, weight, phase, dt, timescale, &
+                                  nonnegative)
+        integer, intent(in) :: ims, kms, jms
+        real, intent(inout) :: values(ims:,kms:,jms:)
+        real, intent(in) :: left(:,:), right(:,:), weight(:), phase, dt, timescale
+        integer, intent(in) :: point_i(:), point_j(:)
+        logical, intent(in) :: nonnegative
+        integer :: k, point
+        real :: target, alpha
+
+        !$acc parallel loop gang vector collapse(2) &
+        !$acc present(values, left, right, point_i, point_j, weight) &
+        !$acc private(target, alpha)
+        do k = lbound(values,2), ubound(values,2)
+            do point = 1, size(point_i)
+                target = endpoint_value(left(point,k-kms+1), right(point,k-kms+1), phase)
+                if (nonnegative) target = max(target, 0.0)
+                alpha = sparse_relaxation_alpha(weight(point), dt, timescale)
+                if (weight(point) >= 1.0) then
+                    values(point_i(point),k,point_j(point)) = target
+                else
+                    values(point_i(point),k,point_j(point)) = &
+                        values(point_i(point),k,point_j(point)) + alpha * &
+                        (target - values(point_i(point),k,point_j(point)))
+                    if (nonnegative) values(point_i(point),k,point_j(point)) = &
+                        max(values(point_i(point),k,point_j(point)), 0.0)
+                endif
+            enddo
+        enddo
+        !$acc end parallel
+    end subroutine relax_sparse_field
 
     !> Update domain-variable dQ/dt fields used by existing consumers.
     !!

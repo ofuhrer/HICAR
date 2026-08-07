@@ -9,6 +9,7 @@ module domain_interface
   use halo_interface,           only : halo_t
   use timer_interface,          only : timer_t
   use flow_object_interface,    only : flow_obj_t
+  use sparse_lbc_reader,        only : sparse_lbc_reader_t
   use icar_constants,               only : kMAX_STORAGE_VARS, kVARS, kMAX_NAME_LENGTH, MAXLEVELS
   implicit none
 
@@ -61,6 +62,7 @@ module domain_interface
     ! advances, when the previous right endpoint must be promoted to the
     ! next interval's left endpoint.
     logical :: forcing_interval_ready = .False.
+    type(sparse_lbc_reader_t) :: sparse_lbc
 
     ! Compact, restart-persistent definition of the static theta_bar(z)
     ! reference used by split-potential-temperature advection.  The expanded
@@ -135,6 +137,9 @@ module domain_interface
     procedure :: interpolate_forcing
     procedure :: update_delta_fields
     procedure :: apply_forcing
+    procedure :: initialize_sparse_lbc
+    procedure :: synchronize_sparse_lbc
+    procedure :: apply_sparse_lbc
     procedure :: forcing_phase_at
     procedure :: read_land_variables
 
@@ -241,6 +246,23 @@ module domain_interface
         type(options_t), intent(in)       :: options
         real, intent(in)                  :: dt
     end subroutine
+
+    module subroutine initialize_sparse_lbc(this, options)
+        implicit none
+        class(domain_t), intent(inout) :: this
+        type(options_t), intent(in) :: options
+    end subroutine initialize_sparse_lbc
+
+    module subroutine synchronize_sparse_lbc(this)
+        implicit none
+        class(domain_t), intent(inout) :: this
+    end subroutine synchronize_sparse_lbc
+
+    module subroutine apply_sparse_lbc(this, dt)
+        implicit none
+        class(domain_t), intent(inout) :: this
+        real, intent(in) :: dt
+    end subroutine apply_sparse_lbc
 
     module function forcing_phase_at(this, offset_seconds) result(phase)
         implicit none

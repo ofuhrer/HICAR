@@ -425,6 +425,7 @@ contains
             ! ! apply/update boundary conditions including internal wind and pressure changes.
             call domain%forcing_timer%start()
             call domain%apply_forcing(options,real(dt%seconds()))
+            call domain%apply_sparse_lbc(real(dt%seconds()))
             call domain%forcing_timer%stop()
 
             call domain%diagnostic_timer%start()

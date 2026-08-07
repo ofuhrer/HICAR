@@ -304,6 +304,7 @@ subroutine component_read(component, options, boundary, ioclient)
             ! after reading all variables that can be read, now compute any remaining variables (e.g. z from p+ps)
             call boundary%update_computed_vars(options)
             call component%interpolate_forcing(boundary, update=.True.)
+            call component%synchronize_sparse_lbc()
 
             ! Make the boundary condition dXdt values into units of [X]/s
             call component%update_delta_fields()

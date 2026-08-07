@@ -735,7 +735,7 @@ contains
                    qv_is_relative_humidity, relax_filters, wait_for_ready_file
         real, dimension(kMAX_NESTS)    :: t_offset, p_multiplier, inputinterval
         integer, dimension(kMAX_NESTS) :: ready_file_timeout
-        character(len=kMAX_FILE_LENGTH) :: forcing_file_list
+        character(len=kMAX_FILE_LENGTH) :: forcing_file_list, sparse_lbc_file_list
         character(len=kMAX_FILE_LENGTH), allocatable :: boundary_files(:)
 
         character(len=kMAX_NAME_LENGTH) :: latvar,lonvar,uvar,ulat,ulon,vvar,vlat,vlon,wvar,zvar,  &
@@ -745,7 +745,7 @@ contains
                                         qs_fmvar, ns_fmvar, &
                                         psvar, pslvar, swdown_var, lwdown_var, sst_var, time_var
 
-        namelist /forcing/ forcing_file_list, inputinterval, t_offset, p_multiplier, limit_rh, z_is_geopotential, time_varying_z, &
+        namelist /forcing/ forcing_file_list, sparse_lbc_file_list, inputinterval, t_offset, p_multiplier, limit_rh, z_is_geopotential, time_varying_z, &
                             t_is_potential, qv_is_relative_humidity, qv_is_spec_humidity, relax_filters, &
                             wait_for_ready_file, ready_file_timeout, &
                             pvar,pbvar,phbvar,tvar,qvvar,qcvar,qivar,qrvar,qgvar,qsvar,qncvar,qnivar,qnrvar,qngvar,qnsvar,&
@@ -769,6 +769,7 @@ contains
         allocate(boundary_files(MAX_NUMBER_FILES))
 
         call set_nml_var_default(forcing_file_list, 'forcing_file_list', print_info, gennml)
+        sparse_lbc_file_list = ""
         call set_nml_var_default(t_offset, 't_offset', print_info, gennml)
         call set_nml_var_default(p_multiplier, 'p_multiplier', print_info, gennml)
         call set_nml_var_default(inputinterval, 'inputinterval', print_info, gennml)
@@ -906,6 +907,19 @@ contains
         allocate(options%forcing%boundary_files(nfiles))
         options%forcing%boundary_files(1:nfiles) = boundary_files(1:nfiles)
         deallocate(boundary_files)
+
+        if (len_trim(sparse_lbc_file_list) > 0) then
+            allocate(boundary_files(MAX_NUMBER_FILES))
+            call check_file_exists(sparse_lbc_file_list, &
+                                   message="Sparse LBC file list does not exist.")
+            nfiles = read_forcing_file_names(sparse_lbc_file_list, boundary_files, &
+                                             options%forcing%wait_for_ready_file, &
+                                             options%forcing%ready_file_timeout)
+            if (nfiles < 2) error stop "Sparse LBC forcing requires at least two files"
+            allocate(options%forcing%sparse_lbc_files(nfiles))
+            options%forcing%sparse_lbc_files = boundary_files(1:nfiles)
+            deallocate(boundary_files)
+        endif
 
         call wait_for_file_ready(options%forcing%boundary_files(1), options%forcing%ready_file_timeout, &
                                  options%forcing%wait_for_ready_file)
@@ -3319,6 +3333,12 @@ contains
         call append_kv_real   (config_str, pos, 'forcing', 'p_multiplier',             this%forcing%p_multiplier)
         call append_kv_logical(config_str, pos, 'forcing', 'limit_rh',                 this%forcing%limit_rh)
         call append_kv_real   (config_str, pos, 'forcing', 'inputinterval',            this%forcing%inputinterval)
+        if (allocated(this%forcing%sparse_lbc_files)) then
+            call append_kv_str(config_str, pos, 'forcing', 'sparse_lbc_first', &
+                               trim(this%forcing%sparse_lbc_files(1)))
+            call append_kv_int(config_str, pos, 'forcing', 'sparse_lbc_count', &
+                               size(this%forcing%sparse_lbc_files))
+        endif
 
         ! --- general group (behavior-affecting fields only) ---
         call append_kv_str    (config_str, pos, 'general', 'calendar',         trim(this%general%calendar))
