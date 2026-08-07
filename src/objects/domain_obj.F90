@@ -3651,16 +3651,21 @@ contains
         implicit none
         class(domain_t), intent(inout) :: this
         real, intent(in) :: dt
-        integer :: t_index, p_index, n, k, point, variable_id
-        real :: phase, target_p, target_t, target_theta, alpha
+        integer :: t_index, p_index, n, k, point, variable_id, kms, kme
+        real :: phase, target_p, target_t, target_theta, alpha, lbc_timescale
 
         if (.not. this%sparse_lbc%active) return
         phase = this%forcing_phase_at(dt)
+        kms = this%kms
+        kme = this%kme
+        lbc_timescale = this%sparse_lbc%relaxation_timescale_seconds
         t_index = this%sparse_lbc%field_index("T")
         p_index = this%sparse_lbc%field_index("P")
         if (t_index == 0 .or. p_index == 0) error stop "Sparse LBC lacks T/P basis"
 
-        associate(points => this%sparse_lbc%mass, &
+        associate(point_i => this%sparse_lbc%mass%i, &
+                  point_j => this%sparse_lbc%mass%j, &
+                  point_weight => this%sparse_lbc%mass%weight, &
                   t_left => this%sparse_lbc%fields(t_index)%left, &
                   t_right => this%sparse_lbc%fields(t_index)%right, &
                   p_left => this%sparse_lbc%fields(p_index)%left, &
@@ -3668,28 +3673,28 @@ contains
                   pressure => this%vars_3d(this%var_indx(kVARS%pressure)%v)%data_3d, &
                   theta => this%vars_3d(this%var_indx(kVARS%potential_temperature)%v)%data_3d)
         !$acc parallel loop gang vector collapse(2) &
-        !$acc present(points%i, points%j, points%weight, t_left, t_right, &
+        !$acc present(point_i, point_j, point_weight, t_left, t_right, &
         !$acc         p_left, p_right, pressure, theta) &
         !$acc private(target_p, target_t, target_theta, alpha)
-        do k = this%kms, this%kme
-            do point = 1, size(points%i)
-                target_p = endpoint_value(p_left(point,k-this%kms+1), &
-                                          p_right(point,k-this%kms+1), phase)
-                target_t = endpoint_value(t_left(point,k-this%kms+1), &
-                                          t_right(point,k-this%kms+1), phase)
+        do k = kms, kme
+            do point = 1, size(point_i)
+                target_p = endpoint_value(p_left(point,k-kms+1), &
+                                          p_right(point,k-kms+1), phase)
+                target_t = endpoint_value(t_left(point,k-kms+1), &
+                                          t_right(point,k-kms+1), phase)
                 target_theta = target_t / exner_function(target_p)
-                alpha = sparse_relaxation_alpha(points%weight(point), dt, &
-                         this%sparse_lbc%relaxation_timescale_seconds)
-                if (points%weight(point) >= 1.0) then
-                    pressure(points%i(point),k,points%j(point)) = target_p
-                    theta(points%i(point),k,points%j(point)) = target_theta
+                alpha = sparse_relaxation_alpha(point_weight(point), dt, &
+                         lbc_timescale)
+                if (point_weight(point) >= 1.0) then
+                    pressure(point_i(point),k,point_j(point)) = target_p
+                    theta(point_i(point),k,point_j(point)) = target_theta
                 else
-                    pressure(points%i(point),k,points%j(point)) = &
-                        pressure(points%i(point),k,points%j(point)) + alpha * &
-                        (target_p - pressure(points%i(point),k,points%j(point)))
-                    theta(points%i(point),k,points%j(point)) = &
-                        theta(points%i(point),k,points%j(point)) + alpha * &
-                        (target_theta - theta(points%i(point),k,points%j(point)))
+                    pressure(point_i(point),k,point_j(point)) = &
+                        pressure(point_i(point),k,point_j(point)) + alpha * &
+                        (target_p - pressure(point_i(point),k,point_j(point)))
+                    theta(point_i(point),k,point_j(point)) = &
+                        theta(point_i(point),k,point_j(point)) + alpha * &
+                        (target_theta - theta(point_i(point),k,point_j(point)))
                 endif
             enddo
         enddo
