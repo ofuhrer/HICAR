@@ -2389,10 +2389,14 @@ contains
         integer :: cldovrlp(kMAX_NESTS)                          ! how RRTMG considers cloud overlapping
         logical :: read_ghg(kMAX_NESTS)                            ! read GHG concentrations from file
         logical :: terrain_shading(kMAX_NESTS)                     ! whether to use terrain shading
+        logical :: terrain_direct_sw(kMAX_NESTS), terrain_diffuse_sw(kMAX_NESTS)
+        logical :: terrain_reflected_sw(kMAX_NESTS), terrain_longwave(kMAX_NESTS)
         real    :: tzone(kMAX_NESTS) !! MJ adedd,tzone is UTC Offset and 1 here for centeral Erupe
         real    :: terrain_refl_radius(kMAX_NESTS)                  ! Radius for terrain reflected SW neighborhood (m)
         ! define the namelist
-        namelist /rad_parameters/ terrain_shading, update_interval_rad, icloud, read_ghg, cldovrlp, tzone, terrain_refl_radius, rrtmgp_block_N
+        namelist /rad_parameters/ terrain_shading, terrain_direct_sw, terrain_diffuse_sw, &
+            terrain_reflected_sw, terrain_longwave, update_interval_rad, icloud, read_ghg, &
+            cldovrlp, tzone, terrain_refl_radius, rrtmgp_block_N
         CHARACTER(LEN=200) :: error_msg
 
         print_info = .False.
@@ -2402,6 +2406,10 @@ contains
         if (present(gen_nml)) gennml = gen_nml
 
         call set_nml_var_default(terrain_shading, 'terrain_shading', print_info, gennml)
+        call set_nml_var_default(terrain_direct_sw, 'terrain_direct_sw', print_info, gennml)
+        call set_nml_var_default(terrain_diffuse_sw, 'terrain_diffuse_sw', print_info, gennml)
+        call set_nml_var_default(terrain_reflected_sw, 'terrain_reflected_sw', print_info, gennml)
+        call set_nml_var_default(terrain_longwave, 'terrain_longwave', print_info, gennml)
         call set_nml_var_default(update_interval_rad, 'update_interval_rad', print_info, gennml)
         call set_nml_var_default(icloud, 'icloud', print_info, gennml)
         call set_nml_var_default(cldovrlp, 'cldovrlp', print_info, gennml)
@@ -2429,6 +2437,10 @@ contains
             ! Copy the first value of logical variables -- this way we can have a user_default value if the value for this nest was not explicitly set
             read_ghg(n_indx) = read_ghg(1)
             terrain_shading(n_indx) = terrain_shading(1)
+            terrain_direct_sw(n_indx) = terrain_direct_sw(1)
+            terrain_diffuse_sw(n_indx) = terrain_diffuse_sw(1)
+            terrain_reflected_sw(n_indx) = terrain_reflected_sw(1)
+            terrain_longwave(n_indx) = terrain_longwave(1)
             ! Now read namelist again, -- if the value of the logical option is set in the namelist, it will be set to the user set value again
             open(io_newunit(name_unit), file=filename)
             read(name_unit, iostat=rc, nml=rad_parameters)
@@ -2441,6 +2453,10 @@ contains
         endif
 
         call set_nml_var(rad_options%terrain_shading, terrain_shading(n_indx), 'terrain_shading', terrain_shading(1))
+        call set_nml_var(rad_options%terrain_direct_sw, terrain_direct_sw(n_indx), 'terrain_direct_sw', terrain_direct_sw(1))
+        call set_nml_var(rad_options%terrain_diffuse_sw, terrain_diffuse_sw(n_indx), 'terrain_diffuse_sw', terrain_diffuse_sw(1))
+        call set_nml_var(rad_options%terrain_reflected_sw, terrain_reflected_sw(n_indx), 'terrain_reflected_sw', terrain_reflected_sw(1))
+        call set_nml_var(rad_options%terrain_longwave, terrain_longwave(n_indx), 'terrain_longwave', terrain_longwave(1))
         call set_nml_var(rad_options%update_interval_rad, update_interval_rad(n_indx), 'update_interval_rad', update_interval_rad(1))
         call set_nml_var(rad_options%icloud, icloud(n_indx), 'icloud', icloud(1))
         call set_nml_var(rad_options%cldovrlp, cldovrlp(n_indx), 'cldovrlp', cldovrlp(1))
@@ -3261,6 +3277,10 @@ contains
 
         ! --- rad group ---
         call append_kv_logical(config_str, pos, 'rad', 'terrain_shading',      this%rad%terrain_shading)
+        call append_kv_logical(config_str, pos, 'rad', 'terrain_direct_sw',    this%rad%terrain_direct_sw)
+        call append_kv_logical(config_str, pos, 'rad', 'terrain_diffuse_sw',   this%rad%terrain_diffuse_sw)
+        call append_kv_logical(config_str, pos, 'rad', 'terrain_reflected_sw', this%rad%terrain_reflected_sw)
+        call append_kv_logical(config_str, pos, 'rad', 'terrain_longwave',     this%rad%terrain_longwave)
         call append_kv_real   (config_str, pos, 'rad', 'update_interval_rad',  this%rad%update_interval_rad)
         call append_kv_int    (config_str, pos, 'rad', 'icloud',               this%rad%icloud)
         call append_kv_int    (config_str, pos, 'rad', 'cldovrlp',             this%rad%cldovrlp)

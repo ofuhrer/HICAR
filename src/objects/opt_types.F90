@@ -267,6 +267,10 @@ module options_types
     ! ------------------------------------------------
     type rad_options_type
        logical :: terrain_shading                      ! whether to use terrain shading
+       logical :: terrain_direct_sw                    ! horizon and slope/aspect correction of direct SW
+       logical :: terrain_diffuse_sw                   ! sky-view-factor correction of diffuse SW
+       logical :: terrain_reflected_sw                 ! terrain-reflected shortwave contribution
+       logical :: terrain_longwave                     ! sky/terrain-view correction of downward LW
        real    :: update_interval_rad                  ! how ofen to update the radiation in seconds.
                                                        ! RRTMG scheme is expensive. Default is 1800s (30 minutes)
        integer :: icloud                               ! How RRTMG interact with clouds

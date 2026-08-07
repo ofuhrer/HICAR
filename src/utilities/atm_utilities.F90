@@ -35,6 +35,51 @@ contains
         indx = max(min(indx, n_azimuths), 1)
     end function horizon_azimuth_index
 
+    !> Project horizontal-plane direct shortwave onto a visible slope.
+    !! horizontal_direct is the direct-beam flux on a horizontal surface.
+    pure function terrain_direct_shortwave(horizontal_direct, sin_elevation, &
+                                            cos_incidence, solar_constant, visible) result(flux)
+        !$acc routine seq
+        real, intent(in) :: horizontal_direct, sin_elevation, cos_incidence, solar_constant
+        logical, intent(in) :: visible
+        real :: flux
+        real :: mu0, direct_normal
+
+        if (.not. visible .or. sin_elevation <= 0.0 .or. cos_incidence <= 0.0) then
+            flux = 0.0
+            return
+        endif
+        mu0 = max(sin_elevation, 1.0e-4)
+        ! RRTMG(P) already supplies an atmospheric direct-beam flux. An
+        ! additional empirical clear-sky attenuation here clipped valid input
+        ! even for a flat surface, so terrain shading was not identity-neutral.
+        direct_normal = min(max(horizontal_direct, 0.0) / mu0, max(solar_constant, 0.0))
+        flux = max(direct_normal * cos_incidence, 0.0)
+    end function terrain_direct_shortwave
+
+    !> Isotropic-sky diffuse shortwave restricted by the sky-view factor.
+    pure function terrain_diffuse_shortwave(horizontal_diffuse, svf) result(flux)
+        !$acc routine seq
+        real, intent(in) :: horizontal_diffuse, svf
+        real :: flux
+
+        flux = max(horizontal_diffuse, 0.0) * max(min(svf, 1.0), 0.0)
+    end function terrain_diffuse_shortwave
+
+    !> Terrain-reflected shortwave from an incident reflected-flux estimate.
+    pure function terrain_reflected_shortwave(terrain_view_factor, reflected_incident, &
+                                               local_albedo) result(flux)
+        !$acc routine seq
+        real, intent(in) :: terrain_view_factor, reflected_incident, local_albedo
+        real :: flux
+        real :: view_factor, albedo, correction
+
+        view_factor = max(min(terrain_view_factor, 1.0), 0.0)
+        albedo = max(min(local_albedo, 1.0), 0.0)
+        correction = 1.0 / max(1.0 - albedo * view_factor, 0.05)
+        flux = view_factor * max(reflected_incident, 0.0) * correction
+    end function terrain_reflected_shortwave
+
     !>----------------------------------------------------------
     !! Compute column integrated vapor transport (non-directional)
     !!

@@ -3094,7 +3094,9 @@ contains
         endif
         
         !Considering terrain reflected shortwave radius...
-        if (options%rad%terrain_shading .and. options%rad%terrain_refl_radius > 0) then
+        if (options%rad%terrain_shading .and. &
+            (options%rad%terrain_reflected_sw .or. options%rad%terrain_longwave) .and. &
+            options%rad%terrain_refl_radius > 0) then
             this%neighborhood_max = max(this%neighborhood_max, &
                 nint(options%rad%terrain_refl_radius / this%dx))
         endif

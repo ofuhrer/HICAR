@@ -20,7 +20,9 @@ module test_utilities
     use grid_interface,          only : grid_t
     use fftshifter,              only : fftshift, ifftshift
     use io_routines,             only : io_read, io_write
-    use mod_atm_utilities,       only : cal_cldfra3, cal_cldfra3_level, horizon_azimuth_index
+    use mod_atm_utilities,       only : cal_cldfra3, cal_cldfra3_level, horizon_azimuth_index, &
+                                         terrain_direct_shortwave, terrain_diffuse_shortwave, &
+                                         terrain_reflected_shortwave
     use domain_interface,        only : auto_dz
     use options_interface,       only : options_t
     use testdrive,               only : new_unittest, unittest_type, error_type, check
@@ -43,6 +45,7 @@ contains
             new_unittest("variable_dict",    test_variable_dict), &
             new_unittest("io_read_extra_dimension", test_io_read_extra_dimension), &
             new_unittest("horizon_azimuth_index", test_horizon_azimuth_index), &
+            new_unittest("terrain_shortwave_components", test_terrain_shortwave_components), &
             new_unittest("manual_vertical_grid", test_manual_vertical_grid), &
             new_unittest("fftshift_1d",      test_fftshift_1d), &
             new_unittest("fftshift_2d",      test_fftshift_2d), &
@@ -203,6 +206,49 @@ contains
                           horizon_azimuth_index(-1.0*deg, 90) == 1, &
                    "out-of-range azimuths clamp to the horizon axis")
     end subroutine test_horizon_azimuth_index
+
+
+    subroutine test_terrain_shortwave_components(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        real, parameter :: tol = 1.0e-5
+        real :: horizontal_direct, sin_elevation
+
+        horizontal_direct = 400.0
+        sin_elevation = 0.5
+
+        call check(error, abs(terrain_direct_shortwave(horizontal_direct, sin_elevation, &
+                   sin_elevation, 1361.0, .true.) - horizontal_direct) < tol, &
+                   "flat visible terrain preserves horizontal direct shortwave")
+        horizontal_direct = 1000.0
+        sin_elevation = 0.8
+        call check(error, abs(terrain_direct_shortwave(horizontal_direct, sin_elevation, &
+                   sin_elevation, 1361.0, .true.) - horizontal_direct) < tol, &
+                   "flat terrain preserves high valid RRTMGP direct shortwave")
+        if (allocated(error)) return
+        call check(error, terrain_direct_shortwave(horizontal_direct, sin_elevation, &
+                   0.8, 1361.0, .false.) == 0.0, &
+                   "horizon obstruction removes direct shortwave")
+        if (allocated(error)) return
+        call check(error, terrain_direct_shortwave(horizontal_direct, sin_elevation, &
+                   -0.2, 1361.0, .true.) == 0.0, &
+                   "back-facing slopes receive no direct shortwave")
+        if (allocated(error)) return
+
+        call check(error, abs(terrain_diffuse_shortwave(200.0, 0.75) - 150.0) < tol, &
+                   "diffuse shortwave scales only with sky-view factor")
+        if (allocated(error)) return
+        call check(error, abs(terrain_diffuse_shortwave(200.0, 1.0) - 200.0) < tol, &
+                   "open sky preserves diffuse shortwave")
+        if (allocated(error)) return
+
+        call check(error, terrain_reflected_shortwave(0.0, 100.0, 0.2) == 0.0, &
+                   "open sky has no terrain-reflected shortwave")
+        if (allocated(error)) return
+        call check(error, abs(terrain_reflected_shortwave(0.5, 100.0, 0.2) - &
+                   (50.0 / 0.9)) < tol, &
+                   "terrain-reflected shortwave preserves irradiance units and correction")
+    end subroutine test_terrain_shortwave_components
 
 
     subroutine test_manual_vertical_grid(error)

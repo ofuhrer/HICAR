@@ -3810,6 +3810,24 @@ contains
                               "with 'hlm' and 'svf' variables in the input files."
                 default = ".False."
                 group = "RAD_Parameters"
+            case ("terrain_direct_sw")
+                description = "Apply horizon shadowing and slope/aspect projection to direct shortwave"//achar(10)//BLNK_CHR_N// &
+                              "when terrain_shading=.True."
+                default = ".True."
+                group = "RAD_Parameters"
+            case ("terrain_diffuse_sw")
+                description = "Reduce diffuse shortwave by sky-view factor when terrain_shading=.True."
+                default = ".True."
+                group = "RAD_Parameters"
+            case ("terrain_reflected_sw")
+                description = "Add terrain-reflected shortwave when terrain_shading=.True."
+                default = ".True."
+                group = "RAD_Parameters"
+            case ("terrain_longwave")
+                description = "Partition downward longwave between sky and surrounding terrain using SVF"//achar(10)//BLNK_CHR_N// &
+                              "when terrain_shading=.True."
+                default = ".True."
+                group = "RAD_Parameters"
             case ("update_interval_rad")
                 description = "Time interval for updating the radiation. If = 0, update every time step."
                 min = 0
@@ -3841,8 +3859,8 @@ contains
                 default = "0"
                 group = "RAD_Parameters"
             case ("terrain_refl_radius")
-                description = "Radius for terrain reflected shortwave neighborhood averaging."//achar(10)//BLNK_CHR_N// &
-                              "Only used when terrain_shading=.True. Set to 0 to disable terrain reflected SW."
+                description = "Radius for terrain-reflected SW and terrain-emitted LW neighborhood averaging."//achar(10)//BLNK_CHR_N// &
+                              "Only used for enabled terrain components; 0 selects the local-cell approximation."
                 min = 0
                 max = 10000
                 units = "meters"

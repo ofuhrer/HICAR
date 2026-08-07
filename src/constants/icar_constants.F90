@@ -451,6 +451,12 @@ module icar_constants
         ! scalar-as-field prevents a process restart from forcing an extra
         ! wind solve at a time where the uninterrupted run would not.
         integer :: wind_update_elapsed
+        ! Unmodified horizontal-plane shortwave components used by terrain
+        ! radiation.  These must survive process restarts because the
+        ! expensive radiation scheme is not necessarily called at segment
+        ! entry.
+        integer :: shortwave_direct_horizontal
+        integer :: shortwave_diffuse_horizontal
 
         integer :: last_var
     end type var_constants_type

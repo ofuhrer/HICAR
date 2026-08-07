@@ -2252,6 +2252,20 @@ contains
                                 attribute_t("units",         "s"),                            &
                                 attribute_t("coordinates",   "lat lon")]
 
+        else if (var_idx==kVARS%shortwave_direct_horizontal) then
+            var_meta%name        = "shortwave_direct_horizontal"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("long_name", "unmodified direct shortwave on a horizontal plane"), &
+                                attribute_t("units",         "W m-2"),                                          &
+                                attribute_t("coordinates",   "lat lon")]
+
+        else if (var_idx==kVARS%shortwave_diffuse_horizontal) then
+            var_meta%name        = "shortwave_diffuse_horizontal"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("long_name", "unmodified diffuse shortwave on a horizontal plane"), &
+                                attribute_t("units",         "W m-2"),                                           &
+                                attribute_t("coordinates",   "lat lon")]
+
         !>------------------------------------------------------------
         !!  Time from the post-step checkpoint to the next scheduled
         !!  LSM update. Spatially constant and restart-only.

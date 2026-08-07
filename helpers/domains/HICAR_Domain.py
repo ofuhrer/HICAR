@@ -21,11 +21,14 @@ import ProjHelpers as ph
 # GLOBAL definitions
 WGS64_crs = pyproj.CRS('EPSG:4326')
 
-def wholeShebang(ds_in,ds_in_rad=0,res=50,terr_filter=10,TPI_thresh=100,valley_thresh=1500,LL_border=0.05,LU_Category='USGS',topo_var='topo',lat_var='lat',lon_var='lon'):
+def wholeShebang(ds_in,ds_in_rad=0,res=50,terr_filter=10,TPI_thresh=100,valley_thresh=1500,LL_border=0.05,LU_Category='USGS',topo_var='topo',lat_var='lat',lon_var='lon',horizon_search_km=20.0,horizon_azimuths=90,source_dem_sha256="",vertical_datum=""):
     
     if (lat_var in ds_in_rad):
         print('Adding Radiation Shading variable...')
-        ds_in = addHorayzonParms(ds_in,ds_in_rad,topo_var=topo_var,lat_var=lat_var,lon_var=lon_var)
+        ds_in = addHorayzonParms(
+            ds_in, ds_in_rad, topo_var=topo_var, lat_var=lat_var, lon_var=lon_var,
+            dist_search=horizon_search_km, azim_num=horizon_azimuths,
+            source_dem_sha256=source_dem_sha256, vertical_datum=vertical_datum)
     #ds_in = addRidgeValleyDists(ds_in,ds_in_rad,res=res,terr_filter=terr_filter,TPI_thresh=TPI_thresh,\
     #                            valley_thresh=valley_thresh,LL_border=LL_border)
 
@@ -42,7 +45,8 @@ def wholeShebang(ds_in,ds_in_rad=0,res=50,terr_filter=10,TPI_thresh=100,valley_t
     
     return ds_in
 
-def addHorayzonParms(ds_in,ds_in_rad,topo_var='topo',lat_var='lat',lon_var='lon'):
+def addHorayzonParms(ds_in,ds_in_rad,topo_var='topo',lat_var='lat',lon_var='lon',
+                     dist_search=20.0,azim_num=90,source_dem_sha256="",vertical_datum=""):
     # Description: Compute gridded topographic parameters (slope angle and aspect,
     #              horizon and sky view factor) for an input DEM Ignore Earth's surface
     #              curvature.
@@ -57,8 +61,10 @@ def addHorayzonParms(ds_in,ds_in_rad,topo_var='topo',lat_var='lat',lon_var='lon'
     # -----------------------------------------------------------------------------
 
     # Domain size and computation settings
-    dist_search = 20.0  # search distance for horizon [kilometre]
-    azim_num = 90  # number of azimuth sampling directions [-]
+    if azim_num != 90:
+        raise ValueError("HICAR terrain radiation currently requires exactly 90 azimuth sectors")
+    if dist_search <= 0.0:
+        raise ValueError("horizon search distance must be positive")
     ellps = "WGS84"  # Earth's surface approximation (sphere, GRS80 or WGS84)
 
     domain = {"lon_min": np.amin(ds_in[lon_var].values), "lon_max": np.amax(ds_in[lon_var].values),
@@ -166,8 +172,21 @@ def addHorayzonParms(ds_in,ds_in_rad,topo_var='topo',lat_var='lat',lon_var='lon'
                         ds_in_xdim='x',ds_in_ydim='y',to_ds_xvar=lon_var,to_ds_yvar=lat_var,\
                         to_ds_xdim='x',to_ds_ydim='y',method='bilinear')
     
-    ds_in["hlm"]=(("a", "y", "x"), hlm_ds.hlm.values)
+    ds_in["hlm"]=(("azimuth", "y", "x"), hlm_ds.hlm.values)
     ds_in["svf"]=(("y", "x"), hlm_ds.svf.values)
+    ds_in["azimuth"]=(("azimuth",), np.maximum(0.0, np.rad2deg(azim)))
+    ds_in["hlm"].attrs.update(
+        units="degrees",
+        long_name="zenith angle to topographic horizon; flat unobstructed horizon is 90 degrees")
+    ds_in["svf"].attrs.update(units="1", long_name="sky view factor")
+    ds_in["azimuth"].attrs.update(units="degrees_clockwise_from_north")
+    ds_in.attrs.update(
+        generator="HICAR.helpers.domains.HICAR_Domain.addHorayzonParms",
+        generator_version="audited-v1",
+        source_dem_sha256=source_dem_sha256,
+        vertical_datum=vertical_datum,
+        horizon_convention="hlm_zenith_angle_degrees_flat_90",
+        search_distance_km=float(dist_search))
     
     return ds_in
 
@@ -505,4 +524,3 @@ def extract_rad_window(ds, large_dom, large_dom_res=50, window_km=15,lat_var='la
 #     warnings.filterwarnings("ignore")
     
 #     return ds_in
-

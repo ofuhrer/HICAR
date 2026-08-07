@@ -32,7 +32,9 @@ module radiation
     use time_object,        only : Time_type, canonical_time_seconds
     use icar_constants, only : kVARS, kRA_BASIC, kRA_SIMPLE, kRA_RRTMG, kRA_RRTMGP, STD_OUT_PE, kMP_THOMP_AER, kMAX_NESTS
     use mod_wrf_constants, only : cp, R_d, gravity, DEGRAD, DPD, piconst, STBOLT
-    use mod_atm_utilities, only : cal_cldfra3_level, calc_solar_elevation, calc_solar_date, horizon_azimuth_index
+    use mod_atm_utilities, only : cal_cldfra3_level, calc_solar_elevation, calc_solar_date, &
+                                  horizon_azimuth_index, terrain_direct_shortwave, &
+                                  terrain_diffuse_shortwave, terrain_reflected_shortwave
     use mpi
     use mpi_utils_module, only: allreduce_integer_min_in_place
 #ifdef USE_NCCL
@@ -127,7 +129,7 @@ module radiation
     real    :: p_top = 100000.0
     
     !! MJ added to aggregate radiation over output interval
-    real, allocatable, dimension(:,:) :: shortwave_cached, cos_project_angle, solar_elevation_store, solar_azimuth_store
+    real, allocatable, dimension(:,:) :: cos_project_angle, solar_elevation_store, solar_azimuth_store
     real*8 :: counter
     real*8  :: Delta_t !! MJ added to detect the time for outputting
 
@@ -253,22 +255,15 @@ contains
 
             allocate(solar_azimuth_store(ims:ime,jms:jme)) !! MJ added
 
-            if (allocated(shortwave_cached)) then
-                !$acc exit data delete(shortwave_cached)
-                deallocate(shortwave_cached)
-            endif
+            !$acc enter data create(cos_project_angle, solar_elevation_store, solar_azimuth_store)
 
-            allocate(shortwave_cached(ims:ime,jms:jme))
-
-            !$acc enter data create(cos_project_angle, solar_elevation_store, solar_azimuth_store, shortwave_cached)
-
-            shortwave_cached = 0.0
             call radconst(domain%sim_time%day_of_year(), declin, solar_constant)
-            !$acc update device(shortwave_cached)
         ! endif
 
         ! Initialize terrain reflected shortwave lookup tables
-        if (options%rad%terrain_shading .and. options%rad%terrain_refl_radius > 0) then
+        if (options%rad%terrain_shading .and. &
+            (options%rad%terrain_reflected_sw .or. options%rad%terrain_longwave) .and. &
+            options%rad%terrain_refl_radius > 0) then
             call init_terrain_refl_tables(domain%dx, options%rad%terrain_refl_radius)
         endif
 
@@ -812,8 +807,10 @@ contains
         if (options%rad%terrain_shading) then
             call options%alloc_vars( [kVARS%slope_angle, kVARS%aspect_angle, kVARS%svf, kVARS%hlm, kVARS%shortwave_direct, &
                                       kVARS%shortwave_diffuse, &
+                                      kVARS%shortwave_direct_horizontal, kVARS%shortwave_diffuse_horizontal, &
                                       kVARS%shortwave_terrain, kVARS%terrain, kVARS%albedo, &
                                       kVARS%neighbor_terrain, kVARS%neighbor_slope_angle, kVARS%neighbor_aspect_angle])
+            call options%restart_vars( [kVARS%shortwave_direct_horizontal, kVARS%shortwave_diffuse_horizontal])
         endif
 
     end subroutine ra_var_request
@@ -946,15 +943,16 @@ contains
 #endif
 
         !! MJ added
-        real :: trans_atm, trans_atm_dir, max_dir_1, max_dir_2, max_dir, elev_th, ratio_dif, tzone
+        real :: trans_atm, elev_th, ratio_dif, tzone
         integer :: zdx, zdx_max
         real(real64) :: sun_declin_deg, eq_of_time_minutes
-        logical :: sun_up, sun_up_global         ! .true. if the sun is above the horizon anywhere in the local/global domain
+        logical :: sun_up, sun_up_global, visible ! solar/terrain visibility flags
+        logical :: apply_direct_sw, apply_diffuse_sw, apply_reflected_sw, apply_terrain_lw
         real    :: coszen_max, coszen_max_g     ! local / global max cos(zenith) for the sun_up test
 
         ! Terrain reflected SW local variables
         real :: local_albedo, nbr_albedo, albedo_sum, weight_sum
-        real :: facing, w_refl, albedo_terrain, terrain_vf, refl_correction
+        real :: facing, w_refl, albedo_terrain, terrain_vf
         integer :: di, dj, ii, jj
         ! Terrain-emitted LW local variables (LW-SVF correction)
         real :: lw_emit_sum, lw_weight_sum, lw_emit_terrain, local_emit
@@ -962,6 +960,11 @@ contains
         real(real64) :: model_time_seconds, post_step_seconds
         logical :: run_full_radiation = .False. ! Default to not running full radiation, but may be set to true below if we are over the update interval
         if (options%physics%radiation == 0) return
+
+        apply_direct_sw = options%rad%terrain_direct_sw
+        apply_diffuse_sw = options%rad%terrain_diffuse_sw
+        apply_reflected_sw = options%rad%terrain_reflected_sw
+        apply_terrain_lw = options%rad%terrain_longwave
 
         model_time_seconds = canonical_time_seconds(domain%sim_time%seconds())
         run_full_radiation = (model_time_seconds >= next_update_time(domain%nest_indx))
@@ -1006,6 +1009,7 @@ contains
                     enddo
                 enddo
                 end associate
+                !$acc wait(1)
                 sun_up = (coszen_max > 0.0)
             else
                 !$acc parallel loop gang vector collapse(2) async(1)
@@ -1014,6 +1018,7 @@ contains
                         cosine_zenith_angle(i,j)=sin(solar_elevation_store(i,j))
                     enddo
                 enddo
+                !$acc wait(1)
             endif
             end associate
         endif
@@ -1767,27 +1772,25 @@ contains
 #endif ! end USE_RTE_RRTMGP
                 endif 
 
-                ! If the user has provided sky view fraction, then apply this to the diffuse SW now, 
-                ! since svf is time-invariant
-
-                if (domain%var_indx(kVARS%svf)%v > 0) then
-                    associate(svf => domain%vars_2d(domain%var_indx(kVARS%svf)%v)%data_2d)
-                    !$acc parallel loop gang vector collapse(2) present(shortwave_diffuse, svf)
-                    do j = jts,jte
-                        do i = its,ite
-                            shortwave_diffuse(i,j)=shortwave_diffuse(i,j)*svf(i,j)
-                        enddo
-                    enddo
-                    end associate
-                endif
-
             endif ! end if rrtmg or rrtmgp
-            ! cache shortwave from RRTMG_SWRAD for downscaling.
-            ! needed if we are to call the terrain shading routine more frequently than RRTMG_SWRAD
+            ! Cache the unmodified horizontal-plane components. Terrain
+            ! corrections run more frequently than the expensive radiation
+            ! scheme, so reconstructing direct SW as total-minus-an-already-
+            ! SVF-reduced diffuse field would spuriously move obstructed
+            ! diffuse energy into the direct beam.
             if (options%rad%terrain_shading) then
-                !$acc kernels present(shortwave, shortwave_cached)
-                shortwave_cached = shortwave
-                !$acc end kernels
+                associate(shortwave_direct_horizontal => &
+                              domain%vars_2d(domain%var_indx(kVARS%shortwave_direct_horizontal)%v)%data_2d, &
+                          shortwave_diffuse_horizontal => &
+                              domain%vars_2d(domain%var_indx(kVARS%shortwave_diffuse_horizontal)%v)%data_2d)
+                if (options%physics%radiation==kRA_RRTMG .or. options%physics%radiation==kRA_RRTMGP) then
+                    !$acc kernels present(shortwave_direct, shortwave_diffuse, &
+                    !$acc&                shortwave_direct_horizontal, shortwave_diffuse_horizontal)
+                    shortwave_direct_horizontal = shortwave_direct
+                    shortwave_diffuse_horizontal = shortwave_diffuse
+                    !$acc end kernels
+                endif
+                end associate
             endif
             !$acc end data
             end associate
@@ -1799,13 +1802,20 @@ contains
         !! MJ added: this is Tobias Jonas (TJ) scheme based on swr function in metDataWizard/PROCESS_COSMO_DATA_1E2E.m and also https://github.com/Tobias-Jonas-SLF/HPEval
         !! sun_up gate: skip the downscaling when the sun is down everywhere. This both
         !! avoids pointless night-time work and -- crucially -- prevents the downscaling
-        !! from running on radiation state (shortwave_cached, solar_constant) that a full
-        !! RRTMG call has not yet seeded after a restart. The restored shortwave_* fields
-        !! (0 at night) then persist unchanged.
+        !! from running on radiation state that a full radiation call has not yet seeded.
+        !! The horizontal direct/diffuse components are restart-persistent, so a split
+        !! segment retains the same terrain-radiation state between full updates.
         if (options%rad%terrain_shading) then
             if (sun_up) then
-                !! partitioning the total radiation per horizontal plane into the diffusive and direct ones based on https://www.sciencedirect.com/science/article/pii/S0168192320300058, HPEval
-                if (.not.(options%physics%radiation==kRA_RRTMG .or. options%physics%radiation==kRA_RRTMGP)) then
+                ! Schemes without native direct/diffuse output use the
+                ! Erbs-style HPEval partition. Keep this partition unshaded;
+                ! the component controls below apply terrain effects once.
+                associate(shortwave_direct_horizontal => &
+                              domain%vars_2d(domain%var_indx(kVARS%shortwave_direct_horizontal)%v)%data_2d, &
+                          shortwave_diffuse_horizontal => &
+                              domain%vars_2d(domain%var_indx(kVARS%shortwave_diffuse_horizontal)%v)%data_2d)
+                if (run_full_radiation .and. &
+                    .not.(options%physics%radiation==kRA_RRTMG .or. options%physics%radiation==kRA_RRTMGP)) then
                     ratio_dif=0.            
                     do j = jts,jte
                         do i = its,ite
@@ -1818,8 +1828,11 @@ contains
                             elseif (trans_atm>0.8) then
                                 ratio_dif=0.165
                             endif
-                            domain%vars_2d(domain%var_indx(kVARS%shortwave_diffuse)%v)%data_2d(i,j)= &
-                                    ratio_dif*shortwave_cached(i,j)*domain%vars_2d(domain%var_indx(kVARS%svf)%v)%data_2d(i,j)
+                            shortwave_diffuse_horizontal(i,j) = ratio_dif * &
+                                domain%vars_2d(domain%var_indx(kVARS%shortwave)%v)%data_2d(i,j)
+                            shortwave_direct_horizontal(i,j) = max( &
+                                domain%vars_2d(domain%var_indx(kVARS%shortwave)%v)%data_2d(i,j) - &
+                                shortwave_diffuse_horizontal(i,j), 0.0)
                         enddo
                     enddo                
                 endif
@@ -1829,40 +1842,42 @@ contains
                 associate(shortwave => domain%vars_2d(domain%var_indx(kVARS%shortwave)%v)%data_2d, &
                         shortwave_direct => domain%vars_2d(domain%var_indx(kVARS%shortwave_direct)%v)%data_2d, &
                         shortwave_diffuse => domain%vars_2d(domain%var_indx(kVARS%shortwave_diffuse)%v)%data_2d, &
+                        svf => domain%vars_2d(domain%var_indx(kVARS%svf)%v)%data_2d, &
                         hlm => domain%vars_3d(domain%var_indx(kVARS%hlm)%v)%data_3d)
                 
-                !$acc parallel loop gang vector collapse(2) present(shortwave_cached, shortwave_diffuse, shortwave_direct, &
-                !$acc&      hlm, shortwave, solar_elevation_store, solar_azimuth_store, cos_project_angle) wait(1)
+                !$acc parallel loop gang vector collapse(2) present(shortwave_direct_horizontal, shortwave_diffuse_horizontal, &
+                !$acc&      shortwave_diffuse, shortwave_direct, svf, hlm, shortwave, solar_elevation_store, &
+                !$acc&      solar_azimuth_store, cos_project_angle) private(visible, zdx, elev_th) &
+                !$acc&      firstprivate(apply_direct_sw, apply_diffuse_sw, solar_constant) wait(1)
                 do j = jts,jte
                     do i = its,ite
-                        shortwave_direct(i,j) = max( shortwave_cached(i,j) - shortwave_diffuse(i,j),0.0)
-
-                        !!
-                        zdx = horizon_azimuth_index(solar_azimuth_store(i,j), zdx_max)
-                        elev_th=(90.-hlm(i,zdx,j))*DEGRAD !! MJ added: it is the solar elevation threshold above which we see the sun from the pixel  
-                        if (solar_elevation_store(i,j)>=elev_th) then
-                            ! determin maximum allowed direct swr
-                            trans_atm_dir = max(min(shortwave_direct(i,j)/&
-                                            (solar_constant*sin(solar_elevation_store(i,j)+1.e-4)),1.),0.)  ! atmospheric transmissivity for direct sw radiation
-                            max_dir_1     = solar_constant*exp(log(1.-0.165)/max(sin(solar_elevation_store(i,j)),1.e-4))            
-                            max_dir_2     = solar_constant*trans_atm_dir                          
-                            max_dir       = min(max_dir_1,max_dir_2)                     ! applying both above criteria 1 and 2                    
-
-                            shortwave_direct(i,j) = min(shortwave_direct(i,j)/            &
-                                                                max(sin(solar_elevation_store(i,j)),0.01),max_dir) * &
-                                                                max(cos_project_angle(i,j),0.)
+                        if (apply_diffuse_sw) then
+                            shortwave_diffuse(i,j) = terrain_diffuse_shortwave(shortwave_diffuse_horizontal(i,j), svf(i,j))
                         else
-                            shortwave_direct(i,j)=0.
+                            shortwave_diffuse(i,j) = max(shortwave_diffuse_horizontal(i,j), 0.0)
+                        endif
+
+                        if (apply_direct_sw) then
+                            zdx = horizon_azimuth_index(solar_azimuth_store(i,j), zdx_max)
+                            elev_th = (90.0 - hlm(i,zdx,j)) * DEGRAD
+                            visible = solar_elevation_store(i,j) >= elev_th
+                            shortwave_direct(i,j) = terrain_direct_shortwave( &
+                                shortwave_direct_horizontal(i,j), sin(solar_elevation_store(i,j)), &
+                                cos_project_angle(i,j), solar_constant, visible)
+                        else
+                            shortwave_direct(i,j) = max(shortwave_direct_horizontal(i,j), 0.0)
                         endif
                         shortwave(i,j) = shortwave_diffuse(i,j) + shortwave_direct(i,j)
                     enddo
                 enddo  
                 end associate
+                end associate
             endif
             ! --- Terrain reflected shortwave radiation ---
             ! Based on Dozier (1980), Helbig et al. (2009), Chu et al. (2021)
             ! Simple method with multi-reflection correction and elevation-aware neighborhood albedo
-            if (run_full_radiation .and. options%rad%terrain_refl_radius > 0) then
+            if (run_full_radiation .and. options%rad%terrain_refl_radius > 0 .and. &
+                (apply_reflected_sw .or. apply_terrain_lw)) then
 
                 !$acc wait(1) ! ensure the async coszen_max reduction is resident on the host
                 call MPI_Allreduce(coszen_max, coszen_max_g, 1, MPI_REAL, MPI_MAX, domain%compute_comms, ierr)
@@ -1873,7 +1888,7 @@ contains
 
                 ! Reflected-SW neighbourhood albedo gather -- only when the sun is up
                 ! somewhere (no reflected SW at night). The LW gather below is unconditional.
-                if (sun_up_global) then
+                if (apply_reflected_sw .and. sun_up_global) then
                     call gather_neighborhood_albedo(domain, nbr_buffer)
                 endif
 
@@ -1889,15 +1904,16 @@ contains
                           ihs => domain%ihs, ihe => domain%ihe, jhs => domain%jhs, jhe => domain%jhe)
 
                 ! --- Terrain-reflected SHORTWAVE (only when the sun is up somewhere) ---
-                if (sun_up_global) then
+                if (apply_reflected_sw .and. sun_up_global) then
                 !$acc parallel loop gang vector collapse(2) &
                 !$acc& present(svf, slope_ang, aspect_ang, albedo_2d, nbr_buffer, shortwave, sw_terrain, &
                 !$acc&         azimuth_offset, inv_dist2_offset, ihs, ihe, jhs, jhe) &
                 !$acc& private(local_albedo, nbr_albedo, albedo_sum, weight_sum, facing, &
-                !$acc&         w_refl, albedo_terrain, terrain_vf, refl_correction, di, dj, ii, jj)
+                !$acc&         w_refl, albedo_terrain, terrain_vf, di, dj, ii, jj)
                 do j = jts, jte
                     do i = its, ite
-                        ! Compute slope-aware weighted average albedo of neighbors
+                        ! Compute a slope-aware weighted average of neighbouring
+                        ! reflected irradiance (albedo times incident SW; W m-2).
                         albedo_sum = 0.0
                         weight_sum = 0.0
                         do dj = -R_cells, R_cells
@@ -1909,7 +1925,7 @@ contains
                                 ! Use neighborhood bounds instead of tile bounds
                                 if (ii < ihs .or. ii > ihe .or. jj < jhs .or. jj > jhe) cycle
 
-                                ! Neighbor albedo from gathered buffer
+                        ! Neighbor reflected irradiance from gathered buffer
                                 nbr_albedo = nbr_buffer(ii, jj)
 
                                 ! Facing: neighbor faces target * neighbor is illuminated by sun
@@ -1929,7 +1945,7 @@ contains
                         ! Local albedo as fallback
                         local_albedo = albedo_2d(i, j)
 
-                        ! Weighted average albedo (fallback to local if no valid neighbors)
+                        ! Weighted reflected irradiance (fallback to local if no valid neighbors)
                         if (weight_sum > 1.0e-8) then
                             albedo_terrain = albedo_sum / weight_sum
                         else
@@ -1939,10 +1955,8 @@ contains
                         ! Terrain view factor = fraction of hemisphere occupied by terrain
                         terrain_vf = 1.0 - svf(i,j)
 
-                        ! Terrain reflected SW with multi-reflection correction (Dozier 1980, Chu et al. 2021)
-                        ! Geometric series: 1/(1 - alpha*Ct) accounts for infinite bounces
-                        refl_correction = 1.0 / max(1.0 - local_albedo * terrain_vf, 0.05)
-                        sw_terrain(i,j) = terrain_vf * albedo_terrain * refl_correction
+                        sw_terrain(i,j) = terrain_reflected_shortwave( &
+                            terrain_vf, albedo_terrain, local_albedo)
 
                         ! Add terrain reflected component to total shortwave
                         shortwave(i,j) = shortwave(i,j) + sw_terrain(i,j)
@@ -1957,6 +1971,7 @@ contains
                 enddo
                 endif   ! sun_up_global -- reflected shortwave only
 
+                if (apply_terrain_lw) then
                 ! --- Terrain-emitted LONGWAVE (sun-independent: runs day AND night) ---
                 !$acc wait(1) ! wait for prior update to shortwave radiation before calculating terrain emitted LW in following subroutine
                 ! Gather neighborhood LW emission from neighboring MPI processes
@@ -2019,10 +2034,12 @@ contains
                                        + terrain_vf * lw_emit_terrain
                     end do
                 end do
+                endif
 
                 end associate
                 !$acc end data
-            elseif (run_full_radiation .and. options%rad%terrain_refl_radius == 0) then
+            elseif (run_full_radiation .and. options%rad%terrain_refl_radius == 0 .and. &
+                    (apply_reflected_sw .or. apply_terrain_lw)) then
                 ! LOCAL fallback: use this cell's own skin temperature and emissivity
                 ! for the terrain-emission term. No neighbourhood gather.
                 associate(svf       => domain%vars_2d(domain%var_indx(kVARS%svf)%v)%data_2d,              &
@@ -2035,26 +2052,27 @@ contains
 
                 !$acc parallel loop gang vector collapse(2) &
                 !$acc   present(svf, albedo_2d, shortwave, sw_terrain, emiss, skin_temp, longwave) &
-                !$acc   private(terrain_vf, local_albedo, albedo_terrain, refl_correction) firstprivate(STBOLT)
+                !$acc   private(terrain_vf, local_albedo, albedo_terrain) &
+                !$acc   firstprivate(STBOLT, apply_reflected_sw, apply_terrain_lw)
                 do j = jts, jte
                     do i = its, ite
                         terrain_vf    = 1.0 - svf(i,j)
 
-                        longwave(i,j) = svf(i,j) * longwave(i,j) &
-                                      + terrain_vf * emiss(i,j)  &
-                                        * STBOLT * skin_temp(i,j)**4
+                        if (apply_terrain_lw) then
+                            longwave(i,j) = svf(i,j) * longwave(i,j) &
+                                          + terrain_vf * emiss(i,j)  &
+                                            * STBOLT * skin_temp(i,j)**4
+                        endif
 
-                        ! Local albedo as fallback
-                        local_albedo = albedo_2d(i, j)
-                        albedo_terrain = local_albedo * shortwave(i,j)
-
-                        ! Terrain reflected SW with multi-reflection correction (Dozier 1980, Chu et al. 2021)
-                        ! Geometric series: 1/(1 - alpha*Ct) accounts for infinite bounces
-                        refl_correction = 1.0 / max(1.0 - local_albedo * terrain_vf, 0.05)
-                        sw_terrain(i,j) = terrain_vf * albedo_terrain * refl_correction
-
-                        ! Add terrain reflected component to total shortwave
-                        shortwave(i,j) = shortwave(i,j) + sw_terrain(i,j)
+                        if (apply_reflected_sw) then
+                            local_albedo = albedo_2d(i, j)
+                            albedo_terrain = local_albedo * shortwave(i,j)
+                            sw_terrain(i,j) = terrain_reflected_shortwave( &
+                                terrain_vf, albedo_terrain, local_albedo)
+                            shortwave(i,j) = shortwave(i,j) + sw_terrain(i,j)
+                        else
+                            sw_terrain(i,j) = 0.0
+                        endif
 
                     end do
                 end do
