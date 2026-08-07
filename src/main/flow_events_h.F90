@@ -30,11 +30,12 @@ module flow_events
             integer, intent(in) :: nest_index
         end subroutine component_init
 
-        module subroutine component_loop(components, options, boundary, ioclient)
+        module subroutine component_loop(components, options, boundary, ioclient, initialization_only)
             type(comp_arr_t), intent(inout) :: components(:)
             type(options_t), intent(inout) :: options(:)
             type(boundary_t), intent(inout):: boundary(:)
             type(ioclient_t), intent(inout):: ioclient(:)
+            logical, intent(in), optional :: initialization_only
         end subroutine component_loop
 
         module subroutine component_program_end(component, options)

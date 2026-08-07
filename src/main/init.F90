@@ -25,7 +25,8 @@ submodule(initialization) initialization_implementation
     use planetary_boundary_layer,   only : pbl_init, pbl_var_request
     use land_surface,               only : lsm_init, lsm_var_request
     use surface_layer,              only : sfc_init, sfc_var_request
-    use wind,                       only : update_winds, init_winds, wind_var_request
+    use wind,                       only : wind_var_request
+    use hicar_initialization_core,  only : initialize_atmospheric_winds
     use io_routines,                only : io_newunit
     use omp_lib,                    only : omp_get_max_threads
     use icar_constants
@@ -426,13 +427,9 @@ contains
         type(domain_t),  intent(inout) :: domain
 
 
-        if (STD_OUT_PE) write(*,*) "Init initial winds"
+        if (STD_OUT_PE) write(*,*) "Initializing and projecting initial winds"
         if (STD_OUT_PE) flush(output_unit)
-        call init_winds(domain,options)
-
-        if (STD_OUT_PE) write(*,*) "Updating initial winds"
-        if (STD_OUT_PE) flush(output_unit)
-        call update_winds(domain, options)
+        call initialize_atmospheric_winds(domain, options)
 
         ! initialize microphysics code (e.g. compute look up tables in Thompson et al)
         call mp_init(domain, options) !this could easily be moved to init_model...

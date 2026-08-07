@@ -380,16 +380,20 @@ subroutine component_main_loop(component, options)
 
 end subroutine component_main_loop
 
-module subroutine component_loop(components, options, boundary, ioclient)
+module subroutine component_loop(components, options, boundary, ioclient, initialization_only)
     implicit none
     type(comp_arr_t), intent(inout) :: components(:)
     type(options_t), intent(inout) :: options(:)
     type(boundary_t), intent(inout):: boundary(:)
     type(ioclient_t), intent(inout):: ioclient(:)
+    logical, intent(in), optional :: initialization_only
 
     integer :: i, n_nests
+    logical :: stop_after_initialization
 
     n_nests = options(1)%general%nests
+    stop_after_initialization = .False.
+    if (present(initialization_only)) stop_after_initialization = initialization_only
 
     do while (any_nests_not_done(components))
         do i = 1, n_nests
@@ -417,6 +421,7 @@ module subroutine component_loop(components, options, boundary, ioclient)
 
             call component_end_of_nest_loop(components(i)%comp,boundary(i),i)
         enddo
+        if (stop_after_initialization) return
     enddo
 
 end subroutine component_loop

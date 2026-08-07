@@ -33,6 +33,7 @@ module wind
     private
     public:: balance_uvw, update_winds, init_winds, calc_w_real, wind_var_request
     public:: update_wind_dqdt, calc_divergence, projection_constraint_norm2
+    public:: get_last_projection_diagnostics
 
     integer :: ids, ide, jds, jde, kds, kde,  &
                ims, ime, jms, jme, kms, kme,  &
@@ -45,7 +46,20 @@ module wind
     real, parameter :: rad2deg=57.2957779371
     real, parameter :: DEFAULT_FR_L = 1000.0
     real(c_double), parameter :: ADJOINT_CONSERVATION_TOL = 2.0e-5_c_double
+    real(c_double) :: last_constraint_initial_norm2 = -1.0_c_double
+    real(c_double) :: last_constraint_final_norm2 = -1.0_c_double
+    real(c_double) :: last_constraint_relative = -1.0_c_double
 contains
+
+
+    subroutine get_last_projection_diagnostics(initial_norm2, final_norm2, relative_residual)
+        implicit none
+        real(c_double), intent(out) :: initial_norm2, final_norm2, relative_residual
+
+        initial_norm2 = last_constraint_initial_norm2
+        final_norm2 = last_constraint_final_norm2
+        relative_residual = last_constraint_relative
+    end subroutine get_last_projection_diagnostics
 
 
     subroutine wind_linear_var_request(options)
@@ -752,6 +766,9 @@ contains
         w_var_given = (options%forcing%wvar/="")
         wind_dt_seconds = options%wind%update_dt%seconds() - domain%forcing_elapsed
         alpha_const_val = options%wind%alpha_const
+        last_constraint_initial_norm2 = -1.0_c_double
+        last_constraint_final_norm2 = -1.0_c_double
+        last_constraint_relative = -1.0_c_double
         
         ! if this is a restart run, we have already read in the winds, so do not do anything
         if (first_wind .and. options%restart%restart) then
@@ -912,6 +929,9 @@ contains
                 call projection_constraint_norm2(div, domain, constraint_final_norm2)
                 constraint_relative = sqrt(constraint_final_norm2 / &
                     max(constraint_initial_norm2, tiny(1.0_c_double)))
+                last_constraint_initial_norm2 = constraint_initial_norm2
+                last_constraint_final_norm2 = constraint_final_norm2
+                last_constraint_relative = constraint_relative
                 if (STD_OUT_PE) then
                     write(output_unit,'(A,ES12.4,A,ES12.4)') &
                         ' HICAR adjoint conservation: relative_Bq=', constraint_relative, &

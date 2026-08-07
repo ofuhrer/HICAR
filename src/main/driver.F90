@@ -42,11 +42,11 @@ program icar
     
     integer :: i, n_nests, PE_RANK_GLOBAL, ierr
     real :: t_val, t_val2, t_val3
-    logical :: init_flag, is_compute_rank
+    logical :: init_flag, is_compute_rank, initialization_only
     character(len=kMAX_FILE_LENGTH) :: namelist_file
 
     ! Read command line options to determine what kind of run this is
-    call read_co(namelist_file)
+    call read_co(namelist_file, initialization_only)
 
     !Initialize MPI if needed
     init_flag = .False.
@@ -71,6 +71,12 @@ program icar
     if (STD_OUT_PE) flush(output_unit)
 
     n_nests = options(1)%general%nests
+    if (initialization_only .and. n_nests /= 1) then
+        error stop '--initialize-only currently requires exactly one HICAR nest'
+    endif
+    if (initialization_only .and. options(1)%restart%restart) then
+        error stop '--initialize-only certifies cold starts and cannot be used with restart=true'
+    endif
 
     ! !Allocate the multiple domains, boundarys
     allocate(boundary(n_nests))
@@ -100,7 +106,8 @@ program icar
     if (STD_OUT_PE) write(*,'(A)')   "Initialization complete, beginning physics integration"
     if (STD_OUT_PE) write(*,'(A)')   "------------------------------------------------------"
 
-    call component_loop(components(1:n_nests), options, boundary, ioclient)
+    call component_loop(components(1:n_nests), options, boundary, ioclient, &
+                        initialization_only=initialization_only)
 
     call component_program_end(components(1:n_nests), options)
 
@@ -112,9 +119,10 @@ program icar
 #endif
 
 contains
-    subroutine read_co(nml_file)
+    subroutine read_co(nml_file, initialization_only)
         implicit none
         character(len=kMAX_FILE_LENGTH), intent(out) :: nml_file
+        logical, intent(out) :: initialization_only
 
         logical :: info, gen_nml, only_namelist_check
         integer :: cnt, p
@@ -127,6 +135,7 @@ contains
         info = .False.
         gen_nml = .False.
         only_namelist_check = .False.
+        initialization_only = .False.
         first_arg = ""
 
         !Turn this on to enable output by default -- likely that we are only running as a single process
@@ -144,10 +153,11 @@ contains
 
         ! If there are no command line arguments, throw error
         if ( (cnt == 0 .or. first_arg=='-h' .or. first_arg=='--help') .and. STD_OUT_PE) then
-            write(*,*) "Usage: ./HICAR [-v [variable_name ...|--all]] [--check-nml] [--gen-nml] namelist_file"
+            write(*,*) "Usage: ./HICAR [-v [variable_name ...|--all]] [--check-nml] [--gen-nml] [--initialize-only] namelist_file"
             write(*,*) "    -v [variable_name ...|--all]: Print information about the namelist variable(s) variable_name, ... "
             write(*,*) "                                  --all prints out information for all namelist variables."
             write(*,*) "    --check-nml:                  Check the namelist file for errors without running the model."
+            write(*,*) "    --initialize-only:            Run native initialization, write time-zero output, then exit."
             write(*,*) "    --gen-nml:                    Generate a namelist file with default values."
             write(*,*) "    --out-vars [keywords]:        List all output variables matching all of the space-separated keywords"
             write(*,*) "                                  (the result is their intersection)."
@@ -211,6 +221,14 @@ contains
                 stop
             elseif (cnt < 2) then
                 if (STD_OUT_PE) write(*,*) "ERROR: No keyword provided with the --out-vars flag."
+                stop
+            endif
+        elseif (first_arg == '--initialize-only') then
+            initialization_only = .True.
+            if (cnt >= 2) then
+                call get_command_argument(2, nml_file)
+            else
+                if (STD_OUT_PE) write(*,*) "ERROR: No namelist provided with the --initialize-only flag."
                 stop
             endif
         else
