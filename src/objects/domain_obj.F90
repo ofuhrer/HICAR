@@ -23,7 +23,7 @@ submodule(domain_interface) domain_implementation
     use mod_wrf_constants,    only : gravity, R_d, KARMAN, cp, DEGRAD, piconst
     use time_object,          only : canonical_time_seconds
     use iso_fortran_env
-    use debug_module,       only : domain_check, check_var
+    use debug_module,       only : domain_check
 
     implicit none
     
@@ -4292,15 +4292,6 @@ contains
         !call this%enforce_limits(update_in=update_only)
 
         if (update_only) this%forcing_interval_ready = .True.
-
-        ! In debug runs, distinguish a bad interpolated endpoint from a bad
-        ! diagnostic constructed from an otherwise finite endpoint.
-        if (update_only) then
-            call check_var(this%vars_3d(this%var_indx(kVARS%pressure)%v), &
-                           "future forcing endpoint", dqdt=.True.)
-            call check_var(this%vars_3d(this%var_indx(kVARS%potential_temperature)%v), &
-                           "future forcing endpoint", dqdt=.True.)
-        endif
 
         !Perform a diagnostic_update to ensure that all diagnostic variables are set for the new forcing data
         !This will be overwriten as soon as we enter the physics loop, but it is necesery to compute density

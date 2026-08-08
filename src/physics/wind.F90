@@ -24,7 +24,7 @@ module wind
     use wind_thermal, only      : apply_thermal_winds, init_thermal_winds
     use mod_atm_utilities,   only : calc_froude, calc_Ri, calc_dry_stability
     use array_utilities,      only : smooth_array
-    use debug_module,     only : domain_check, domain_check_winds
+    use debug_module,     only : domain_check_winds
     use iso_c_binding,    only : c_double
     use ieee_arithmetic,  only : ieee_is_finite
     use mpi
@@ -283,11 +283,6 @@ contains
         real, dimension(ims:ime,kms:kme-1,jms:jme) :: rho_i
         logical :: horz, dqdt, adv_den
         integer :: i, j, k
-        integer :: u_nan_metric, v_nan_metric
-        integer :: rho_nan_entry
-        integer :: rho_nan_input, jaco_u_nan_input, jaco_v_nan_input
-        integer :: u_nan_input, v_nan_input
-        integer :: div_nan_horizontal, div_nan_final
 
         horz = .False.
         if (present(horz_only)) horz=horz_only
@@ -317,10 +312,6 @@ contains
 
         !$acc data present(div, u, v, w, dz, jaco, jaco_u, jaco_v, jaco_w, rho, dx, &
         !$acc              mf_my_u, mf_mx_v, mf_mxy) create(rho_i, u_met, v_met, w_met)
-
-        !$acc update self(rho)
-        rho_nan_entry = count(.not. ieee_is_finite(rho))
-        if (rho_nan_entry > 0) print *, "calc_divergence density NaNs at entry:", rho_nan_entry
 
         !Multiplication of U/V by metric terms, converting jacobian to staggered-grid where possible, otherwise making assumption of
         !Constant jacobian at edges
@@ -452,46 +443,6 @@ contains
             endif ! end if use_dqdt
         end if ! end if advect_density
 
-        !$acc wait(0)
-        u_nan_metric = 0
-        !$acc parallel loop gang vector collapse(3) reduction(+:u_nan_metric) present(u_met)
-        do j = jms, jme
-            do k = kms, kme
-                do i = ims, ime+1
-                    if (u_met(i,k,j) /= u_met(i,k,j)) u_nan_metric = u_nan_metric + 1
-                enddo
-            enddo
-        enddo
-        if (u_nan_metric > 0) print *, "calc_divergence u_met NaNs:", u_nan_metric
-
-        v_nan_metric = 0
-        !$acc parallel loop gang vector collapse(3) reduction(+:v_nan_metric) present(v_met)
-        do j = jms, jme+1
-            do k = kms, kme
-                do i = ims, ime
-                    if (v_met(i,k,j) /= v_met(i,k,j)) v_nan_metric = v_nan_metric + 1
-                enddo
-            enddo
-        enddo
-        if (v_nan_metric > 0) print *, "calc_divergence v_met NaNs:", v_nan_metric
-
-        if ((u_nan_metric > 0) .or. (v_nan_metric > 0)) then
-            if (dqdt) then
-                !$acc update self(rho, jaco_u, jaco_v, u_dqdt_3d, v_dqdt_3d)
-                u_nan_input = count(.not. ieee_is_finite(u_dqdt_3d))
-                v_nan_input = count(.not. ieee_is_finite(v_dqdt_3d))
-            else
-                !$acc update self(rho, jaco_u, jaco_v, u, v)
-                u_nan_input = count(.not. ieee_is_finite(u))
-                v_nan_input = count(.not. ieee_is_finite(v))
-            endif
-            rho_nan_input = count(.not. ieee_is_finite(rho))
-            jaco_u_nan_input = count(.not. ieee_is_finite(jaco_u))
-            jaco_v_nan_input = count(.not. ieee_is_finite(jaco_v))
-            print *, "calc_divergence input NaNs (dqdt,adv_den,rho,ju,jv,u,v):", &
-                     dqdt, adv_den, rho_nan_input, jaco_u_nan_input, &
-                     jaco_v_nan_input, u_nan_input, v_nan_input
-        endif
 
         ! Map factors (finite-volume form on the projected grid): each face
         ! flux is divided by its transverse factor (true face length =
@@ -510,22 +461,6 @@ contains
             enddo
             enddo
         enddo
-
-        !$acc wait(1)
-        div_nan_horizontal = 0
-        !$acc parallel loop gang vector collapse(3) reduction(+:div_nan_horizontal) present(div)
-        do j = jms, jme
-            do k = kms, kme
-                do i = ims, ime
-                    if (div(i,k,j) /= div(i,k,j)) then
-                        div_nan_horizontal = div_nan_horizontal + 1
-                    endif
-                enddo
-            enddo
-        enddo
-        if (div_nan_horizontal > 0) then
-            write(*,*) "calc_divergence horizontal NaNs:", div_nan_horizontal
-        endif
 
         if (.NOT.(horz)) then
             if (adv_den) then
@@ -606,16 +541,6 @@ contains
         endif
 
         !$acc wait(1)
-        div_nan_final = 0
-        !$acc parallel loop gang vector collapse(3) reduction(+:div_nan_final) present(div)
-        do j = jms, jme
-            do k = kms, kme
-                do i = ims, ime
-                    if (div(i,k,j) /= div(i,k,j)) div_nan_final = div_nan_final + 1
-                enddo
-            enddo
-        enddo
-        if (div_nan_final > 0) write(*,*) "calc_divergence output NaNs:", div_nan_final
         !$acc end data
         end associate
 
@@ -854,13 +779,11 @@ contains
         ! Keep density consistent across process halos for both cold-start and
         ! time-step calls before forming the density-weighted wind correction.
         call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%density)%v), corners=.True.)
-        if (options%general%debug) call domain_check(domain, "Post update_winds::density_halo")
 
         !do this now, so that we will have some values in data_3d when calling update_stability
         if (options%general%debug) call domain_check_winds(domain, "Pre update_winds::apply_base_from_forcing",dqdt=.True.)
         call apply_base_from_forcing(domain, w_var_given, wind_dt_seconds)
         if (options%general%debug) call domain_check_winds(domain, "Post update_winds::apply_base_from_forcing",dqdt=.True.)
-        if (options%general%debug) call domain_check(domain, "Post update_winds::apply_base_thermo")
 
         if (( (options%wind%alpha_const<=0 .and. (options%physics%windtype==kITERATIVE_WINDS)) .or. options%wind%Sx) ) then
             call update_stability(domain, options)
@@ -868,7 +791,6 @@ contains
             ! before the terrain corrections use neighboring mass-cell values.
             call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%blk_ri)%v), corners=.True.)
             call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%froude)%v), corners=.True.)
-            if (options%general%debug) call domain_check(domain, "Post update_winds::stability")
         endif
 
 
@@ -888,7 +810,6 @@ contains
             call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%u)%v),do_dqdt=.True.,corners=.True.)
             call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%v)%v),do_dqdt=.True.,corners=.True.)
             if (options%general%debug) call domain_check_winds(domain, "Post update_winds::apply_Sx",dqdt=.True.)
-            if (options%general%debug) call domain_check(domain, "Post update_winds::apply_Sx_thermo")
         endif 
 
         if (options%wind%thermal) then
@@ -940,7 +861,6 @@ contains
                 ! smooth alpha to avoid sharp transitions
                 call smooth_array(domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v),windowsize=2,ydim=3,nsmooths=3,halo=domain%halo)
             endif
-            if (options%general%debug) call domain_check(domain, "Post update_winds::alpha")
 
             ! Build the grid-w predictor from the forcing w_real. The
             ! elliptic operator is calibrated to the exact composition
@@ -950,7 +870,6 @@ contains
             ! the approximate analytic bootstrap operator: on large domains
             ! that redundant solve can fail before the exact hierarchy exists.
             call calc_idealized_wgrid(domain)
-            if (options%general%debug) call domain_check(domain, "Post update_winds::idealized_wgrid")
 
             if (.not. adjoint_projection_is_enabled() .and. alpha_const_val <= 0 .and. &
                 operator_calibrated(min(domain%nest_indx, size(operator_calibrated)))) then

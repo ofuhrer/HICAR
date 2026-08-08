@@ -14,7 +14,6 @@ submodule(flow_events) flow_events_implementation
         end_nest_context, switch_nest_context, wake_nest
     use time_step, only: step
     use initialization, only: init_model, init_model_state
-    use debug_module, only: domain_check
 
     use string, only : as_string
 
@@ -305,12 +304,10 @@ subroutine component_read(component, options, boundary, ioclient)
             ! after reading all variables that can be read, now compute any remaining variables (e.g. z from p+ps)
             call boundary%update_computed_vars(options)
             call component%interpolate_forcing(boundary, update=.True.)
-            if (options%general%debug) call domain_check(component, "post interpolate_forcing")
             call component%synchronize_sparse_lbc()
 
             ! Make the boundary condition dXdt values into units of [X]/s
             call component%update_delta_fields()
-            if (options%general%debug) call domain_check(component, "post update_delta_fields")
 
             call component%input_timer%stop()
         type is (ioserver_t)
