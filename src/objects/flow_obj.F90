@@ -127,10 +127,13 @@ contains
         type(Time_type) :: time_tmp
 
         if (this%ended) return
-        
-        call time_tmp%set(this%sim_time%mjd() + this%small_time_delta%days())
 
-        if (time_tmp > this%end_time) then
+        ! Do not snap a state that is merely close to end_time forward.  This
+        ! routine is also called after every adaptive physics step; the old
+        ! one-second tolerance could therefore skip the final fractional
+        ! timestep of a process-ending event.  Event-bounded stepping sets the
+        ! exact endpoint explicitly, after which this comparison is sufficient.
+        if (this%sim_time >= this%end_time) then
             this%sim_time = this%end_time
             call time_tmp%set(this%next_output%mjd() - this%small_time_delta%days())
             if (time_tmp > this%end_time) then

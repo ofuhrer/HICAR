@@ -8,6 +8,8 @@ module test_control_flow
     use mpi
     use options_interface, only: options_t
     use flow_object_interface, only: flow_obj_t, comp_arr_t
+    use time_object,          only: Time_type
+    use time_delta_object,    only: time_delta_t
     use ioclient_interface, only: ioclient_t
     use boundary_interface, only: boundary_t
     use flow_events,        only: component_loop
@@ -30,6 +32,7 @@ module test_control_flow
       
         testsuite = [ &
             new_unittest("standard", test_standard_prgm), &
+            new_unittest("near_end_does_not_skip_physics", test_near_end_does_not_skip_physics), &
             new_unittest("standard_restart", test_standard_restart_prgm), &
             new_unittest("nested", test_nested_prgm), &
             new_unittest("nested_freq_output", test_nested_freq_output_prgm), &
@@ -39,6 +42,29 @@ module test_control_flow
           ]
       
     end subroutine collect_control_flow_suite
+
+    subroutine test_near_end_does_not_skip_physics(error)
+        type(error_type), allocatable, intent(out) :: error
+        type(options_t) :: options
+        type(flow_obj_t) :: component
+        type(Time_type) :: near_end
+        type(time_delta_t) :: half_second
+
+        call options%init()
+        call options%general%start_time%set("2000-01-01 00:00:00")
+        call options%general%end_time%set("2000-01-01 01:00:00")
+        call options%forcing%input_dt%set(seconds=3600.0)
+        call options%output%output_dt%set(seconds=3600.0)
+        call component%init_flow_obj(options, 1)
+        component%started = .true.
+
+        call half_second%set(seconds=0.5)
+        call near_end%set(options%general%end_time%mjd() - half_second%days())
+        call component%set_sim_time(near_end)
+
+        call check(error, component%sim_time == near_end .and. .not. component%ended, &
+                   "a subsecond remainder before end_time must not be skipped")
+    end subroutine test_near_end_does_not_skip_physics
 
     !> Test the control flow of the main driver program
     subroutine test_standard_prgm(error)
