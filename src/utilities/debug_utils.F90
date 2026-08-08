@@ -111,11 +111,12 @@ contains
         name = trim(get_varname(var%id))
 
         if (var%three_d) then
-            !$acc update host(var%data_3d)
-            var_3d = var%data_3d
             if (do_dqdt) then
-                var_3d = var%dqdt_3d
                 !$acc update host(var%dqdt_3d)
+                var_3d = var%dqdt_3d
+            else
+                !$acc update host(var%data_3d)
+                var_3d = var%data_3d
             endif
             lis = lbound(var_3d,1); lie = ubound(var_3d,1)
             lks = lbound(var_3d,2); lke = ubound(var_3d,2)
@@ -125,11 +126,12 @@ contains
             vmin = minval(var_3d(lis:lie, lks:lke, ljs:lje))
             n = COUNT(ieee_is_nan(var_3d(lis:lie, lks:lke, ljs:lje)))
         else if (var%two_d) then
-            !$acc update host(var%data_2d)
-            var_2d = var%data_2d
             if (do_dqdt) then
-                var_2d = var%dqdt_2d
                 !$acc update host(var%dqdt_2d)
+                var_2d = var%dqdt_2d
+            else
+                !$acc update host(var%data_2d)
+                var_2d = var%data_2d
             endif
             lis = lbound(var_2d,1); lie = ubound(var_2d,1)
             ljs = lbound(var_2d,2); lje = ubound(var_2d,2)
