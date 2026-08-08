@@ -865,6 +865,7 @@ contains
                 ! smooth alpha to avoid sharp transitions
                 call smooth_array(domain%vars_3d(domain%var_indx(kVARS%wind_alpha)%v),windowsize=2,ydim=3,nsmooths=3,halo=domain%halo)
             endif
+            if (options%general%debug) call domain_check(domain, "Post update_winds::alpha")
 
             ! Build the grid-w predictor from the forcing w_real. The
             ! elliptic operator is calibrated to the exact composition
@@ -874,6 +875,7 @@ contains
             ! the approximate analytic bootstrap operator: on large domains
             ! that redundant solve can fail before the exact hierarchy exists.
             call calc_idealized_wgrid(domain)
+            if (options%general%debug) call domain_check(domain, "Post update_winds::idealized_wgrid")
 
             if (.not. adjoint_projection_is_enabled() .and. alpha_const_val <= 0 .and. &
                 operator_calibrated(min(domain%nest_indx, size(operator_calibrated)))) then
