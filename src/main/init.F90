@@ -427,14 +427,9 @@ contains
         type(domain_t),  intent(inout) :: domain
 
 
-        if (STD_OUT_PE .and. options%restart%restart) then
-            write(*,*) "Initializing wind solver without altering restart winds"
-        else if (STD_OUT_PE) then
-            write(*,*) "Initializing and projecting initial winds"
-        endif
+        if (STD_OUT_PE) write(*,*) "Initializing and projecting initial winds"
         if (STD_OUT_PE) flush(output_unit)
-        call initialize_atmospheric_winds(&
-            domain, options, project_state=.not. options%restart%restart)
+        call initialize_atmospheric_winds(domain, options)
 
         ! initialize microphysics code (e.g. compute look up tables in Thompson et al)
         call mp_init(domain, options) !this could easily be moved to init_model...
