@@ -80,6 +80,22 @@ contains
         flux = view_factor * max(reflected_incident, 0.0) * correction
     end function terrain_reflected_shortwave
 
+    !> Combine terrain-adjusted incident SW with the reflected component
+    !! cached by the last full radiation update. During a refresh the old
+    !! reflected value is excluded because the radiation driver recomputes it
+    !! from the new incident flux immediately afterwards.
+    pure function terrain_shortwave_with_cached_reflection(direct_flux, diffuse_flux, &
+                                                            cached_reflected_flux, &
+                                                            apply_reflection, refresh) result(flux)
+        !$acc routine seq
+        real, intent(in) :: direct_flux, diffuse_flux, cached_reflected_flux
+        logical, intent(in) :: apply_reflection, refresh
+        real :: flux
+
+        flux = direct_flux + diffuse_flux
+        if (apply_reflection .and. .not.refresh) flux = flux + cached_reflected_flux
+    end function terrain_shortwave_with_cached_reflection
+
     !>----------------------------------------------------------
     !! Compute column integrated vapor transport (non-directional)
     !!

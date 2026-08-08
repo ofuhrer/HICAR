@@ -22,7 +22,8 @@ module test_utilities
     use io_routines,             only : io_read, io_write
     use mod_atm_utilities,       only : cal_cldfra3, cal_cldfra3_level, horizon_azimuth_index, &
                                          terrain_direct_shortwave, terrain_diffuse_shortwave, &
-                                         terrain_reflected_shortwave
+                                         terrain_reflected_shortwave, &
+                                         terrain_shortwave_with_cached_reflection
     use domain_interface,        only : auto_dz
     use options_interface,       only : options_t
     use testdrive,               only : new_unittest, unittest_type, error_type, check
@@ -248,6 +249,14 @@ contains
         call check(error, abs(terrain_reflected_shortwave(0.5, 100.0, 0.2) - &
                    (50.0 / 0.9)) < tol, &
                    "terrain-reflected shortwave preserves irradiance units and correction")
+        if (allocated(error)) return
+        call check(error, abs(terrain_shortwave_with_cached_reflection(400.0, 100.0, &
+                   35.0, .true., .false.) - 535.0) < tol, &
+                   "cached reflected shortwave persists between radiation updates")
+        if (allocated(error)) return
+        call check(error, abs(terrain_shortwave_with_cached_reflection(400.0, 100.0, &
+                   35.0, .true., .true.) - 500.0) < tol, &
+                   "a full radiation update excludes stale reflected shortwave")
     end subroutine test_terrain_shortwave_components
 
 

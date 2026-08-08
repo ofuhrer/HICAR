@@ -35,6 +35,7 @@ module radiation
     use mod_atm_utilities, only : cal_cldfra3_level, calc_solar_elevation, calc_solar_date, &
                                   horizon_azimuth_index, terrain_direct_shortwave, &
                                   terrain_diffuse_shortwave, terrain_reflected_shortwave
+    use mod_atm_utilities, only : terrain_shortwave_with_cached_reflection
     use mpi
     use mpi_utils_module, only: allreduce_integer_min_in_place
 #ifdef USE_NCCL
@@ -1842,13 +1843,15 @@ contains
                 associate(shortwave => domain%vars_2d(domain%var_indx(kVARS%shortwave)%v)%data_2d, &
                         shortwave_direct => domain%vars_2d(domain%var_indx(kVARS%shortwave_direct)%v)%data_2d, &
                         shortwave_diffuse => domain%vars_2d(domain%var_indx(kVARS%shortwave_diffuse)%v)%data_2d, &
+                        sw_terrain => domain%vars_2d(domain%var_indx(kVARS%shortwave_terrain)%v)%data_2d, &
                         svf => domain%vars_2d(domain%var_indx(kVARS%svf)%v)%data_2d, &
                         hlm => domain%vars_3d(domain%var_indx(kVARS%hlm)%v)%data_3d)
                 
                 !$acc parallel loop gang vector collapse(2) present(shortwave_direct_horizontal, shortwave_diffuse_horizontal, &
-                !$acc&      shortwave_diffuse, shortwave_direct, svf, hlm, shortwave, solar_elevation_store, &
+                !$acc&      shortwave_diffuse, shortwave_direct, sw_terrain, svf, hlm, shortwave, solar_elevation_store, &
                 !$acc&      solar_azimuth_store, cos_project_angle) private(visible, zdx, elev_th) &
-                !$acc&      firstprivate(apply_direct_sw, apply_diffuse_sw, solar_constant) wait(1)
+                !$acc&      firstprivate(apply_direct_sw, apply_diffuse_sw, apply_reflected_sw, &
+                !$acc&                   run_full_radiation, solar_constant) wait(1)
                 do j = jts,jte
                     do i = its,ite
                         if (apply_diffuse_sw) then
@@ -1867,7 +1870,9 @@ contains
                         else
                             shortwave_direct(i,j) = max(shortwave_direct_horizontal(i,j), 0.0)
                         endif
-                        shortwave(i,j) = shortwave_diffuse(i,j) + shortwave_direct(i,j)
+                        shortwave(i,j) = terrain_shortwave_with_cached_reflection( &
+                            shortwave_direct(i,j), shortwave_diffuse(i,j), sw_terrain(i,j), &
+                            apply_reflected_sw, run_full_radiation)
                     enddo
                 enddo  
                 end associate
