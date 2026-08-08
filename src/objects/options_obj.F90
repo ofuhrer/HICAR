@@ -3333,7 +3333,11 @@ contains
         call append_kv_real   (config_str, pos, 'forcing', 'p_multiplier',             this%forcing%p_multiplier)
         call append_kv_logical(config_str, pos, 'forcing', 'limit_rh',                 this%forcing%limit_rh)
         call append_kv_real   (config_str, pos, 'forcing', 'inputinterval',            this%forcing%inputinterval)
-        if (allocated(this%forcing%sparse_lbc_files)) then
+        ! Boundary-frame paths and window length necessarily advance between
+        ! restart segments. Keep them in the full provenance string, but do
+        ! not treat that expected input-window change as a physics/config
+        ! mismatch when validating a restart.
+        if (allocated(this%forcing%sparse_lbc_files) .and. .not. exclude) then
             call append_kv_str(config_str, pos, 'forcing', 'sparse_lbc_first', &
                                trim(this%forcing%sparse_lbc_files(1)))
             call append_kv_int(config_str, pos, 'forcing', 'sparse_lbc_count', &

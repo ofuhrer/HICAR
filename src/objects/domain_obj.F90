@@ -970,10 +970,12 @@ contains
             endif
         endif
 
-        ! In thermo_only mode the wait above is skipped: synchronize the
-        ! async exner/T/density and frame kernels before the caller
-        ! (microphysics) launches kernels that read them.
-        if (thermo_refresh_only) then
+        ! In thermo-only and forcing-update modes the full-diagnostic wait
+        ! above is skipped. Synchronize the async exner/T/density and frame
+        ! kernels before the caller can launch another diagnostic refresh or
+        ! a wind solve. At an input turnover, returning early lets the current-
+        ! state refresh race the future-forcing refresh on the same arrays.
+        if (thermo_refresh_only .or. forcing_update_only) then
             !$acc wait
         endif
 
