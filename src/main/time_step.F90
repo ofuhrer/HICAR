@@ -200,21 +200,26 @@ contains
     !! @param end_time      the end of the current full time step (when step will return)
     !!
     !!------------------------------------------------------------
-    subroutine update_dt(dt, options, domain)
+    subroutine update_dt(dt, options, domain, report)
         implicit none
         type(time_delta_t), intent(inout) :: dt
         type(options_t),    intent(in)    :: options
         type(domain_t),     intent(in)    :: domain
+        logical, optional,  intent(in)    :: report
 
         real                  :: present_dt_seconds, seconds_out
         integer :: ierr
         integer :: max_i_pres, max_j_pres, max_k_pres
         real :: max_u_pres, max_v_pres, max_w_pres
+        logical :: report_dt
         ! compute internal timestep dt to maintain stability
         ! courant condition for 3D advection. 
                 
         ! If this is the first step (future_dt_seconds has not yet been set)
         !if (future_dt_seconds == DT_BIG) then
+
+        report_dt = .True.
+        if (present(report)) report_dt = report
 
         present_dt_seconds = compute_dt(domain%dx, domain%vars_3d(domain%var_indx(kVARS%u)%v)%data_3d, domain%vars_3d(domain%var_indx(kVARS%v)%v)%data_3d, &
                         domain%vars_3d(domain%var_indx(kVARS%w)%v)%data_3d, domain%vars_3d(domain%var_indx(kVARS%density)%v)%data_3d, &
@@ -239,7 +244,7 @@ contains
         !Minimum dt is min(present_dt_seconds, future_dt_seconds). Then reduce this accross all compute processes
         call MPI_Allreduce(min(present_dt_seconds, future_dt_seconds), seconds_out, 1, MPI_REAL, MPI_MIN, domain%compute_comms, ierr)
         
-        if (min(present_dt_seconds, future_dt_seconds)==seconds_out) then
+        if (report_dt .and. min(present_dt_seconds, future_dt_seconds)==seconds_out) then
 
             if (future_dt_seconds>present_dt_seconds) then
                 max_u = max_u_pres
@@ -265,8 +270,8 @@ contains
         endif
         ! Set dt to the outcome of reduce
         call dt%set(seconds=seconds_out)
-        if (STD_OUT_PE) write(*,*) 'time_step: ',trim(as_string(dt))
-        if (STD_OUT_PE) flush(output_unit)
+        if (report_dt .and. STD_OUT_PE) write(*,*) 'time_step: ',trim(as_string(dt))
+        if (report_dt .and. STD_OUT_PE) flush(output_unit)
 
     end subroutine update_dt
     
@@ -406,6 +411,18 @@ contains
                     domain%sim_time = canonical_end_time
                     exit
                 endif
+            endif
+
+            ! Density advection rebalances grid-relative vertical wind every
+            ! physics step. That wind can evolve substantially between the
+            ! much less frequent forcing/wind updates, so a timestep selected
+            ! only at the hourly wind update can silently violate the vertical
+            ! CFL limit. Re-evaluate it from the current balanced state before
+            ! every physics step; the first step after a wind update simply
+            ! repeats the already-computed value.
+            if (.not. options%wind%wind_only) then
+                call update_dt(dt, options, domain, report=.False.)
+                domain%dt = real(dt%seconds())
             endif
 
             ! Make sure we don't over step the forcing or output period
