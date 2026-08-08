@@ -100,8 +100,6 @@ contains
 
         call this%sim_time%set(this%sim_time%mjd() + dt%days())
 
-        call this%check_ended()
-
     end subroutine increment_sim_time
 
     module subroutine set_sim_time(this, time)
@@ -128,12 +126,9 @@ contains
 
         if (this%ended) return
 
-        ! Do not snap a state that is merely close to end_time forward.  This
-        ! routine is also called after every adaptive physics step; the old
-        ! one-second tolerance could therefore skip the final fractional
-        ! timestep of a process-ending event.  Event-bounded stepping sets the
-        ! exact endpoint explicitly, after which this comparison is sufficient.
-        if (this%sim_time >= this%end_time) then
+        call time_tmp%set(this%sim_time%mjd() + this%small_time_delta%days())
+
+        if (time_tmp > this%end_time) then
             this%sim_time = this%end_time
             call time_tmp%set(this%next_output%mjd() - this%small_time_delta%days())
             if (time_tmp > this%end_time) then

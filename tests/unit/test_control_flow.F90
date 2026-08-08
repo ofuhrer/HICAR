@@ -47,8 +47,8 @@ module test_control_flow
         type(error_type), allocatable, intent(out) :: error
         type(options_t) :: options
         type(flow_obj_t) :: component
-        type(Time_type) :: near_end
-        type(time_delta_t) :: half_second
+        type(Time_type) :: near_end, expected
+        type(time_delta_t) :: half_second, initial_remainder
 
         call options%init()
         call options%general%start_time%set("2000-01-01 00:00:00")
@@ -58,11 +58,14 @@ module test_control_flow
         call component%init_flow_obj(options, 1)
         component%started = .true.
 
+        call initial_remainder%set(seconds=1.2)
+        call near_end%set(options%general%end_time%mjd() - initial_remainder%days())
+        component%sim_time = near_end
         call half_second%set(seconds=0.5)
-        call near_end%set(options%general%end_time%mjd() - half_second%days())
-        call component%set_sim_time(near_end)
+        call expected%set(near_end%mjd() + half_second%days())
+        call component%increment_sim_time(half_second)
 
-        call check(error, component%sim_time == near_end .and. .not. component%ended, &
+        call check(error, component%sim_time == expected .and. .not. component%ended, &
                    "a subsecond remainder before end_time must not be skipped")
     end subroutine test_near_end_does_not_skip_physics
 
