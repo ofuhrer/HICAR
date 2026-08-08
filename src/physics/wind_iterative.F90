@@ -52,6 +52,7 @@ module wind_iterative
     public :: adjoint_projection_is_enabled
     public :: get_last_wind_solve_diagnostics
     public :: reset_wind_solver_guess
+    public :: canonicalize_adjoint_operator
     public :: adjoint_operator_smoke
 
     interface
@@ -5032,6 +5033,25 @@ contains
         enddo
         end associate
     end subroutine update_adjoint_coefs_gpu
+
+
+    !> Put the probed operator on the same alpha-dependent coefficient path
+    !! used by later wind updates.  Without this normalization, a fresh
+    !! process retains vertically probed coefficients while an uninterrupted
+    !! process refreshes the same coefficients analytically when alpha
+    !! changes.  Their small rounding difference is enough to make restart
+    !! trajectories diverge at the next finite-tolerance projection.
+    subroutine canonicalize_adjoint_operator(domain)
+        implicit none
+        type(domain_t), intent(in) :: domain
+
+        if (.not. adjoint_projection_requested .or. .not. operator_probed) return
+        call update_adjoint_coefs_gpu(domain)
+        call wind_hypre_invalidate()
+        hypre_operator_verified = .false.
+        operator_audit_done = .false.
+        call release_multilevel_preconditioner()
+    end subroutine canonicalize_adjoint_operator
 
 
     subroutine update_coefs_host(domain)
