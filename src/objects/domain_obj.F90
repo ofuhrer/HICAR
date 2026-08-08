@@ -2701,6 +2701,21 @@ contains
                 this%vars_2d(this%var_indx(kVARS%snow_height)%v)%data_2d(:,:) = temporary_data(this%grid%ims:this%grid%ime, this%grid%jms:this%grid%jme)
             endif
         endif
+
+        ! A bulk source snow temperature is more informative than the generic
+        ! 273.15 K fallback.  Populate every model snow slot here; the Noah-MP
+        ! initializer keeps only the active slots during its cold-start setup.
+        if (options%domain%snow_temp_var /= "") then
+            call io_read(options%domain%init_conditions_file,   &
+                           options%domain%snow_temp_var,         &
+                           temporary_data)
+            if (this%var_indx(kVARS%snow_temperature)%v > 0) then
+                do i=1,size(this%vars_3d(this%var_indx(kVARS%snow_temperature)%v)%data_3d, 2)
+                    this%vars_3d(this%var_indx(kVARS%snow_temperature)%v)%data_3d(:,i,:) = &
+                        temporary_data(this%grid%ims:this%grid%ime, this%grid%jms:this%grid%jme)
+                enddo
+            endif
+        endif
         
         if ( (this%var_indx(kVARS%snow_height)%v > 0) .and. (this%var_indx(kVARS%snow_water_equivalent)%v > 0)) then
             !Do check if we read in SWE but not snow height -- convert with user supplied constant density

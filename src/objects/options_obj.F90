@@ -1192,7 +1192,7 @@ contains
         character(len=kMAX_FILE_LENGTH) :: init_conditions_file(kMAX_NESTS)
 
         character(len=kMAX_NAME_LENGTH), dimension(kMAX_NESTS) :: landvar,lakedepthvar,hgt_hi,lat_hi,lon_hi,ulat_hi,ulon_hi,vlat_hi,vlon_hi,           &
-                                        snowh_var, soiltype_var, soiltexture_var, cropcategory_var, soil_t_var,soil_vwc_var,swe_var, soil_deept_var,           &
+                                        snowh_var, snow_temp_var, soiltype_var, soiltexture_var, cropcategory_var, soil_t_var,soil_vwc_var,swe_var, soil_deept_var,           &
                                         vegtype_var,vegfrac_var, vegfracmax_var, albedo_var, lai_var,  &
                                         sinalpha_var, cosalpha_var, svf_var, hlm_var, slope_angle_var, &
                                         aspect_angle_var, shd_var, surface_temp_var, &  !!MJ added
@@ -1204,7 +1204,7 @@ contains
                                         snowpack_mk_var, snowpack_cdot_var, snowpack_snow_stress_var, snowpack_n3_var
 
         namelist /domain/ dx, nz, longitude_system, init_conditions_file, wait_for_ready_file, ready_file_timeout, &
-                            landvar,lakedepthvar, snowh_var, agl_cap, use_agl_height, use_map_factors, &
+                            landvar,lakedepthvar, snowh_var, snow_temp_var, agl_cap, use_agl_height, use_map_factors, &
                             hgt_hi,lat_hi,lon_hi,ulat_hi,ulon_hi,vlat_hi,vlon_hi,           &
                             soiltype_var, soiltexture_var, cropcategory_var, soil_t_var,soil_vwc_var,swe_var,soil_deept_var,           &
                             vegtype_var,vegfrac_var, vegfracmax_var, albedo_var, lai_var,  &
@@ -1268,6 +1268,7 @@ contains
         call set_nml_var_default(soil_vwc_var, 'soil_vwc_var', print_info, gennml)
         call set_nml_var_default(swe_var, 'swe_var', print_info, gennml)
         call set_nml_var_default(snowh_var, 'snowh_var', print_info, gennml)
+        call set_nml_var_default(snow_temp_var, 'snow_temp_var', print_info, gennml)
         call set_nml_var_default(soil_deept_var, 'soil_deept_var', print_info, gennml)
         call set_nml_var_default(vegtype_var, 'vegtype_var', print_info, gennml)
         call set_nml_var_default(vegfrac_var, 'vegfrac_var', print_info, gennml)
@@ -1402,6 +1403,7 @@ contains
         call set_nml_var(domain_options%soil_vwc_var, soil_vwc_var(n_indx), 'soil_vwc_var',domain_options, soil_vwc_var(1))
         call set_nml_var(domain_options%swe_var, swe_var(n_indx), 'swe_var',domain_options, swe_var(1))
         call set_nml_var(domain_options%snowh_var, snowh_var(n_indx), 'snowh_var',domain_options, snowh_var(1))
+        call set_nml_var(domain_options%snow_temp_var, snow_temp_var(n_indx), 'snow_temp_var',domain_options, snow_temp_var(1))
         call set_nml_var(domain_options%soil_deept_var, soil_deept_var(n_indx), 'soil_deept_var',domain_options, soil_deept_var(1))
         call set_nml_var(domain_options%vegtype_var, vegtype_var(n_indx), 'vegtype_var',domain_options, vegtype_var(1))
         call set_nml_var(domain_options%vegfrac_var, vegfrac_var(n_indx), 'vegfrac_var',domain_options, vegfrac_var(1))

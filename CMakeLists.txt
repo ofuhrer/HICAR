@@ -385,6 +385,9 @@ FetchContent_Declare(
 	# Pin before the HICAR driver interface was renamed to SCHNAPS upstream.
 	GIT_TAG           8b9892a8a4137ad89eca803c1abf45969e5e686e
 	GIT_SHALLOW       FALSE
+	PATCH_COMMAND      ${CMAKE_COMMAND}
+	                   -DNOAHMP_SOURCE_DIR=<SOURCE_DIR>
+	                   -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_noahmp_glacier_snow.cmake
 )
 
 # Fetch specific folders from icar_supporting_files repo

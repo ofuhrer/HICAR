@@ -1936,6 +1936,12 @@ contains
                 allocate(dimensions(2))
                 dimensions = ["Y", "X"]
                 group = "Domain"
+            case ("snow_temp_var")
+                description = "Name of the bulk initial snow temperature variable in domain file"
+                units = "K"
+                allocate(dimensions(2))
+                dimensions = ["Y", "X"]
+                group = "Domain"
             case ("soil_deept_var")
                 description = "Name of the deep soil temperature variable in domain file"
                 units = "K"

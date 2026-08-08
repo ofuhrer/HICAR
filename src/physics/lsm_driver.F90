@@ -316,7 +316,7 @@ contains
         type(options_t),intent(in)    :: options
         logical, optional, intent(in) :: context_chng
         integer :: i, j, k, dev_num
-        logical :: context_change, restart, monthly_vegfrac
+        logical :: context_change, restart, monthly_vegfrac, use_input_snow_temperature
         real*8 :: eff_interval, initial_time
 
         if (present(context_chng)) then
@@ -334,6 +334,8 @@ contains
 
 
         restart = context_change .or. options%restart%restart
+        use_input_snow_temperature = (.not. restart) .and. &
+                                     (options%domain%snow_temp_var /= "")
 
         if (STD_OUT_PE .and. .not.context_change) write(*,*) "Initializing LSM"
 
@@ -726,12 +728,21 @@ contains
                       Sice => domain%vars_3d(domain%var_indx(kVARS%Sice)%v)%data_3d, &
                       Sliq => domain%vars_3d(domain%var_indx(kVARS%Sliq)%v)%data_3d, &
                       snow_layer_depth => domain%vars_3d(domain%var_indx(kVARS%snow_layer_depth)%v)%data_3d)
-            !$acc parallel loop gang vector collapse(2) present(snow_temperature, Sice, Sliq, snow_layer_depth, nmp_snow_t, nmp_snicexy, nmp_snliqxy, nmp_zsnsoxy)
+            !$acc parallel loop gang vector collapse(2) present(snow_temperature, Sice, Sliq, snow_layer_depth, nmp_snow_t, nmp_snicexy, nmp_snliqxy, nmp_zsnsoxy) firstprivate(use_input_snow_temperature)
             do j = jms, jme
                 do i = ims, ime
                     !$acc loop seq
                     do k = 1, num_snow_layers
-                        snow_temperature(i,k,j)        = nmp_snow_t (i,k,j)
+                        if (use_input_snow_temperature .and. &
+                            k > num_snow_layers + nmp_snow_nlayers(i,j)) then
+                            ! Noah-MP normally initializes active layers from
+                            ! ground temperature. Preserve the remapped bulk
+                            ! snow temperature instead; inactive slots retain
+                            ! Noah-MP's canonical zero state.
+                            nmp_snow_t(i,k,j) = snow_temperature(i,k,j)
+                        else
+                            snow_temperature(i,k,j) = nmp_snow_t(i,k,j)
+                        endif
                         Sice(i,k,j)          = nmp_snicexy(i,k,j)
                         Sliq(i,k,j) = nmp_snliqxy(i,k,j)
                         snow_layer_depth(i,k,j)        = nmp_zsnsoxy(i,k,j)
