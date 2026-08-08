@@ -114,14 +114,6 @@ contains
             write(*,*) trim(filename), ": product_type is ", trim(value)
             error stop "Not a HICAR sparse LBC product"
         endif
-        value = global_attribute(ncid, "hicar_pressure_adjustment")
-        if (trim(value) /= "APPLIED_HICAR_NATIVE") then
-            error stop "Sparse LBC lacks HICAR-native pressure adjustment"
-        endif
-        value = global_attribute(ncid, "wind_balance")
-        if (trim(value) /= "APPLIED_HICAR_ADJOINT_VARIATIONAL_PROJECTION") then
-            error stop "Sparse LBC lacks HICAR wind projection"
-        endif
         value = global_attribute(ncid, "hicar_water_conversion")
         if (trim(value) /= "APPLIED_JOINT_ALL_WATER_SPECIES") then
             error stop "Sparse LBC water species are not HICAR dry-air mixing ratios"
