@@ -284,6 +284,7 @@ contains
         logical :: horz, dqdt, adv_den
         integer :: i, j, k
         integer :: u_nan_metric, v_nan_metric
+        integer :: rho_nan_entry
         integer :: rho_nan_input, jaco_u_nan_input, jaco_v_nan_input
         integer :: u_nan_input, v_nan_input
         integer :: div_nan_horizontal, div_nan_final
@@ -316,6 +317,10 @@ contains
 
         !$acc data present(div, u, v, w, dz, jaco, jaco_u, jaco_v, jaco_w, rho, dx, &
         !$acc              mf_my_u, mf_mx_v, mf_mxy) create(rho_i, u_met, v_met, w_met)
+
+        !$acc update self(rho)
+        rho_nan_entry = count(.not. ieee_is_finite(rho))
+        if (rho_nan_entry > 0) print *, "calc_divergence density NaNs at entry:", rho_nan_entry
 
         !Multiplication of U/V by metric terms, converting jacobian to staggered-grid where possible, otherwise making assumption of
         !Constant jacobian at edges
