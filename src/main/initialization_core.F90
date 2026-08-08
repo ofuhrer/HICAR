@@ -18,13 +18,21 @@ module hicar_initialization_core
 
 contains
 
-    subroutine initialize_atmospheric_winds(domain, options)
+    subroutine initialize_atmospheric_winds(domain, options, project_state)
         type(domain_t), intent(inout) :: domain
         type(options_t), intent(in) :: options
+        logical, intent(in), optional :: project_state
+
+        logical :: apply_projection
+
+        apply_projection = .true.
+        if (present(project_state)) apply_projection = project_state
 
         call init_winds(domain, options)
-        call update_winds(domain, options)
-        call write_requested_diagnostics()
+        if (apply_projection) then
+            call update_winds(domain, options)
+            call write_requested_diagnostics()
+        endif
     end subroutine initialize_atmospheric_winds
 
 
