@@ -15,7 +15,8 @@ module wind
                                   probe_lambda_pattern, probe_zero_corrections, &
                                   probe_apply_corrections, probe_record, probe_finalize, &
                                   probe_random_pattern, probe_compare_operator, &
-                                  adjoint_projection_is_enabled, reset_wind_solver_guess
+                                  adjoint_projection_is_enabled, reset_wind_solver_guess, &
+                                  canonicalize_adjoint_operator
     use iso_fortran_env, only : output_unit
     use icar_constants
     use domain_interface,  only : domain_t
@@ -1248,6 +1249,7 @@ contains
                              horz_only=.False., use_dqdt=.True.)
         !$acc update host(div)
         call probe_compare_operator(domain, div)
+        call canonicalize_adjoint_operator(domain)
 
         !$acc parallel default(present)
         !$acc loop gang vector collapse(3)
