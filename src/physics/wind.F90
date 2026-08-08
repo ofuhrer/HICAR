@@ -283,7 +283,7 @@ contains
         real, dimension(ims:ime,kms:kme-1,jms:jme) :: rho_i
         logical :: horz, dqdt, adv_den
         integer :: i, j, k
-        integer :: rho_nan_entry, rho_nan_metric, div_nan_final
+        integer :: div_nan_horizontal, div_nan_final
 
         horz = .False.
         if (present(horz_only)) horz=horz_only
@@ -313,17 +313,6 @@ contains
 
         !$acc data present(div, u, v, w, dz, jaco, jaco_u, jaco_v, jaco_w, rho, dx, &
         !$acc              mf_my_u, mf_mx_v, mf_mxy) create(rho_i, u_met, v_met, w_met)
-
-        rho_nan_entry = 0
-        !$acc parallel loop gang vector collapse(3) reduction(+:rho_nan_entry) present(rho)
-        do j = jms, jme
-            do k = kms, kme
-                do i = ims, ime
-                    if (rho(i,k,j) /= rho(i,k,j)) rho_nan_entry = rho_nan_entry + 1
-                enddo
-            enddo
-        enddo
-        if (rho_nan_entry > 0) write(*,*) "calc_divergence rho NaNs at entry:", rho_nan_entry
 
         !Multiplication of U/V by metric terms, converting jacobian to staggered-grid where possible, otherwise making assumption of
         !Constant jacobian at edges
@@ -455,19 +444,6 @@ contains
             endif ! end if use_dqdt
         end if ! end if advect_density
 
-        !$acc wait(0)
-        rho_nan_metric = 0
-        !$acc parallel loop gang vector collapse(3) reduction(+:rho_nan_metric) present(rho)
-        do j = jms, jme
-            do k = kms, kme
-                do i = ims, ime
-                    if (rho(i,k,j) /= rho(i,k,j)) rho_nan_metric = rho_nan_metric + 1
-                enddo
-            enddo
-        enddo
-        if (rho_nan_metric > 0) write(*,*) "calc_divergence rho NaNs after metrics:", rho_nan_metric
-
-
         ! Map factors (finite-volume form on the projected grid): each face
         ! flux is divided by its transverse factor (true face length =
         ! dx/m) and the cell sum is multiplied by the cell-area factor
@@ -485,6 +461,22 @@ contains
             enddo
             enddo
         enddo
+
+        !$acc wait(1)
+        div_nan_horizontal = 0
+        !$acc parallel loop gang vector collapse(3) reduction(+:div_nan_horizontal) present(div)
+        do j = jms, jme
+            do k = kms, kme
+                do i = ims, ime
+                    if (div(i,k,j) /= div(i,k,j)) then
+                        div_nan_horizontal = div_nan_horizontal + 1
+                    endif
+                enddo
+            enddo
+        enddo
+        if (div_nan_horizontal > 0) then
+            write(*,*) "calc_divergence horizontal NaNs:", div_nan_horizontal
+        endif
 
         if (.NOT.(horz)) then
             if (adv_den) then
