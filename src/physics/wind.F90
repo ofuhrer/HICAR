@@ -283,6 +283,7 @@ contains
         real, dimension(ims:ime,kms:kme-1,jms:jme) :: rho_i
         logical :: horz, dqdt, adv_den
         integer :: i, j, k
+        integer :: u_nan_metric, v_nan_metric
         integer :: div_nan_horizontal, div_nan_final
 
         horz = .False.
@@ -443,6 +444,29 @@ contains
                 !$acc end parallel
             endif ! end if use_dqdt
         end if ! end if advect_density
+
+        !$acc wait(0)
+        u_nan_metric = 0
+        !$acc parallel loop gang vector collapse(3) reduction(+:u_nan_metric) present(u_met)
+        do j = jms, jme
+            do k = kms, kme
+                do i = ims, ime+1
+                    if (u_met(i,k,j) /= u_met(i,k,j)) u_nan_metric = u_nan_metric + 1
+                enddo
+            enddo
+        enddo
+        if (u_nan_metric > 0) print *, "calc_divergence u_met NaNs:", u_nan_metric
+
+        v_nan_metric = 0
+        !$acc parallel loop gang vector collapse(3) reduction(+:v_nan_metric) present(v_met)
+        do j = jms, jme+1
+            do k = kms, kme
+                do i = ims, ime
+                    if (v_met(i,k,j) /= v_met(i,k,j)) v_nan_metric = v_nan_metric + 1
+                enddo
+            enddo
+        enddo
+        if (v_nan_metric > 0) print *, "calc_divergence v_met NaNs:", v_nan_metric
 
         ! Map factors (finite-volume form on the projected grid): each face
         ! flux is divided by its transverse factor (true face length =
