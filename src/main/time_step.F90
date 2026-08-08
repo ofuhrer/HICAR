@@ -372,6 +372,9 @@ contains
                 ! wind-update boundary so both paths form the density-weighted
                 ! projection from the same model state.
                 call domain%diagnostic_update(thermo_only=.True.)
+                if (options%general%debug) then
+                    call domain_check(domain, "post wind-boundary thermo refresh")
+                endif
                 call update_winds(domain, options)
                 call domain%wind_timer%stop()
 
