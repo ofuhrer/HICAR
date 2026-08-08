@@ -24,7 +24,7 @@ module wind
     use wind_thermal, only      : apply_thermal_winds, init_thermal_winds
     use mod_atm_utilities,   only : calc_froude, calc_Ri, calc_dry_stability
     use array_utilities,      only : smooth_array
-    use debug_module,     only : domain_check_winds
+    use debug_module,     only : domain_check, domain_check_winds
     use iso_c_binding,    only : c_double
     use ieee_arithmetic,  only : ieee_is_finite
     use mpi
@@ -779,11 +779,13 @@ contains
         ! Keep density consistent across process halos for both cold-start and
         ! time-step calls before forming the density-weighted wind correction.
         call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%density)%v), corners=.True.)
+        if (options%general%debug) call domain_check(domain, "Post update_winds::density_halo")
 
         !do this now, so that we will have some values in data_3d when calling update_stability
         if (options%general%debug) call domain_check_winds(domain, "Pre update_winds::apply_base_from_forcing",dqdt=.True.)
         call apply_base_from_forcing(domain, w_var_given, wind_dt_seconds)
         if (options%general%debug) call domain_check_winds(domain, "Post update_winds::apply_base_from_forcing",dqdt=.True.)
+        if (options%general%debug) call domain_check(domain, "Post update_winds::apply_base_thermo")
 
         if (( (options%wind%alpha_const<=0 .and. (options%physics%windtype==kITERATIVE_WINDS)) .or. options%wind%Sx) ) then
             call update_stability(domain, options)
@@ -791,6 +793,7 @@ contains
             ! before the terrain corrections use neighboring mass-cell values.
             call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%blk_ri)%v), corners=.True.)
             call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%froude)%v), corners=.True.)
+            if (options%general%debug) call domain_check(domain, "Post update_winds::stability")
         endif
 
 
@@ -810,6 +813,7 @@ contains
             call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%u)%v),do_dqdt=.True.,corners=.True.)
             call domain%halo%exch_var(domain%vars_3d(domain%var_indx(kVARS%v)%v),do_dqdt=.True.,corners=.True.)
             if (options%general%debug) call domain_check_winds(domain, "Post update_winds::apply_Sx",dqdt=.True.)
+            if (options%general%debug) call domain_check(domain, "Post update_winds::apply_Sx_thermo")
         endif 
 
         if (options%wind%thermal) then
