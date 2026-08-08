@@ -284,6 +284,8 @@ contains
         logical :: horz, dqdt, adv_den
         integer :: i, j, k
         integer :: u_nan_metric, v_nan_metric
+        integer :: rho_nan_input, jaco_u_nan_input, jaco_v_nan_input
+        integer :: u_nan_input, v_nan_input
         integer :: div_nan_horizontal, div_nan_final
 
         horz = .False.
@@ -467,6 +469,24 @@ contains
             enddo
         enddo
         if (v_nan_metric > 0) print *, "calc_divergence v_met NaNs:", v_nan_metric
+
+        if ((u_nan_metric > 0) .or. (v_nan_metric > 0)) then
+            if (dqdt) then
+                !$acc update self(rho, jaco_u, jaco_v, u_dqdt_3d, v_dqdt_3d)
+                u_nan_input = count(.not. ieee_is_finite(u_dqdt_3d))
+                v_nan_input = count(.not. ieee_is_finite(v_dqdt_3d))
+            else
+                !$acc update self(rho, jaco_u, jaco_v, u, v)
+                u_nan_input = count(.not. ieee_is_finite(u))
+                v_nan_input = count(.not. ieee_is_finite(v))
+            endif
+            rho_nan_input = count(.not. ieee_is_finite(rho))
+            jaco_u_nan_input = count(.not. ieee_is_finite(jaco_u))
+            jaco_v_nan_input = count(.not. ieee_is_finite(jaco_v))
+            print *, "calc_divergence input NaNs (dqdt,adv_den,rho,ju,jv,u,v):", &
+                     dqdt, adv_den, rho_nan_input, jaco_u_nan_input, &
+                     jaco_v_nan_input, u_nan_input, v_nan_input
+        endif
 
         ! Map factors (finite-volume form on the projected grid): each face
         ! flux is divided by its transverse factor (true face length =
