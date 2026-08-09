@@ -727,14 +727,15 @@ contains
             associate(snow_temperature => domain%vars_3d(domain%var_indx(kVARS%snow_temperature)%v)%data_3d, &
                       Sice => domain%vars_3d(domain%var_indx(kVARS%Sice)%v)%data_3d, &
                       Sliq => domain%vars_3d(domain%var_indx(kVARS%Sliq)%v)%data_3d, &
+                      snow_nlayers => domain%vars_2d(domain%var_indx(kVARS%snow_nlayers)%v)%data_2di, &
                       snow_layer_depth => domain%vars_3d(domain%var_indx(kVARS%snow_layer_depth)%v)%data_3d)
-            !$acc parallel loop gang vector collapse(2) present(snow_temperature, Sice, Sliq, snow_layer_depth, nmp_snow_t, nmp_snicexy, nmp_snliqxy, nmp_zsnsoxy) firstprivate(use_input_snow_temperature)
+            !$acc parallel loop gang vector collapse(2) present(snow_temperature, Sice, Sliq, snow_nlayers, snow_layer_depth, nmp_snow_t, nmp_snicexy, nmp_snliqxy, nmp_zsnsoxy) firstprivate(use_input_snow_temperature)
             do j = jms, jme
                 do i = ims, ime
                     !$acc loop seq
                     do k = 1, num_snow_layers
                         if (use_input_snow_temperature .and. &
-                            k > num_snow_layers + nmp_snow_nlayers(i,j)) then
+                            k > num_snow_layers + snow_nlayers(i,j)) then
                             ! Noah-MP normally initializes active layers from
                             ! ground temperature. Preserve the remapped bulk
                             ! snow temperature instead; inactive slots retain
