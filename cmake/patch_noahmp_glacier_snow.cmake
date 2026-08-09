@@ -67,3 +67,38 @@ else()
 endif()
 
 file(WRITE "${init_file}" "${source}")
+
+# The pinned OpenACC canopy implementation calls the sunlit and shaded
+# stomatal-resistance kernels from one long-lived parallel region.  Make the
+# selector explicitly private so gangs cannot observe another gang's phase.
+set(vegetated_energy_file
+    "${NOAHMP_SOURCE_DIR}/src/SurfaceEnergyFluxVegetatedMod.F90")
+if(NOT EXISTS "${vegetated_energy_file}")
+    message(FATAL_ERROR
+        "Pinned Noah-MP vegetated surface-energy source not found: ${vegetated_energy_file}")
+endif()
+
+file(READ "${vegetated_energy_file}" vegetated_energy_source)
+set(index_shade_private "   !$acc private(IndexShade)\n")
+string(FIND "${vegetated_energy_source}" "${index_shade_private}"
+       index_shade_already_private)
+if(NOT index_shade_already_private EQUAL -1)
+    message(STATUS "Pinned Noah-MP IndexShade is already explicitly private")
+else()
+    set(index_shade_anchor
+        "   !$acc private(MoistureFluxSfc, HeatCapacCan)\n")
+    string(FIND "${vegetated_energy_source}" "${index_shade_anchor}"
+           index_shade_patch_site)
+    if(index_shade_patch_site EQUAL -1)
+        message(FATAL_ERROR
+            "Pinned Noah-MP canopy parallel region changed; refusing an unverified patch")
+    endif()
+    set(index_shade_replacement
+        "   !$acc private(MoistureFluxSfc, HeatCapacCan) &\n${index_shade_private}")
+    string(REPLACE "${index_shade_anchor}"
+                   "${index_shade_replacement}"
+                   vegetated_energy_source "${vegetated_energy_source}")
+    message(STATUS "Patched pinned Noah-MP to privatize canopy IndexShade")
+endif()
+
+file(WRITE "${vegetated_energy_file}" "${vegetated_energy_source}")
