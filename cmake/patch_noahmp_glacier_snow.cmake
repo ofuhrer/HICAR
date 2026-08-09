@@ -68,37 +68,50 @@ endif()
 
 file(WRITE "${init_file}" "${source}")
 
-# The pinned OpenACC canopy implementation calls the sunlit and shaded
-# stomatal-resistance kernels from one long-lived parallel region.  Make the
-# selector explicitly private so gangs cannot observe another gang's phase.
-set(vegetated_energy_file
-    "${NOAHMP_SOURCE_DIR}/src/SurfaceEnergyFluxVegetatedMod.F90")
-if(NOT EXISTS "${vegetated_energy_file}")
-    message(FATAL_ERROR
-        "Pinned Noah-MP vegetated surface-energy source not found: ${vegetated_energy_file}")
-endif()
+# Noah-MP 9e293596 fused the vegetated surface-energy kernels into one
+# long-lived OpenACC parallel region.  Its numerical scratch scalars are then
+# private per gang while vector lanes use them concurrently.  Reversing only
+# that execution-organization commit restores the earlier independent kernels,
+# where the same scratch is private per loop iteration.  The equations and
+# Noah-MP options are unchanged.
+find_package(Git REQUIRED)
+set(persistent_region_commit
+    "9e29359640362cd5f5215e0810c3bb859b5ebb5d")
 
-file(READ "${vegetated_energy_file}" vegetated_energy_source)
-set(index_shade_private "   !$acc private(IndexShade)\n")
-string(FIND "${vegetated_energy_source}" "${index_shade_private}"
-       index_shade_already_private)
-if(NOT index_shade_already_private EQUAL -1)
-    message(STATUS "Pinned Noah-MP IndexShade is already explicitly private")
-else()
-    set(index_shade_anchor
-        "   !$acc private(MoistureFluxSfc, HeatCapacCan)\n")
-    string(FIND "${vegetated_energy_source}" "${index_shade_anchor}"
-           index_shade_patch_site)
-    if(index_shade_patch_site EQUAL -1)
-        message(FATAL_ERROR
-            "Pinned Noah-MP canopy parallel region changed; refusing an unverified patch")
+function(run_persistent_region_patch direction check_only result_variable error_variable)
+    set(apply_arguments "apply" "${direction}")
+    if(check_only)
+        list(APPEND apply_arguments "--check")
     endif()
-    set(index_shade_replacement
-        "   !$acc private(MoistureFluxSfc, HeatCapacCan) &\n${index_shade_private}")
-    string(REPLACE "${index_shade_anchor}"
-                   "${index_shade_replacement}"
-                   vegetated_energy_source "${vegetated_energy_source}")
-    message(STATUS "Patched pinned Noah-MP to privatize canopy IndexShade")
-endif()
+    list(APPEND apply_arguments "-")
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${NOAHMP_SOURCE_DIR}"
+                show --format= --binary "${persistent_region_commit}"
+        COMMAND "${GIT_EXECUTABLE}" -C "${NOAHMP_SOURCE_DIR}"
+                ${apply_arguments}
+        RESULT_VARIABLE patch_result
+        ERROR_VARIABLE patch_error
+    )
+    set(${result_variable} "${patch_result}" PARENT_SCOPE)
+    set(${error_variable} "${patch_error}" PARENT_SCOPE)
+endfunction()
 
-file(WRITE "${vegetated_energy_file}" "${vegetated_energy_source}")
+run_persistent_region_patch("--reverse" TRUE reverse_check reverse_error)
+if(reverse_check EQUAL 0)
+    run_persistent_region_patch("--reverse" FALSE reverse_result reverse_error)
+    if(NOT reverse_result EQUAL 0)
+        message(FATAL_ERROR
+            "Failed to restore separate Noah-MP vegetated kernels: ${reverse_error}")
+    endif()
+    message(STATUS "Restored separate Noah-MP vegetated OpenACC kernels")
+else()
+    # If the forward patch applies cleanly, the source is already in the
+    # deliberately reverted state.  Anything else is an unknown mixed tree.
+    run_persistent_region_patch("" TRUE forward_check forward_error)
+    if(NOT forward_check EQUAL 0)
+        message(FATAL_ERROR
+            "Pinned Noah-MP vegetated kernel source changed; refusing an unverified patch: "
+            "${reverse_error}; ${forward_error}")
+    endif()
+    message(STATUS "Separate Noah-MP vegetated OpenACC kernels already restored")
+endif()
