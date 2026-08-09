@@ -78,15 +78,19 @@ find_package(Git REQUIRED)
 set(persistent_region_commit
     "9e29359640362cd5f5215e0810c3bb859b5ebb5d")
 
-function(run_persistent_region_patch direction check_only result_variable error_variable)
+function(run_persistent_region_patch direction check_only result_variable error_variable patch_commit)
     set(apply_arguments "apply" "${direction}")
     if(check_only)
         list(APPEND apply_arguments "--check")
     endif()
     list(APPEND apply_arguments "-")
+    set(show_arguments "show" "--format=" "--binary" "${patch_commit}")
+    if(ARGN)
+        list(APPEND show_arguments "--" ${ARGN})
+    endif()
     execute_process(
         COMMAND "${GIT_EXECUTABLE}" -C "${NOAHMP_SOURCE_DIR}"
-                show --format= --binary "${persistent_region_commit}"
+                ${show_arguments}
         COMMAND "${GIT_EXECUTABLE}" -C "${NOAHMP_SOURCE_DIR}"
                 ${apply_arguments}
         RESULT_VARIABLE patch_result
@@ -96,9 +100,11 @@ function(run_persistent_region_patch direction check_only result_variable error_
     set(${error_variable} "${patch_error}" PARENT_SCOPE)
 endfunction()
 
-run_persistent_region_patch("--reverse" TRUE reverse_check reverse_error)
+run_persistent_region_patch("--reverse" TRUE reverse_check reverse_error
+                            "${persistent_region_commit}")
 if(reverse_check EQUAL 0)
-    run_persistent_region_patch("--reverse" FALSE reverse_result reverse_error)
+    run_persistent_region_patch("--reverse" FALSE reverse_result reverse_error
+                                "${persistent_region_commit}")
     if(NOT reverse_result EQUAL 0)
         message(FATAL_ERROR
             "Failed to restore separate Noah-MP vegetated kernels: ${reverse_error}")
@@ -107,11 +113,47 @@ if(reverse_check EQUAL 0)
 else()
     # If the forward patch applies cleanly, the source is already in the
     # deliberately reverted state.  Anything else is an unknown mixed tree.
-    run_persistent_region_patch("" TRUE forward_check forward_error)
+    run_persistent_region_patch("" TRUE forward_check forward_error
+                                "${persistent_region_commit}")
     if(NOT forward_check EQUAL 0)
         message(FATAL_ERROR
             "Pinned Noah-MP vegetated kernel source changed; refusing an unverified patch: "
             "${reverse_error}; ${forward_error}")
     endif()
     message(STATUS "Separate Noah-MP vegetated OpenACC kernels already restored")
+endif()
+
+# Noah-MP 9a252eac made the analogous unsafe fusion in the bare-ground
+# surface-energy path.  Reverse only the three execution-organization files;
+# the same commit also changed unrelated snow, soil-water, and radiation code
+# that must remain at the pinned revision.
+set(bare_persistent_region_commit
+    "9a252eac8ea425fe789d4ff68bca9d3c84465938")
+set(bare_persistent_region_files
+    "src/SurfaceEnergyFluxBareGroundMod.F90"
+    "src/ResistanceBareGroundMostMod.F90"
+    "src/ResistanceBareGroundChen97Mod.F90")
+
+run_persistent_region_patch("--reverse" TRUE bare_reverse_check bare_reverse_error
+                            "${bare_persistent_region_commit}"
+                            ${bare_persistent_region_files})
+if(bare_reverse_check EQUAL 0)
+    run_persistent_region_patch("--reverse" FALSE bare_reverse_result bare_reverse_error
+                                "${bare_persistent_region_commit}"
+                                ${bare_persistent_region_files})
+    if(NOT bare_reverse_result EQUAL 0)
+        message(FATAL_ERROR
+            "Failed to restore separate Noah-MP bare-ground kernels: ${bare_reverse_error}")
+    endif()
+    message(STATUS "Restored separate Noah-MP bare-ground OpenACC kernels")
+else()
+    run_persistent_region_patch("" TRUE bare_forward_check bare_forward_error
+                                "${bare_persistent_region_commit}"
+                                ${bare_persistent_region_files})
+    if(NOT bare_forward_check EQUAL 0)
+        message(FATAL_ERROR
+            "Pinned Noah-MP bare-ground kernel source changed; refusing an unverified patch: "
+            "${bare_reverse_error}; ${bare_forward_error}")
+    endif()
+    message(STATUS "Separate Noah-MP bare-ground OpenACC kernels already restored")
 endif()
