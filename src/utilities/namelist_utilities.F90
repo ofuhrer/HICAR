@@ -35,6 +35,18 @@ module namelist_utils
 
 contains
 
+    !> Return whether alpha_const selects the dynamic formulation or a supported
+    !! positive constant.  The valid set is deliberately disjoint: negative
+    !! values other than the documented -1 sentinel must not silently enable
+    !! dynamic alpha.
+    pure elemental logical function alpha_const_is_valid(value)
+        implicit none
+        real, intent(in) :: value
+
+        alpha_const_is_valid = (value == -1.0) .or. &
+                               (value >= 0.01 .and. value <= 1.0)
+    end function alpha_const_is_valid
+
     !> -------------------------------
     !! Check options for consistency among different nests
     !!
@@ -207,7 +219,12 @@ contains
             if (STD_OUT_PE) write(*,*) "Error: '", trim(name), "' does not have a min/max value"
             error stop
         endif
-        if (.not.(var==default_val)) then
+        if (trim(name) == "alpha_const") then
+            if (.not. alpha_const_is_valid(var) .and. STD_OUT_PE) then
+                write(*,*) "Error: 'alpha_const' must be -1 (dynamic) or between 0.01 and 1.0: ", var
+                stop
+            endif
+        elseif (.not.(var==default_val)) then
             if (var > minmax(2) .and. STD_OUT_PE) then
                 write(*,*) "Error: '", trim(name), "' is greater than ", minmax(2), " : ", var
                 stop
@@ -3931,12 +3948,12 @@ contains
                 default = "30.0"
                 group = "Wind"
             case ("alpha_const")
-                description = "Option for setting the alpha parameter in the wind=3 euqtions to a constant"//achar(10)//BLNK_CHR_N// &
-                              "(between 0.2 and 2). Default of -1.0 allows for dynamic alpha."//achar(10)//BLNK_CHR_N// &
-                              "larger values allow for more adjustment of vertical winds (less stable)"//achar(10)//BLNK_CHR_N// &
-                              "smaller values allow for less adjustment of vertical winds (more stable)"
-                min = 0.2
-                max = 2.0
+                description = "Alpha for the wind=3 variational adjustment. Set -1 to diagnose alpha dynamically"//achar(10)//BLNK_CHR_N// &
+                              "from the local Froude number, or use a constant between 0.01 and 1.0."//achar(10)//BLNK_CHR_N// &
+                              "Larger alpha penalizes vertical-wind corrections more strongly and favors"//achar(10)//BLNK_CHR_N// &
+                              "horizontal deflection; smaller positive alpha permits larger vertical corrections."
+                min = -1.0
+                max = 1.0
                 default = "1.0"
                 group = "Wind"
             case ("TPI_dmax")
