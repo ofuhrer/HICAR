@@ -995,9 +995,9 @@ contains
                     call water_simple(options,                              &
                                       domain%vars_2d(domain%var_indx(kVARS%sst)%v)%data_2d,                   &
                                       domain%vars_2d(domain%var_indx(kVARS%surface_pressure)%v)%data_2d,      &
-                                      windspd,                              &
                                       domain%vars_3d(domain%var_indx(kVARS%water_vapor)%v)%data_3d,       &
                                       domain%vars_3d(domain%var_indx(kVARS%temperature)%v)%data_3d,       &
+                                      domain%vars_3d(domain%var_indx(kVARS%density)%v)%data_3d,           &
                                       domain%vars_2d(domain%var_indx(kVARS%sensible_heat)%v)%data_2d,         &
                                       domain%vars_2d(domain%var_indx(kVARS%latent_heat)%v)%data_2d,           &
                                       land_mask,                     &
