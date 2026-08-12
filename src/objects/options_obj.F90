@@ -3307,6 +3307,10 @@ contains
         ! --- domain group (behavior-affecting fields only) ---
         call append_kv_real   (config_str, pos, 'domain', 'dx',                          this%domain%dx)
         call append_kv_int    (config_str, pos, 'domain', 'nz',                          this%domain%nz)
+        call append_kv_int    (config_str, pos, 'domain', 'auto_level',                  this%domain%auto_level)
+        call append_kv_real   (config_str, pos, 'domain', 'height_lowest_level',         this%domain%height_lowest_level)
+        call append_kv_real   (config_str, pos, 'domain', 'model_top_height',            this%domain%model_top_height)
+        call append_kv_real   (config_str, pos, 'domain', 'stretch_fac',                 this%domain%stretch_fac)
         if (allocated(this%domain%dz_levels)) then
             call append_kv_real_array(config_str, pos, 'domain', 'dz_levels', this%domain%dz_levels)
         endif

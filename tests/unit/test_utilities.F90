@@ -12,7 +12,7 @@
 module test_utilities
 
     use iso_fortran_env,         only : real32, real64
-    use icar_constants,          only : kVARS
+    use icar_constants,          only : kVARS, kMAX_CONFIG_STRING_LENGTH
     use string,                  only : get_double, get_real, get_integer, str
     use array_utilities,         only : linear_space
     use variable_dict_interface, only : var_dict_t
@@ -48,6 +48,7 @@ contains
             new_unittest("horizon_azimuth_index", test_horizon_azimuth_index), &
             new_unittest("terrain_shortwave_components", test_terrain_shortwave_components), &
             new_unittest("manual_vertical_grid", test_manual_vertical_grid), &
+            new_unittest("vertical_grid_config_serialization", test_vertical_grid_config_serialization), &
             new_unittest("fftshift_1d",      test_fftshift_1d), &
             new_unittest("fftshift_2d",      test_fftshift_2d), &
             new_unittest("cloud_fraction_level", test_cloud_fraction_level) &
@@ -282,6 +283,47 @@ contains
                           all(options%domain%dz_levels == manual), &
                    "auto_level=0 preserves supplied dz_levels")
     end subroutine test_manual_vertical_grid
+
+
+    subroutine test_vertical_grid_config_serialization(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        type(options_t), allocatable :: options
+        character(len=kMAX_CONFIG_STRING_LENGTH) :: config_str
+        character(len=64) :: real_value
+
+        allocate(options)
+        call options%init()
+        options%domain%auto_level = 2
+        options%domain%height_lowest_level = 20.5
+        options%domain%model_top_height = 28600.0
+        options%domain%stretch_fac = 1.08
+
+        ! These fields affect the generated vertical geometry and must remain
+        ! in the restart-comparison form of the serialized configuration.
+        call options%generate_config_string(config_str, exclude_restart_fields=.true.)
+
+        call check(error, index(config_str, 'domain/auto_level=2' // char(10)) > 0, &
+                   "auto_level missing from restart config serialization")
+        if (allocated(error)) return
+
+        write(real_value, '(ES16.9)') options%domain%height_lowest_level
+        call check(error, index(config_str, 'domain/height_lowest_level=' // &
+                   trim(adjustl(real_value)) // char(10)) > 0, &
+                   "height_lowest_level missing from restart config serialization")
+        if (allocated(error)) return
+
+        write(real_value, '(ES16.9)') options%domain%model_top_height
+        call check(error, index(config_str, 'domain/model_top_height=' // &
+                   trim(adjustl(real_value)) // char(10)) > 0, &
+                   "model_top_height missing from restart config serialization")
+        if (allocated(error)) return
+
+        write(real_value, '(ES16.9)') options%domain%stretch_fac
+        call check(error, index(config_str, 'domain/stretch_fac=' // &
+                   trim(adjustl(real_value)) // char(10)) > 0, &
+                   "stretch_fac missing from restart config serialization")
+    end subroutine test_vertical_grid_config_serialization
 
 
     subroutine test_fftshift_1d(error)
