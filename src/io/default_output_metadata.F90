@@ -3069,6 +3069,19 @@ contains
                                attribute_t("long_name",     "Specific humidity at 2m"),              &
                                attribute_t("units",         "kg kg-1"),                             &
                                attribute_t("coordinates",   "lat lon")]
+
+        !>------------------------------------------------------------
+        !!  Bulk surface specific humidity carried by Noah-MP
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%surface_specific_humidity) then
+            var_meta%name        = "qsfc"
+            var_meta%maxval      = 1.0
+            var_meta%minval      = 0.0
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("standard_name", "specific_humidity"),                   &
+                               attribute_t("long_name",     "Bulk surface specific humidity"),      &
+                               attribute_t("units",         "kg kg-1"),                             &
+                               attribute_t("coordinates",   "lat lon")]
         
         !>------------------------------------------------------------
         !!  10 meter height V component of wind field

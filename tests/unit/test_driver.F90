@@ -16,6 +16,7 @@ program test_driver
     use test_time, only : collect_time_suite
     use test_utilities, only : collect_utilities_suite
     use test_water_simple, only : collect_water_simple_suite
+    use test_lsm_state, only : collect_lsm_state_suite
     use mpi
 #ifdef _OPENACC
     use openacc
@@ -88,7 +89,8 @@ program test_driver
         new_testsuite("geo", collect_geo_suite), &
         new_testsuite("time", collect_time_suite), &
         new_testsuite("utilities", collect_utilities_suite), &
-        new_testsuite("water_simple", collect_water_simple_suite) &
+        new_testsuite("water_simple", collect_water_simple_suite), &
+        new_testsuite("lsm_state", collect_lsm_state_suite) &
         ]
     ! -------------------------------------------------------------------------------------------------
     ! -------------------------------------------------------------------------------------------------

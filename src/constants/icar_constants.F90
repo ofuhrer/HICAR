@@ -176,6 +176,7 @@ module icar_constants
         integer :: surface_rad_temperature
         integer :: temperature_2m
         integer :: humidity_2m
+        integer :: surface_specific_humidity
         integer :: temperature_2m_veg
         integer :: temperature_2m_bare
         integer :: mixing_ratio_2m_veg
