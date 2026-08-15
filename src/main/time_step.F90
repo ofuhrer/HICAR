@@ -11,8 +11,8 @@
 !!
 !! ----------------------------------------------------------------------------
 submodule(time_step) time_step_implementation
-    use iso_fortran_env, only : output_unit, int32
-    use mpi, only: MPI_REAL, MPI_MIN
+    use iso_fortran_env, only : output_unit, int32, int64, real64
+    use mpi, only: MPI_REAL, MPI_MIN, MPI_DOUBLE_PRECISION, MPI_SUM
     use string,                     only : as_string
     use microphysics,               only : mp
     use advection,                  only : advect
@@ -49,6 +49,65 @@ contains
         restart_trace_enabled = status == 0 .and. len_trim(value) > 0 .and. &
                                 trim(value) /= '0'
     end function restart_trace_enabled
+
+
+    logical function restart_trace_at_target(domain)
+        type(domain_t), intent(in) :: domain
+        character(len=64) :: value
+        integer :: status, read_status
+        real(real64) :: target_seconds
+
+        restart_trace_at_target = .false.
+        if (.not. restart_trace_enabled()) return
+        value = ''
+        call get_environment_variable('HICAR_RESTART_TRACE_TIME', value, status=status)
+        if (status /= 0 .or. len_trim(value) == 0) return
+        read(value, *, iostat=read_status) target_seconds
+        if (read_status /= 0) return
+        restart_trace_at_target = abs(domain%sim_time%seconds() - target_seconds) < 0.25_real64
+    end function restart_trace_at_target
+
+
+    subroutine trace_restart_phase(domain, phase)
+        type(domain_t), intent(inout) :: domain
+        character(len=*), intent(in) :: phase
+        real(real64) :: s_t2, s_u10, s_v10, s_skin
+        real(real64) :: local_sums(4), global_sums(4)
+        integer :: i, j, ierr
+        integer :: its, ite, jts, jte
+
+        if (.not. restart_trace_at_target(domain)) return
+        its = domain%its; ite = domain%ite
+        jts = domain%jts; jte = domain%jte
+        s_t2 = 0.0_real64; s_u10 = 0.0_real64; s_v10 = 0.0_real64
+        s_skin = 0.0_real64
+
+        associate(t2 => domain%vars_2d(domain%var_indx(kVARS%temperature_2m)%v)%data_2d, &
+                  u10 => domain%vars_2d(domain%var_indx(kVARS%u_10m)%v)%data_2d, &
+                  v10 => domain%vars_2d(domain%var_indx(kVARS%v_10m)%v)%data_2d, &
+                  skin => domain%vars_2d(domain%var_indx(kVARS%skin_temperature)%v)%data_2d)
+            !$acc update self(t2,u10,v10,skin)
+            do j = jts, jte
+                do i = its, ite
+                    s_t2 = s_t2 + real(t2(i,j), real64)
+                    s_u10 = s_u10 + real(u10(i,j), real64)
+                    s_v10 = s_v10 + real(v10(i,j), real64)
+                    s_skin = s_skin + real(skin(i,j), real64)
+                enddo
+            enddo
+        end associate
+
+        local_sums = [s_t2, s_u10, s_v10, s_skin]
+        call MPI_Allreduce(local_sums, global_sums, size(local_sums), &
+                           MPI_DOUBLE_PRECISION, MPI_SUM, domain%compute_comms, ierr)
+        if (STD_OUT_PE) then
+            write(output_unit,'(A,1X,A,1X,F20.3,4(1X,Z16.16))') ' RESTART_TRACE phase', &
+                trim(phase), domain%sim_time%seconds(), &
+                transfer(global_sums(1), 0_int64), transfer(global_sums(2), 0_int64), &
+                transfer(global_sums(3), 0_int64), transfer(global_sums(4), 0_int64)
+            flush(output_unit)
+        endif
+    end subroutine trace_restart_phase
 
 
     subroutine trace_restart_wind_state(domain)
@@ -476,6 +535,7 @@ contains
             call domain%diagnostic_timer%start()
             call domain%diagnostic_update()
             call domain%diagnostic_timer%stop()
+            call trace_restart_phase(domain, 'diagnostic')
 
 
             ! if an interactive run was requested than print status updates everytime at least 5% of the progress has been made
@@ -497,22 +557,27 @@ contains
                 call rad(domain, options, real(dt%seconds()))
                 if (options%general%debug) call domain_check(domain, "rad")
                 call domain%rad_timer%stop()
+                call trace_restart_phase(domain, 'radiation')
 
 
                 call domain%lsm_timer%start()
                 call sfc(domain, options, real(dt%seconds()))!, halo=1)
+                call trace_restart_phase(domain, 'surface')
                 call lsm(domain, options, real(dt%seconds()))!, halo=1)
                 if (options%general%debug) call domain_check(domain, "lsm")
                 call domain%lsm_timer%stop()
+                call trace_restart_phase(domain, 'lsm')
 
                 call domain%pbl_timer%start()
                 call pbl(domain, options, real(dt%seconds()))!, halo=1)
                 call domain%pbl_timer%stop()
+                call trace_restart_phase(domain, 'pbl')
 
                 call domain%ret_timer%start()
                 call domain%halo_3d_retrieve()
                 call domain%halo_2d_retrieve()
                 call domain%ret_timer%stop()
+                call trace_restart_phase(domain, 'halo')
 
                 if (options%adv%advect_density) then
                 ! if using advect_density winds need to be balanced at each update
@@ -524,6 +589,7 @@ contains
                 if (options%general%debug) call domain_check(domain, "pbl")
                 call convect(domain, options, real(dt%seconds()))!, halo=1)
                 if (options%general%debug) call domain_check(domain, "convect")
+                call trace_restart_phase(domain, 'convection')
                 
 
                 call domain%adv_timer%start()
@@ -531,13 +597,16 @@ contains
                 !call domain%enforce_limits()
                 if (options%general%debug) call domain_check(domain, "advect")
                 call domain%adv_timer%stop()
+                call trace_restart_phase(domain, 'advection')
 
                 call domain%lsm_timer%start()
                 call snow_drift_step(domain, options, real(dt%seconds()))!, halo=1)
                 if (options%general%debug) call domain_check(domain, "suspension")
                 call domain%lsm_timer%stop()
+                call trace_restart_phase(domain, 'snow_drift')
 
                 call integrate_physics_tendencies(domain, options, real(dt%seconds()))
+                call trace_restart_phase(domain, 'integrate')
 
                 ! Refresh p/exner/temperature/density from the post-advection,
                 ! post-tendency state so microphysics sees thermodynamics
@@ -548,11 +617,13 @@ contains
                 ! re-diagnoses pressure hydrostatically from the updated
                 ! theta_v.
                 call domain%diagnostic_update(thermo_only=.True.)
+                call trace_restart_phase(domain, 'thermo')
                                 
                 call domain%mp_timer%start()
                 call mp(domain, options, real(dt%seconds()))
                 if (options%general%debug) call domain_check(domain, "mp_halo")
                 call domain%mp_timer%stop()
+                call trace_restart_phase(domain, 'microphysics')
                 
 
             endif
