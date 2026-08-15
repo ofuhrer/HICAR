@@ -370,7 +370,7 @@ FetchContent_Declare(
 	GIT_SHALLOW       TRUE
 	PATCH_COMMAND      ${CMAKE_COMMAND}
 	                   -DRRTMGP_SOURCE_DIR=<SOURCE_DIR>
-	                   -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_rrtmgp_broadband_reduction.cmake
+	                   -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_rrtmgp_minmaxloc_intents.cmake
 )
 
 # rrtgmp supporting data for rrtmgp scheme
