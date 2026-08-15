@@ -33,6 +33,7 @@
 !!
 !!----------------------------------------------------------
 module land_surface
+    use iso_fortran_env, only : output_unit, int32, real64
     use module_water_simple, only : water_simple
     use module_water_lake,   only : lake, lakeini, nlevsoil, nlevsnow, nlevlake
     use module_water_flake,  only : flake_init, flake_step
@@ -43,6 +44,7 @@ module land_surface
     use mod_wrf_constants,   only : gravity, KARMAN, cp, R_d, XLV, rcp, STBOLT, epsilon
     use NoahmpHICARmainMod
     use NoahmpHICARinitMod
+    use NoahmpDriverMainMod, only : NoahmpDriverInit
     use NoahmpIOVarType, only : NoahmpIO_type
     use snow_model_driver, only : sm_var_request, sm_init, snow_model
     use time_object, only : canonical_time_seconds
@@ -102,6 +104,23 @@ module land_surface
     LOGICAL, allocatable, DIMENSION( :,: ) :: lake_mask_out
 
 contains
+
+    logical function restart_trace_target(domain, variable_name)
+        type(domain_t), intent(in) :: domain
+        character(len=*), intent(in) :: variable_name
+        character(len=64) :: value
+        integer :: status, read_status
+        real(real64) :: target_seconds
+
+        restart_trace_target = .false.
+        value = ''
+        call get_environment_variable(variable_name, value, status=status)
+        if (status /= 0 .or. len_trim(value) == 0) return
+        read(value, *, iostat=read_status) target_seconds
+        if (read_status /= 0) return
+        restart_trace_target = &
+            abs(domain%sim_time%seconds() - target_seconds) < 0.25_real64
+    end function restart_trace_target
 
     subroutine initialize_surface_specific_humidity(surface_specific_humidity, water_vapor, restart, &
                                                     ims, ime, kms, jms, jme)
@@ -1254,6 +1273,16 @@ contains
                 endif
 
                 !$acc update device(lsm_dt, landuse_name, julian_day)
+
+                if (restart_trace_target(domain, 'HICAR_RESTART_TRACE_TIME') .and. STD_OUT_PE) then
+                    write(output_unit,'(A,F20.3,I10,2(1X,Z8.8))') &
+                        ' RESTART_TRACE noah scalars ', domain%sim_time%seconds(), ITIMESTEP, &
+                        transfer(lsm_dt, 0_int32), transfer(julian_day, 0_int32)
+                    flush(output_unit)
+                endif
+                if (restart_trace_target(domain, 'HICAR_RESTART_RESET_NOAHMP_TIME')) then
+                    call NoahmpDriverInit(NoahmpIO(domain%nest_indx))
+                endif
 
                 ! Call the Noah-MP Land Surface Model
                 call NoahmpHICARmain(NoahmpIO(domain%nest_indx), ITIMESTEP,                              &
