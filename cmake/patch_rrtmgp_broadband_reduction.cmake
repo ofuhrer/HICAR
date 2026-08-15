@@ -10,6 +10,16 @@ if(NOT EXISTS "${kernel_file}")
 endif()
 
 file(READ "${kernel_file}" source)
+set(old_directive
+"  real(wp) :: scalar ! local scalar version
+
+  !$acc                         parallel loop gang vector collapse(2)
+  !$omp target teams distribute parallel do simd          collapse(2)")
+set(new_directive
+"  real(wp) :: scalar ! local scalar version
+
+  !$acc                         parallel loop gang vector collapse(2) private(scalar)
+  !$omp target teams distribute parallel do simd          collapse(2)")
 set(old_block
 "      scalar = 0.0_wp
 
@@ -26,6 +36,16 @@ set(new_block
       do igpt = 1, ngpt
         scalar = scalar + spectral_flux(icol, ilev, igpt)")
 
+string(FIND "${source}" "${new_directive}" directive_already_patched)
+if(directive_already_patched EQUAL -1)
+    string(FIND "${source}" "${old_directive}" directive_patch_site)
+    if(directive_patch_site EQUAL -1)
+        message(FATAL_ERROR
+            "Pinned RTE-RRTMGP broadband accumulator directive changed; refusing an unverified patch")
+    endif()
+    string(REPLACE "${old_directive}" "${new_directive}" source "${source}")
+endif()
+
 string(FIND "${source}" "${new_block}" already_patched)
 if(NOT already_patched EQUAL -1)
     message(STATUS
@@ -37,7 +57,8 @@ else()
             "Pinned RTE-RRTMGP broadband reduction changed; refusing an unverified patch")
     endif()
     string(REPLACE "${old_block}" "${new_block}" source "${source}")
-    file(WRITE "${kernel_file}" "${source}")
-    message(STATUS
-        "Patched pinned RTE-RRTMGP broadband reduction for deterministic NVHPC execution")
 endif()
+
+file(WRITE "${kernel_file}" "${source}")
+message(STATUS
+    "Patched pinned RTE-RRTMGP broadband reduction with a private ordered accumulator")
