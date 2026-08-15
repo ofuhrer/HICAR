@@ -44,11 +44,7 @@ module land_surface
     use mod_wrf_constants,   only : gravity, KARMAN, cp, R_d, XLV, rcp, STBOLT, epsilon
     use NoahmpHICARmainMod
     use NoahmpHICARinitMod
-    use NoahmpDriverMainMod, only : NoahmpDriverInit, noahmp
-    use ForcingVarInitMod, only : ForcingVarInitDefault, ForcingVarExitDevice
-    use EnergyVarInitMod,  only : EnergyVarInitDefault, EnergyVarExitDevice
-    use WaterVarInitMod,   only : WaterVarInitDefault, WaterVarExitDevice
-    use BiochemVarInitMod, only : BiochemVarInitDefault, BiochemVarExitDevice
+    use NoahmpDriverMainMod, only : NoahmpDriverInit
     use NoahmpIOVarType, only : NoahmpIO_type
     use snow_model_driver, only : sm_var_request, sm_init, snow_model
     use time_object, only : canonical_time_seconds
@@ -1285,7 +1281,7 @@ contains
                     flush(output_unit)
                 endif
                 if (restart_trace_target(domain, 'HICAR_RESTART_RESET_NOAHMP_TIME')) then
-                    call restart_reset_noahmp(NoahmpIO(domain%nest_indx))
+                    call NoahmpDriverInit(NoahmpIO(domain%nest_indx))
                 endif
 
                 ! Call the Noah-MP Land Surface Model
@@ -1708,38 +1704,6 @@ contains
             end associate
         endif
     end subroutine lsm_apply_fluxes
-
-    subroutine restart_reset_noahmp(noahmp_io)
-        implicit none
-        type(NoahmpIO_type), intent(inout) :: noahmp_io
-        character(len=16) :: component
-        integer :: env_length, env_status
-
-        component = ''
-        call get_environment_variable('HICAR_RESTART_RESET_NOAHMP_COMPONENT', component, &
-                                      length=env_length, status=env_status)
-        if (env_status /= 0 .or. env_length == 0) then
-            call NoahmpDriverInit(noahmp_io)
-            return
-        endif
-
-        select case (trim(component))
-        case ('forcing')
-            call ForcingVarExitDevice(noahmp)
-            call ForcingVarInitDefault(noahmp)
-        case ('energy')
-            call EnergyVarExitDevice(noahmp)
-            call EnergyVarInitDefault(noahmp)
-        case ('water')
-            call WaterVarExitDevice(noahmp)
-            call WaterVarInitDefault(noahmp)
-        case ('biochem')
-            call BiochemVarExitDevice(noahmp)
-            call BiochemVarInitDefault(noahmp)
-        case default
-            error stop 'Unknown HICAR_RESTART_RESET_NOAHMP_COMPONENT'
-        end select
-    end subroutine restart_reset_noahmp
 
     subroutine allocate_noah_data(num_soil_layers, num_snow_layers)
         implicit none
