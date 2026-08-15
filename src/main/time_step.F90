@@ -11,7 +11,7 @@
 !!
 !! ----------------------------------------------------------------------------
 submodule(time_step) time_step_implementation
-    use iso_fortran_env, only : output_unit
+    use iso_fortran_env, only : output_unit, int32
     use mpi, only: MPI_REAL, MPI_MIN
     use string,                     only : as_string
     use microphysics,               only : mp
@@ -39,6 +39,50 @@ submodule(time_step) time_step_implementation
     real :: max_u, max_v, max_w
 
 contains
+
+    logical function restart_trace_enabled()
+        character(len=16) :: value
+        integer :: status
+
+        value = ''
+        call get_environment_variable('HICAR_RESTART_TRACE', value, status=status)
+        restart_trace_enabled = status == 0 .and. len_trim(value) > 0 .and. &
+                                trim(value) /= '0'
+    end function restart_trace_enabled
+
+
+    subroutine trace_restart_wind_state(domain)
+        type(domain_t), intent(inout) :: domain
+        integer :: i, j, k
+
+        if (.not. restart_trace_enabled() .or. .not. STD_OUT_PE) return
+
+        i = min(domain%ite, domain%its + 9)
+        j = min(domain%jte, domain%jts + 11)
+        k = min(domain%kte, domain%kms + 67)
+        associate(u => domain%vars_3d(domain%var_indx(kVARS%u)%v)%data_3d, &
+                  v => domain%vars_3d(domain%var_indx(kVARS%v)%v)%data_3d, &
+                  w => domain%vars_3d(domain%var_indx(kVARS%w)%v)%data_3d, &
+                  wr => domain%vars_3d(domain%var_indx(kVARS%w_real)%v)%data_3d, &
+                  uf => domain%vars_3d(domain%var_indx(kVARS%u)%v)%dqdt_3d, &
+                  vf => domain%vars_3d(domain%var_indx(kVARS%v)%v)%dqdt_3d, &
+                  wf => domain%vars_3d(domain%var_indx(kVARS%w)%v)%dqdt_3d, &
+                  theta => domain%vars_3d(domain%var_indx(kVARS%potential_temperature)%v)%data_3d, &
+                  qv => domain%vars_3d(domain%var_indx(kVARS%water_vapor)%v)%data_3d, &
+                  rho => domain%vars_3d(domain%var_indx(kVARS%density)%v)%data_3d)
+            !$acc update self(u(i,k,j), v(i,k,j), w(i,k,j), wr(i,k,j))
+            !$acc update self(uf(i,k,j), vf(i,k,j), wf(i,k,j))
+            !$acc update self(theta(i,k,j), qv(i,k,j), rho(i,k,j))
+            write(output_unit,'(A,F20.3,3I6,10(1X,Z8.8))') ' RESTART_TRACE wind ', &
+                domain%sim_time%seconds(), i, j, k, &
+                transfer(u(i,k,j), 0_int32), transfer(v(i,k,j), 0_int32), &
+                transfer(w(i,k,j), 0_int32), transfer(wr(i,k,j), 0_int32), &
+                transfer(uf(i,k,j), 0_int32), transfer(vf(i,k,j), 0_int32), &
+                transfer(wf(i,k,j), 0_int32), transfer(theta(i,k,j), 0_int32), &
+                transfer(qv(i,k,j), 0_int32), transfer(rho(i,k,j), 0_int32)
+            flush(output_unit)
+        end associate
+    end subroutine trace_restart_wind_state
 
     !>------------------------------------------------------------
     !!  Calculate the maximum stable time step given some CFL criteria
@@ -373,6 +417,7 @@ contains
                 ! projection from the same model state.
                 call domain%diagnostic_update(thermo_only=.True.)
                 call update_winds(domain, options)
+                call trace_restart_wind_state(domain)
                 call domain%wind_timer%stop()
 
                 !Now that new winds have been calculated, get new time step in seconds, and see if they require adapting the time step
