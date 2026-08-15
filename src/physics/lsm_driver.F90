@@ -43,6 +43,8 @@ module land_surface
     use mod_wrf_constants,   only : gravity, KARMAN, cp, R_d, XLV, rcp, STBOLT, epsilon
     use NoahmpHICARmainMod
     use NoahmpHICARinitMod
+    use NoahmpDriverMainMod, only : noahmp
+    use EnergyVarInitMod, only : EnergyVarInitDefault, EnergyVarExitDevice
     use NoahmpIOVarType, only : NoahmpIO_type
     use snow_model_driver, only : sm_var_request, sm_init, snow_model
     use time_object, only : canonical_time_seconds
@@ -1254,6 +1256,14 @@ contains
                 endif
 
                 !$acc update device(lsm_dt, landuse_name, julian_day)
+
+                ! Noah-MP used to initialize its column workspace on every call.
+                ! Its persistent-object optimization retained the energy workspace
+                ! across calls, while a restarted process still begins with fresh
+                ! values. Recreate only that workspace before the input transfer so
+                ! uninterrupted and restarted trajectories use the same state.
+                call EnergyVarExitDevice(noahmp)
+                call EnergyVarInitDefault(noahmp)
 
                 ! Call the Noah-MP Land Surface Model
                 call NoahmpHICARmain(NoahmpIO(domain%nest_indx), ITIMESTEP,                              &
