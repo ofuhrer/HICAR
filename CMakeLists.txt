@@ -368,6 +368,9 @@ FetchContent_Declare(
 	GIT_REPOSITORY    https://github.com/earth-system-radiation/rte-rrtmgp.git
 	GIT_TAG           v1.9.3
 	GIT_SHALLOW       TRUE
+	PATCH_COMMAND      ${CMAKE_COMMAND}
+	                   -DRRTMGP_SOURCE_DIR=<SOURCE_DIR>
+	                   -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patch_rrtmgp_broadband_reduction.cmake
 )
 
 # rrtgmp supporting data for rrtmgp scheme
