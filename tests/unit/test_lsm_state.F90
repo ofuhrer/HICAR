@@ -40,18 +40,15 @@ contains
         !$acc update self(surface_humidity)
         call check(error, all(surface_humidity == water_vapor(:,kms,:)), &
                    "cold start must seed surface humidity from the lowest atmospheric level")
-        if (allocated(error)) then
-            !$acc end data
-            return
+        if (.not. allocated(error)) then
+            surface_humidity = restart_value
+            !$acc update device(surface_humidity)
+            call initialize_surface_specific_humidity(surface_humidity, water_vapor, .true., &
+                                                      ims, ime, kms, jms, jme)
+            !$acc update self(surface_humidity)
+            call check(error, all(surface_humidity == restart_value), &
+                       "restart must retain checkpointed surface humidity")
         endif
-
-        surface_humidity = restart_value
-        !$acc update device(surface_humidity)
-        call initialize_surface_specific_humidity(surface_humidity, water_vapor, .true., &
-                                                  ims, ime, kms, jms, jme)
-        !$acc update self(surface_humidity)
-        call check(error, all(surface_humidity == restart_value), &
-                   "restart must retain checkpointed surface humidity")
         !$acc end data
     end subroutine test_surface_humidity_cold_start_and_restart
 
