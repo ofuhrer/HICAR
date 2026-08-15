@@ -1468,8 +1468,8 @@ contains
                     ncol = (ite - its + 1)*(jb_e - jb_s + 1)
                     nlay = (kte - kts + 1)
 
-                    reimin = MAX(cloud_optics_lw%get_min_radius_ice(), cloud_optics_sw%get_min_radius_ice()) 
-                    reimax = MIN(cloud_optics_lw%get_max_radius_ice(), cloud_optics_sw%get_max_radius_ice()) 
+                    reimin = MAX(cloud_optics_lw%get_min_diameter_ice(), cloud_optics_sw%get_min_diameter_ice())
+                    reimax = MIN(cloud_optics_lw%get_max_diameter_ice(), cloud_optics_sw%get_max_diameter_ice())
 
                     relmin = MAX(cloud_optics_lw%get_min_radius_liq(), cloud_optics_sw%get_min_radius_liq())
                     relmax = MIN(cloud_optics_lw%get_max_radius_liq(), cloud_optics_sw%get_max_radius_liq())

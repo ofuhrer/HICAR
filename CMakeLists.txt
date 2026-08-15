@@ -366,7 +366,7 @@ endif()
 FetchContent_Declare(
 	rte-rrtmgp
 	GIT_REPOSITORY    https://github.com/earth-system-radiation/rte-rrtmgp.git
-	GIT_TAG           v1.9.2
+	GIT_TAG           v1.9.3
 	GIT_SHALLOW       TRUE
 )
 
@@ -422,11 +422,17 @@ set(BUILD_C_HEADERS OFF)
 #   default -> portable Fortran kernels for CPU (multiprocessor) builds
 if(OPENACC)
 	set(KERNEL_MODE "accel" CACHE STRING "Select the kernel mode for rte-rrtmgp" FORCE)
+	set(RTE_KERNEL_MODE "accel" CACHE STRING "Select the v1.9.3+ rte-rrtmgp kernel mode" FORCE)
 else()
 	set(KERNEL_MODE "default" CACHE STRING "Select the kernel mode for rte-rrtmgp" FORCE)
+	set(RTE_KERNEL_MODE "default" CACHE STRING "Select the v1.9.3+ rte-rrtmgp kernel mode" FORCE)
 endif()
 message(STATUS "rte-rrtmgp KERNEL_MODE: ${KERNEL_MODE}")
+message(STATUS "rte-rrtmgp RTE_KERNEL_MODE: ${RTE_KERNEL_MODE}")
 set(BUILD_SHARED_LIBS OFF)
+set(RTE_BUILD_TESTING OFF CACHE BOOL "Disable rte-rrtmgp tests" FORCE)
+set(RTE_BUILD_C_HEADERS OFF CACHE BOOL "Disable rte-rrtmgp C headers" FORCE)
+set(RTE_BUILD_SHARED_LIBS OFF CACHE BOOL "Build rte-rrtmgp statically" FORCE)
 
 # rte-rrtmgp's frontend carries OpenMP *target-offload* (`!$omp target ... map`)
 # directives next to its OpenACC ones. The CPU (default) kernels are plain
