@@ -10,23 +10,34 @@ if(NOT EXISTS "${kernel_file}")
 endif()
 
 file(READ "${kernel_file}" source)
-set(old_directive
-"  real(wp) :: scalar ! local scalar version
+set(original_block
+"  integer  :: icol, ilev, igpt
+  real(wp) :: scalar ! local scalar version
 
   !$acc                         parallel loop gang vector collapse(2)
-  !$omp target teams distribute parallel do simd          collapse(2)")
-set(new_directive
-"  real(wp) :: scalar ! local scalar version
+  !$omp target teams distribute parallel do simd          collapse(2)
+  do ilev = 1, nlev
+    do icol = 1, ncol
 
-  !$acc                         parallel loop gang vector collapse(2) private(scalar)
-  !$omp target teams distribute parallel do simd          collapse(2)")
-set(old_block
-"      scalar = 0.0_wp
+      scalar = 0.0_wp
 
       do igpt = 1, ngpt
-        scalar = scalar + spectral_flux(icol, ilev, igpt)")
-set(new_block
-"      scalar = 0.0_wp
+        scalar = scalar + spectral_flux(icol, ilev, igpt)
+      end do
+
+      broadband_flux(icol, ilev) = factor * scalar
+    end do
+  end do")
+set(private_accumulator_block
+"  integer  :: icol, ilev, igpt
+  real(wp) :: scalar ! local scalar version
+
+  !$acc                         parallel loop gang vector collapse(2) private(scalar)
+  !$omp target teams distribute parallel do simd          collapse(2)
+  do ilev = 1, nlev
+    do icol = 1, ncol
+
+      scalar = 0.0_wp
 
       ! NVHPC otherwise implicitly parallelizes this ordered g-point sum as a
       ! reduction inside the already-vectorized column/level loop.  At large
@@ -34,31 +45,54 @@ set(new_block
       ! across repeated calls.  Keep one deterministic sum per outer iteration.
       !$acc loop seq
       do igpt = 1, ngpt
-        scalar = scalar + spectral_flux(icol, ilev, igpt)")
+        scalar = scalar + spectral_flux(icol, ilev, igpt)
+      end do
 
-string(FIND "${source}" "${new_directive}" directive_already_patched)
-if(directive_already_patched EQUAL -1)
-    string(FIND "${source}" "${old_directive}" directive_patch_site)
-    if(directive_patch_site EQUAL -1)
-        message(FATAL_ERROR
-            "Pinned RTE-RRTMGP broadband accumulator directive changed; refusing an unverified patch")
-    endif()
-    string(REPLACE "${old_directive}" "${new_directive}" source "${source}")
-endif()
+      broadband_flux(icol, ilev) = factor * scalar
+    end do
+  end do")
+set(deterministic_block
+"  integer  :: icol, ilev, igpt
 
-string(FIND "${source}" "${new_block}" already_patched)
+  ! Keep each level on a gang and each column on one vector lane.  A private
+  ! scalar accumulator still allowed NVHPC to retain one stale warp across
+  ! repeated large-domain calls, so accumulate into the uniquely-owned output
+  ! element and explicitly order the spectral loop.
+  !$acc                         parallel loop gang
+  !$omp target teams distribute parallel do simd          collapse(2)
+  do ilev = 1, nlev
+    !$acc loop vector
+    do icol = 1, ncol
+
+      broadband_flux(icol, ilev) = 0.0_wp
+
+      !$acc loop seq
+      do igpt = 1, ngpt
+        broadband_flux(icol, ilev) = broadband_flux(icol, ilev) + &
+                                      spectral_flux(icol, ilev, igpt)
+      end do
+
+      broadband_flux(icol, ilev) = factor * broadband_flux(icol, ilev)
+    end do
+  end do")
+
+string(FIND "${source}" "${deterministic_block}" already_patched)
 if(NOT already_patched EQUAL -1)
     message(STATUS
         "Pinned RTE-RRTMGP deterministic broadband reduction patch already applied")
 else()
-    string(FIND "${source}" "${old_block}" patch_site)
-    if(patch_site EQUAL -1)
+    string(FIND "${source}" "${original_block}" original_patch_site)
+    string(FIND "${source}" "${private_accumulator_block}" private_patch_site)
+    if(NOT original_patch_site EQUAL -1)
+        string(REPLACE "${original_block}" "${deterministic_block}" source "${source}")
+    elseif(NOT private_patch_site EQUAL -1)
+        string(REPLACE "${private_accumulator_block}" "${deterministic_block}" source "${source}")
+    else()
         message(FATAL_ERROR
             "Pinned RTE-RRTMGP broadband reduction changed; refusing an unverified patch")
     endif()
-    string(REPLACE "${old_block}" "${new_block}" source "${source}")
+    file(WRITE "${kernel_file}" "${source}")
 endif()
 
-file(WRITE "${kernel_file}" "${source}")
 message(STATUS
-    "Patched pinned RTE-RRTMGP broadband reduction with a private ordered accumulator")
+    "Patched pinned RTE-RRTMGP broadband reduction with explicit level/column ownership")
