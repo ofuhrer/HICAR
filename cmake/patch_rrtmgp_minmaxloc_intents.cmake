@@ -10,6 +10,10 @@ if(NOT EXISTS "${kernel_file}")
 endif()
 
 file(READ "${kernel_file}" source)
+set(original_nvcompiler_guard
+"#if ( defined(_CRAYFTN) && _RELEASE_MAJOR <= 14 ) || ( defined(_OPENMP) && defined(__NVCOMPILER) )")
+set(fixed_nvcompiler_guard
+"#if ( defined(_CRAYFTN) && _RELEASE_MAJOR <= 14 ) || defined(__NVCOMPILER)")
 set(original_declarations
 "    integer :: i, minl, maxl
     logical(wl) :: mask(:,:)
@@ -34,5 +38,23 @@ else()
     file(WRITE "${kernel_file}" "${source}")
 endif()
 
+# The accelerated source already carries a sequential min/max-location helper
+# for compilers whose device MINLOC/MAXLOC implementation is unsafe.  The
+# original guard enabled that helper for NVHPC only under OpenMP.  HICAR builds
+# the same file with OpenACC, where NVHPC 24.5 otherwise generates a vector-loop
+# live-out scalar for each intrinsic.  Select the helper for every NVHPC GPU
+# build, independent of the host offload model.
+file(READ "${kernel_file}" source)
+string(FIND "${source}" "${fixed_nvcompiler_guard}" guard_already_patched)
+if(guard_already_patched EQUAL -1)
+    string(FIND "${source}" "${original_nvcompiler_guard}" guard_patch_site)
+    if(guard_patch_site EQUAL -1)
+        message(FATAL_ERROR
+            "Pinned RTE-RRTMGP NVHPC minmaxloc guard changed; refusing an unverified patch")
+    endif()
+    string(REPLACE "${original_nvcompiler_guard}" "${fixed_nvcompiler_guard}" source "${source}")
+    file(WRITE "${kernel_file}" "${source}")
+endif()
+
 message(STATUS
-    "Patched pinned RTE-RRTMGP minmaxloc with explicit read-only argument intents")
+    "Patched pinned RTE-RRTMGP NVHPC tropopause search to use explicit minmaxloc")
