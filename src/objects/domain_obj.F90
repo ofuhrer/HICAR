@@ -50,6 +50,18 @@ contains
         call read_domain_shape(this, options)
         
         call create_variables(this, options)
+
+        this%wind_climatology_enabled = &
+            this%var_indx(kVARS%wind_u_agl_mean_1h)%v > 0
+        if (this%wind_climatology_enabled) then
+            allocate(this%wind_speed_tenminute_sum_agl( &
+                this%ims:this%ime, 1:kWIND_HEIGHT_Z, this%jms:this%jme), &
+                source=0.0)
+            allocate(this%wind_speed_tenminute_sum_10m( &
+                this%ims:this%ime, this%jms:this%jme), source=0.0)
+            !$acc enter data copyin(this%wind_speed_tenminute_sum_agl, &
+            !$acc                   this%wind_speed_tenminute_sum_10m)
+        endif
         
         call init_relax_filters(this,options)
 
@@ -76,6 +88,7 @@ contains
         
         !update all relevant data_2d/data_3d fields of vars_2d/vars_3d to device
         call this%update_device()
+        call this%reset_wind_climatology()
     end subroutine init_domain
 
     !>------------------------------------------------------------
@@ -438,6 +451,15 @@ contains
         ! Clean up domain geo%z GPU copy (entered in setup_geo_interpolation)
         if (allocated(this%geo%z)) then
             !$acc exit data delete(this%geo%z)
+        endif
+
+        if (allocated(this%wind_speed_tenminute_sum_agl)) then
+            !$acc exit data finalize delete(this%wind_speed_tenminute_sum_agl)
+            deallocate(this%wind_speed_tenminute_sum_agl)
+        endif
+        if (allocated(this%wind_speed_tenminute_sum_10m)) then
+            !$acc exit data finalize delete(this%wind_speed_tenminute_sum_10m)
+            deallocate(this%wind_speed_tenminute_sum_10m)
         endif
 
         !$acc exit data finalize delete(this%dx, this%grid, this%its, this%ite, this%kts, this%kte, this%jts, this%jte, &
@@ -1044,6 +1066,282 @@ contains
 
         end associate
     end subroutine update_wind_height_diagnostics
+
+
+    !> Accumulate time-weighted wind statistics for the hour ending at the
+    !! next output event. The current post-diagnostic state represents the
+    !! following model interval, so each sample is weighted by the exact
+    !! adaptive timestep. Contributions are split at ten-minute boundaries.
+    module subroutine accumulate_wind_climatology(this, dt_seconds)
+        implicit none
+        class(domain_t), intent(inout) :: this
+        real, intent(in) :: dt_seconds
+
+        real, parameter :: ten_minutes = 600.0
+        real, parameter :: time_epsilon = 1.0e-4
+        real :: remaining, chunk, window_left, closed_window_seconds
+        integer :: i, j, kh, ims, ime, jms, jme
+
+        if (.not. this%wind_climatology_enabled) return
+        if (dt_seconds <= time_epsilon) return
+
+        call this%update_wind_height_diagnostics()
+        ims = this%ims
+        ime = this%ime
+        jms = this%jms
+        jme = this%jme
+
+        associate( &
+            u_agl => this%vars_3d(this%var_indx(kVARS%wind_u_agl)%v)%data_3d, &
+            v_agl => this%vars_3d(this%var_indx(kVARS%wind_v_agl)%v)%data_3d, &
+            u_sum_agl => this%vars_3d( &
+                this%var_indx(kVARS%wind_u_agl_mean_1h)%v)%data_3d, &
+            v_sum_agl => this%vars_3d( &
+                this%var_indx(kVARS%wind_v_agl_mean_1h)%v)%data_3d, &
+            speed_sum_agl => this%vars_3d( &
+                this%var_indx(kVARS%wind_speed_agl_mean_1h)%v)%data_3d, &
+            speed_tenminute_max_agl => this%vars_3d( &
+                this%var_indx(kVARS%wind_speed_agl_10min_max_1h)%v)%data_3d, &
+            speed_tenminute_sum_agl => this%wind_speed_tenminute_sum_agl, &
+            u_10m => this%vars_2d(this%var_indx(kVARS%u_10m)%v)%data_2d, &
+            v_10m => this%vars_2d(this%var_indx(kVARS%v_10m)%v)%data_2d, &
+            u_sum_10m => this%vars_2d( &
+                this%var_indx(kVARS%wind_u_10m_mean_1h)%v)%data_2d, &
+            v_sum_10m => this%vars_2d( &
+                this%var_indx(kVARS%wind_v_10m_mean_1h)%v)%data_2d, &
+            speed_sum_10m => this%vars_2d( &
+                this%var_indx(kVARS%wind_speed_10m_mean_1h)%v)%data_2d, &
+            speed_tenminute_max_10m => this%vars_2d( &
+                this%var_indx(kVARS%wind_speed_10m_10min_max_1h)%v)%data_2d, &
+            speed_tenminute_sum_10m => this%wind_speed_tenminute_sum_10m)
+
+        remaining = dt_seconds
+        do while (remaining > time_epsilon)
+            window_left = ten_minutes - &
+                this%wind_climatology_tenminute_seconds
+            chunk = min(remaining, window_left)
+
+            !$acc parallel loop gang vector collapse(3) default(present)
+            do j = jms, jme
+                do kh = 1, kWIND_HEIGHT_Z
+                    do i = ims, ime
+                        if (u_agl(i,kh,j) == kEMPT_BUFF .or. &
+                            v_agl(i,kh,j) == kEMPT_BUFF) then
+                            u_sum_agl(i,kh,j) = kEMPT_BUFF
+                            v_sum_agl(i,kh,j) = kEMPT_BUFF
+                            speed_sum_agl(i,kh,j) = kEMPT_BUFF
+                            speed_tenminute_sum_agl(i,kh,j) = kEMPT_BUFF
+                            speed_tenminute_max_agl(i,kh,j) = kEMPT_BUFF
+                        else if (u_sum_agl(i,kh,j) /= kEMPT_BUFF) then
+                            u_sum_agl(i,kh,j) = u_sum_agl(i,kh,j) + &
+                                u_agl(i,kh,j) * chunk
+                            v_sum_agl(i,kh,j) = v_sum_agl(i,kh,j) + &
+                                v_agl(i,kh,j) * chunk
+                            speed_sum_agl(i,kh,j) = speed_sum_agl(i,kh,j) + &
+                                sqrt(u_agl(i,kh,j)**2 + v_agl(i,kh,j)**2) * chunk
+                            speed_tenminute_sum_agl(i,kh,j) = &
+                                speed_tenminute_sum_agl(i,kh,j) + &
+                                sqrt(u_agl(i,kh,j)**2 + v_agl(i,kh,j)**2) * chunk
+                        endif
+                    enddo
+                enddo
+            enddo
+            !$acc end parallel loop
+
+            !$acc parallel loop gang vector collapse(2) default(present)
+            do j = jms, jme
+                do i = ims, ime
+                    u_sum_10m(i,j) = u_sum_10m(i,j) + u_10m(i,j) * chunk
+                    v_sum_10m(i,j) = v_sum_10m(i,j) + v_10m(i,j) * chunk
+                    speed_sum_10m(i,j) = speed_sum_10m(i,j) + &
+                        sqrt(u_10m(i,j)**2 + v_10m(i,j)**2) * chunk
+                    speed_tenminute_sum_10m(i,j) = &
+                        speed_tenminute_sum_10m(i,j) + &
+                        sqrt(u_10m(i,j)**2 + v_10m(i,j)**2) * chunk
+                enddo
+            enddo
+            !$acc end parallel loop
+
+            this%wind_climatology_hour_seconds = &
+                this%wind_climatology_hour_seconds + chunk
+            this%wind_climatology_tenminute_seconds = &
+                this%wind_climatology_tenminute_seconds + chunk
+            remaining = remaining - chunk
+
+            if (this%wind_climatology_tenminute_seconds >= &
+                ten_minutes - time_epsilon) then
+                closed_window_seconds = this%wind_climatology_tenminute_seconds
+                !$acc parallel loop gang vector collapse(3) default(present)
+                do j = jms, jme
+                    do kh = 1, kWIND_HEIGHT_Z
+                        do i = ims, ime
+                            if (speed_tenminute_sum_agl(i,kh,j) /= &
+                                kEMPT_BUFF) then
+                                if (speed_tenminute_max_agl(i,kh,j) == &
+                                    kEMPT_BUFF) then
+                                    speed_tenminute_max_agl(i,kh,j) = &
+                                        speed_tenminute_sum_agl(i,kh,j) / &
+                                        closed_window_seconds
+                                else
+                                    speed_tenminute_max_agl(i,kh,j) = max( &
+                                        speed_tenminute_max_agl(i,kh,j), &
+                                        speed_tenminute_sum_agl(i,kh,j) / &
+                                        closed_window_seconds)
+                                endif
+                                speed_tenminute_sum_agl(i,kh,j) = 0.0
+                            endif
+                        enddo
+                    enddo
+                enddo
+                !$acc end parallel loop
+
+                !$acc parallel loop gang vector collapse(2) default(present)
+                do j = jms, jme
+                    do i = ims, ime
+                        if (speed_tenminute_max_10m(i,j) == kEMPT_BUFF) then
+                            speed_tenminute_max_10m(i,j) = &
+                                speed_tenminute_sum_10m(i,j) / closed_window_seconds
+                        else
+                            speed_tenminute_max_10m(i,j) = max( &
+                                speed_tenminute_max_10m(i,j), &
+                                speed_tenminute_sum_10m(i,j) / closed_window_seconds)
+                        endif
+                        speed_tenminute_sum_10m(i,j) = 0.0
+                    enddo
+                enddo
+                !$acc end parallel loop
+
+                this%wind_climatology_tenminute_seconds = 0.0
+            endif
+        enddo
+
+        end associate
+    end subroutine accumulate_wind_climatology
+
+
+    !> Convert the running integrals to means immediately before the I/O
+    !! client packs them. Initial or partial hours are written as missing.
+    module subroutine finalize_wind_climatology(this)
+        implicit none
+        class(domain_t), intent(inout) :: this
+        real, parameter :: one_hour = 3600.0
+        real, parameter :: coverage_tolerance = 0.05
+        integer :: i, j, kh, ims, ime, jms, jme
+        real :: hour_seconds
+
+        if (.not. this%wind_climatology_enabled) return
+        hour_seconds = this%wind_climatology_hour_seconds
+        ims = this%ims
+        ime = this%ime
+        jms = this%jms
+        jme = this%jme
+
+        associate( &
+            u_mean_agl => this%vars_3d( &
+                this%var_indx(kVARS%wind_u_agl_mean_1h)%v)%data_3d, &
+            v_mean_agl => this%vars_3d( &
+                this%var_indx(kVARS%wind_v_agl_mean_1h)%v)%data_3d, &
+            speed_mean_agl => this%vars_3d( &
+                this%var_indx(kVARS%wind_speed_agl_mean_1h)%v)%data_3d, &
+            speed_tenminute_max_agl => this%vars_3d( &
+                this%var_indx(kVARS%wind_speed_agl_10min_max_1h)%v)%data_3d, &
+            u_mean_10m => this%vars_2d( &
+                this%var_indx(kVARS%wind_u_10m_mean_1h)%v)%data_2d, &
+            v_mean_10m => this%vars_2d( &
+                this%var_indx(kVARS%wind_v_10m_mean_1h)%v)%data_2d, &
+            speed_mean_10m => this%vars_2d( &
+                this%var_indx(kVARS%wind_speed_10m_mean_1h)%v)%data_2d, &
+            speed_tenminute_max_10m => this%vars_2d( &
+                this%var_indx(kVARS%wind_speed_10m_10min_max_1h)%v)%data_2d)
+
+        if (abs(this%wind_climatology_hour_seconds-one_hour) <= &
+            coverage_tolerance .and. &
+            this%wind_climatology_tenminute_seconds <= coverage_tolerance) then
+            !$acc parallel loop gang vector collapse(3) default(present)
+            do j = jms, jme
+                do kh = 1, kWIND_HEIGHT_Z
+                    do i = ims, ime
+                        if (u_mean_agl(i,kh,j) /= kEMPT_BUFF) then
+                            u_mean_agl(i,kh,j) = u_mean_agl(i,kh,j) / hour_seconds
+                            v_mean_agl(i,kh,j) = v_mean_agl(i,kh,j) / hour_seconds
+                            speed_mean_agl(i,kh,j) = speed_mean_agl(i,kh,j) / hour_seconds
+                        endif
+                    enddo
+                enddo
+            enddo
+            !$acc end parallel loop
+
+            !$acc parallel loop gang vector collapse(2) default(present)
+            do j = jms, jme
+                do i = ims, ime
+                    u_mean_10m(i,j) = u_mean_10m(i,j) / hour_seconds
+                    v_mean_10m(i,j) = v_mean_10m(i,j) / hour_seconds
+                    speed_mean_10m(i,j) = speed_mean_10m(i,j) / hour_seconds
+                enddo
+            enddo
+            !$acc end parallel loop
+        else
+            !$acc kernels default(present)
+            u_mean_agl = kEMPT_BUFF
+            v_mean_agl = kEMPT_BUFF
+            speed_mean_agl = kEMPT_BUFF
+            speed_tenminute_max_agl = kEMPT_BUFF
+            u_mean_10m = kEMPT_BUFF
+            v_mean_10m = kEMPT_BUFF
+            speed_mean_10m = kEMPT_BUFF
+            speed_tenminute_max_10m = kEMPT_BUFF
+            !$acc end kernels
+        endif
+
+        end associate
+    end subroutine finalize_wind_climatology
+
+
+    !> Start a fresh ending-hour accumulation after output has been packed.
+    module subroutine reset_wind_climatology(this)
+        implicit none
+        class(domain_t), intent(inout) :: this
+
+        if (.not. this%wind_climatology_enabled) return
+
+        this%wind_climatology_hour_seconds = 0.0
+        this%wind_climatology_tenminute_seconds = 0.0
+
+        associate( &
+            u_sum_agl => this%vars_3d( &
+                this%var_indx(kVARS%wind_u_agl_mean_1h)%v)%data_3d, &
+            v_sum_agl => this%vars_3d( &
+                this%var_indx(kVARS%wind_v_agl_mean_1h)%v)%data_3d, &
+            speed_sum_agl => this%vars_3d( &
+                this%var_indx(kVARS%wind_speed_agl_mean_1h)%v)%data_3d, &
+            speed_tenminute_max_agl => this%vars_3d( &
+                this%var_indx(kVARS%wind_speed_agl_10min_max_1h)%v)%data_3d, &
+            speed_tenminute_sum_agl => this%wind_speed_tenminute_sum_agl, &
+            u_sum_10m => this%vars_2d( &
+                this%var_indx(kVARS%wind_u_10m_mean_1h)%v)%data_2d, &
+            v_sum_10m => this%vars_2d( &
+                this%var_indx(kVARS%wind_v_10m_mean_1h)%v)%data_2d, &
+            speed_sum_10m => this%vars_2d( &
+                this%var_indx(kVARS%wind_speed_10m_mean_1h)%v)%data_2d, &
+            speed_tenminute_max_10m => this%vars_2d( &
+                this%var_indx(kVARS%wind_speed_10m_10min_max_1h)%v)%data_2d, &
+            speed_tenminute_sum_10m => this%wind_speed_tenminute_sum_10m)
+
+        !$acc kernels default(present)
+        u_sum_agl = 0.0
+        v_sum_agl = 0.0
+        speed_sum_agl = 0.0
+        speed_tenminute_max_agl = kEMPT_BUFF
+        speed_tenminute_sum_agl = 0.0
+        u_sum_10m = 0.0
+        v_sum_10m = 0.0
+        speed_sum_10m = 0.0
+        speed_tenminute_max_10m = kEMPT_BUFF
+        speed_tenminute_sum_10m = 0.0
+        !$acc end kernels
+
+        end associate
+    end subroutine reset_wind_climatology
 
    
     !> -------------------------------

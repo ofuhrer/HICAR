@@ -165,6 +165,43 @@ contains
             endif
         endif
 
+        ! Hourly wind-climatology statistics are a coupled product with one
+        ! scientifically fixed cadence. The model output event bounds every
+        ! accumulation hour and every restart checkpoint, avoiding partial
+        ! state at a process restart.
+        if (this%output%vars_for_output(kVARS%wind_u_agl_mean_1h) > 0 .or. &
+            this%output%vars_for_output(kVARS%wind_v_agl_mean_1h) > 0 .or. &
+            this%output%vars_for_output(kVARS%wind_speed_agl_mean_1h) > 0 .or. &
+            this%output%vars_for_output(kVARS%wind_speed_agl_10min_max_1h) > 0 .or. &
+            this%output%vars_for_output(kVARS%wind_u_10m_mean_1h) > 0 .or. &
+            this%output%vars_for_output(kVARS%wind_v_10m_mean_1h) > 0 .or. &
+            this%output%vars_for_output(kVARS%wind_speed_10m_mean_1h) > 0 .or. &
+            this%output%vars_for_output(kVARS%wind_speed_10m_10min_max_1h) > 0) then
+            if (abs(this%output%outputinterval - 3600.0) > 1.0e-3) then
+                error stop 'Hourly wind climatology requires outputinterval = 3600 seconds'
+            endif
+
+            this%output%vars_for_output(kVARS%wind_u_agl_mean_1h) = 1
+            this%output%vars_for_output(kVARS%wind_v_agl_mean_1h) = 1
+            this%output%vars_for_output(kVARS%wind_speed_agl_mean_1h) = 1
+            this%output%vars_for_output(kVARS%wind_speed_agl_10min_max_1h) = 1
+            this%output%vars_for_output(kVARS%wind_u_10m_mean_1h) = 1
+            this%output%vars_for_output(kVARS%wind_v_10m_mean_1h) = 1
+            this%output%vars_for_output(kVARS%wind_speed_10m_mean_1h) = 1
+            this%output%vars_for_output(kVARS%wind_speed_10m_10min_max_1h) = 1
+
+            call this%alloc_vars([kVARS%wind_u_agl_mean_1h, &
+                kVARS%wind_v_agl_mean_1h, &
+                kVARS%wind_speed_agl_mean_1h, &
+                kVARS%wind_speed_agl_10min_max_1h, &
+                kVARS%wind_u_10m_mean_1h, &
+                kVARS%wind_v_10m_mean_1h, &
+                kVARS%wind_speed_10m_mean_1h, &
+                kVARS%wind_speed_10m_10min_max_1h])
+            call this%alloc_vars([kVARS%wind_u_agl, kVARS%wind_v_agl, &
+                kVARS%density_agl, kVARS%u_10m, kVARS%v_10m])
+        endif
+
         ! Fixed-height wind fields are a coupled diagnostic. Allocate all
         ! source-complete fields when any member is requested, while retaining
         ! the user's requested subset for output.

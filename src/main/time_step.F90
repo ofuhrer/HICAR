@@ -432,6 +432,11 @@ contains
             call domain%diagnostic_update()
             call domain%diagnostic_timer%stop()
 
+            ! Integrate the state valid at the start of this adaptive model
+            ! interval. The routine splits the exact dt at ten-minute
+            ! boundaries and retains only hourly climate statistics.
+            call domain%accumulate_wind_climatology(real(dt%seconds()))
+
 
             ! if an interactive run was requested than print status updates everytime at least 5% of the progress has been made
             if (options%general%interactive .and. (STD_OUT_PE)) then

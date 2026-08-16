@@ -244,13 +244,18 @@ subroutine component_write(component, ioclient)
             if (STD_OUT_PE) write(*,*) "Writing output file"
             if (STD_OUT_PE) flush(output_unit)
             call component%output_timer%start()
-            ! Refresh mass-grid diagnostics at the exact output time, then
-            ! calculate compact wind-climatology fields only for this event.
-            if (component%var_indx(kVARS%wind_u_agl)%v > 0) then
+            ! Refresh instantaneous fixed-height fields only when they are
+            ! actually selected for output. Climate accumulation allocates
+            ! the same scratch fields but updates them during model steps.
+            if (component%vars_to_out(kVARS%wind_u_agl)%v > 0 .or. &
+                component%vars_to_out(kVARS%wind_v_agl)%v > 0 .or. &
+                component%vars_to_out(kVARS%density_agl)%v > 0) then
                 call component%diagnostic_update()
                 call component%update_wind_height_diagnostics()
             endif
+            call component%finalize_wind_climatology()
             call ioclient%push(component)
+            call component%reset_wind_climatology()
             call component%output_timer%stop()
         type is (ioserver_t)
             if (STD_OUT_PE_IO) write(*,"(/ A23,I2,A16)") "-------------- IOserver",component%nest_indx," --------------"

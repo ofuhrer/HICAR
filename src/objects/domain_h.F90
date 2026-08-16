@@ -111,6 +111,16 @@ module domain_interface
     real, allocatable :: mapfac_mxy(:,:)
     real :: max_mapfac = 1.0
 
+    ! The hourly climate fields themselves hold running time integrals between
+    ! output events. Only the current ten-minute scalar-speed integrals need
+    ! separate scratch storage. Checkpoints are constrained to hourly output
+    ! boundaries, so no partial accumulator state crosses a restart.
+    logical :: wind_climatology_enabled = .False.
+    real :: wind_climatology_hour_seconds = 0.0
+    real :: wind_climatology_tenminute_seconds = 0.0
+    real, allocatable :: wind_speed_tenminute_sum_agl(:,:,:)
+    real, allocatable :: wind_speed_tenminute_sum_10m(:,:)
+
     ! store the start (s) and end (e) for the i,j,k dimensions
     integer ::  ids,ide, jds,jde, kds,kde, & ! for the entire model domain    (d)
                 ims,ime, jms,jme, kms,kme, & ! for the memory in these arrays (m)
@@ -134,6 +144,9 @@ module domain_interface
     procedure :: get_initial_conditions
     procedure :: diagnostic_update
     procedure :: update_wind_height_diagnostics
+    procedure :: accumulate_wind_climatology
+    procedure :: finalize_wind_climatology
+    procedure :: reset_wind_climatology
     procedure :: interpolate_forcing
     procedure :: update_delta_fields
     procedure :: apply_forcing
@@ -210,6 +223,22 @@ module domain_interface
     end subroutine
 
     module subroutine update_wind_height_diagnostics(this)
+      implicit none
+      class(domain_t), intent(inout) :: this
+    end subroutine
+
+    module subroutine accumulate_wind_climatology(this, dt_seconds)
+      implicit none
+      class(domain_t), intent(inout) :: this
+      real, intent(in) :: dt_seconds
+    end subroutine
+
+    module subroutine finalize_wind_climatology(this)
+      implicit none
+      class(domain_t), intent(inout) :: this
+    end subroutine
+
+    module subroutine reset_wind_climatology(this)
       implicit none
       class(domain_t), intent(inout) :: this
     end subroutine

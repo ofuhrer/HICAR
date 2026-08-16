@@ -410,11 +410,17 @@ contains
         if (STD_OUT_PE) flush(output_unit)
 
         if (.not.(options%restart%restart)) then
-            if (domain%var_indx(kVARS%wind_u_agl)%v > 0) then
+            if (domain%vars_to_out(kVARS%wind_u_agl)%v > 0 .or. &
+                domain%vars_to_out(kVARS%wind_v_agl)%v > 0 .or. &
+                domain%vars_to_out(kVARS%density_agl)%v > 0) then
                 call domain%diagnostic_update()
                 call domain%update_wind_height_diagnostics()
             endif
+            ! A cold-start timestamp has no preceding averaging interval, so
+            ! the climatology variables are intentionally missing there.
+            call domain%finalize_wind_climatology()
             call ioclient%push(domain)
+            call domain%reset_wind_climatology()
         endif
 
 

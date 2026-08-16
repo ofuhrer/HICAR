@@ -3164,6 +3164,99 @@ contains
                                attribute_t("interpolation", "linear in geometric height AGL; no extrapolation")]
 
         !>------------------------------------------------------------
+        !!  Hourly vector-mean wind components at fixed AGL heights
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%wind_u_agl_mean_1h) then
+            var_meta%name        = "u_agl_mean_1h"
+            var_meta%dimensions  = three_d_t_wind_height_dimensions
+            var_meta%dim_len(2)  = kWIND_HEIGHT_Z
+            var_meta%attributes  = [attribute_t("standard_name", "grid_eastward_wind"), &
+                               attribute_t("long_name", "Hourly vector-mean grid-x wind at fixed height above ground"), &
+                               attribute_t("units", "m s-1"), &
+                               attribute_t("coordinates", "height_agl lat lon"), &
+                               attribute_t("cell_methods", "time: mean (interval: 1 hour)"), &
+                               attribute_t("interpolation", "linear in geometric height AGL; no extrapolation")]
+
+        else if (var_idx==kVARS%wind_v_agl_mean_1h) then
+            var_meta%name        = "v_agl_mean_1h"
+            var_meta%dimensions  = three_d_t_wind_height_dimensions
+            var_meta%dim_len(2)  = kWIND_HEIGHT_Z
+            var_meta%attributes  = [attribute_t("standard_name", "grid_northward_wind"), &
+                               attribute_t("long_name", "Hourly vector-mean grid-y wind at fixed height above ground"), &
+                               attribute_t("units", "m s-1"), &
+                               attribute_t("coordinates", "height_agl lat lon"), &
+                               attribute_t("cell_methods", "time: mean (interval: 1 hour)"), &
+                               attribute_t("interpolation", "linear in geometric height AGL; no extrapolation")]
+
+        !>------------------------------------------------------------
+        !!  Hourly scalar-mean and maximum ten-minute mean speed at AGL
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%wind_speed_agl_mean_1h) then
+            var_meta%name        = "wind_speed_agl_mean_1h"
+            var_meta%dimensions  = three_d_t_wind_height_dimensions
+            var_meta%dim_len(2)  = kWIND_HEIGHT_Z
+            var_meta%attributes  = [attribute_t("standard_name", "wind_speed"), &
+                               attribute_t("long_name", "Hourly scalar-mean wind speed at fixed height above ground"), &
+                               attribute_t("units", "m s-1"), &
+                               attribute_t("coordinates", "height_agl lat lon"), &
+                               attribute_t("cell_methods", "time: mean (interval: 1 hour)"), &
+                               attribute_t("interpolation", "linear in geometric height AGL; no extrapolation")]
+
+        else if (var_idx==kVARS%wind_speed_agl_10min_max_1h) then
+            var_meta%name        = "wind_speed_agl_10min_max_1h"
+            var_meta%dimensions  = three_d_t_wind_height_dimensions
+            var_meta%dim_len(2)  = kWIND_HEIGHT_Z
+            var_meta%attributes  = [attribute_t("standard_name", "wind_speed"), &
+                               attribute_t("long_name", "Maximum of six ten-minute scalar-mean wind speeds within the hour"), &
+                               attribute_t("units", "m s-1"), &
+                               attribute_t("coordinates", "height_agl lat lon"), &
+                               attribute_t("cell_methods", "time: maximum (interval: 10 minutes)"), &
+                               attribute_t("interpolation", "linear in geometric height AGL; no extrapolation")]
+
+        !>------------------------------------------------------------
+        !!  Hourly surface-wind statistics for SwissMetNet verification
+        !!------------------------------------------------------------
+        else if (var_idx==kVARS%wind_u_10m_mean_1h) then
+            var_meta%name        = "u10m_mean_1h"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("standard_name", "grid_eastward_wind"), &
+                               attribute_t("long_name", "Hourly vector-mean grid-x wind at 10 m above ground"), &
+                               attribute_t("units", "m s-1"), &
+                               attribute_t("coordinates", "lat lon"), &
+                               attribute_t("height", "10 m"), &
+                               attribute_t("cell_methods", "time: mean (interval: 1 hour)")]
+
+        else if (var_idx==kVARS%wind_v_10m_mean_1h) then
+            var_meta%name        = "v10m_mean_1h"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("standard_name", "grid_northward_wind"), &
+                               attribute_t("long_name", "Hourly vector-mean grid-y wind at 10 m above ground"), &
+                               attribute_t("units", "m s-1"), &
+                               attribute_t("coordinates", "lat lon"), &
+                               attribute_t("height", "10 m"), &
+                               attribute_t("cell_methods", "time: mean (interval: 1 hour)")]
+
+        else if (var_idx==kVARS%wind_speed_10m_mean_1h) then
+            var_meta%name        = "wind_speed_10m_mean_1h"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("standard_name", "wind_speed"), &
+                               attribute_t("long_name", "Hourly scalar-mean wind speed at 10 m above ground"), &
+                               attribute_t("units", "m s-1"), &
+                               attribute_t("coordinates", "lat lon"), &
+                               attribute_t("height", "10 m"), &
+                               attribute_t("cell_methods", "time: mean (interval: 1 hour)")]
+
+        else if (var_idx==kVARS%wind_speed_10m_10min_max_1h) then
+            var_meta%name        = "wind_speed_10m_10min_max_1h"
+            var_meta%dimensions  = two_d_t_dimensions
+            var_meta%attributes  = [attribute_t("standard_name", "wind_speed"), &
+                               attribute_t("long_name", "Maximum of six ten-minute scalar-mean 10 m wind speeds within the hour"), &
+                               attribute_t("units", "m s-1"), &
+                               attribute_t("coordinates", "lat lon"), &
+                               attribute_t("height", "10 m"), &
+                               attribute_t("cell_methods", "time: maximum (interval: 10 minutes)")]
+
+        !>------------------------------------------------------------
         !!  10 meter height wind speed magnitude, sqrt(u_10m**2+v_10m**2)
         !!------------------------------------------------------------
         else if (var_idx==kVARS%windspd_10m) then

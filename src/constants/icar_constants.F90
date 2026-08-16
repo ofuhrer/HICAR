@@ -464,6 +464,17 @@ module icar_constants
         integer :: shortwave_direct_horizontal
         integer :: shortwave_diffuse_horizontal
 
+        ! Hourly wind-climatology diagnostics. Keep these appended so every
+        ! pre-existing registry identifier remains stable.
+        integer :: wind_u_agl_mean_1h
+        integer :: wind_v_agl_mean_1h
+        integer :: wind_speed_agl_mean_1h
+        integer :: wind_speed_agl_10min_max_1h
+        integer :: wind_u_10m_mean_1h
+        integer :: wind_v_10m_mean_1h
+        integer :: wind_speed_10m_mean_1h
+        integer :: wind_speed_10m_10min_max_1h
+
         integer :: last_var
     end type var_constants_type
 
@@ -624,9 +635,9 @@ module icar_constants
     integer, parameter :: kCROP_GRID_Z       = 5
     integer, parameter :: kMONTH_GRID_Z      = 12
     integer, parameter :: kGECROS_GRID_Z     = 60
-    integer, parameter :: kWIND_HEIGHT_Z     = 6
+    integer, parameter :: kWIND_HEIGHT_Z     = 7
     real, parameter :: kWIND_HEIGHTS_AGL(kWIND_HEIGHT_Z) = &
-        [50.0, 75.0, 100.0, 125.0, 150.0, 200.0]
+        [50.0, 75.0, 100.0, 125.0, 150.0, 200.0, 250.0]
     integer, parameter :: kSOILCOMP_GRID_Z   = 8
     
     integer, parameter :: kLAKE_Z            = 10

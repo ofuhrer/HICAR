@@ -938,6 +938,21 @@ contains
                         "Defining variable:"//trim(var_meta%name) )
             endif
 
+            ! kEMPT_BUFF is HICAR's explicit missing/unwritten sentinel.  Define
+            ! it as the variable fill value so intentional missing output (such
+            ! as an hourly accumulator at cold start) is decoded as missing by
+            ! NetCDF clients instead of appearing as a large physical value.
+            if (var_meta%dtype == kREAL) then
+                call check_ncdf( nf90_def_var_fill(this%active_nc_id, var_meta%file_var_id, 0, kEMPT_BUFF), &
+                        "Defining fill value for:"//trim(var_meta%name) )
+            elseif (var_meta%dtype == kINTEGER) then
+                call check_ncdf( nf90_def_var_fill(this%active_nc_id, var_meta%file_var_id, 0, int(kEMPT_BUFF)), &
+                        "Defining fill value for:"//trim(var_meta%name) )
+            elseif (var_meta%dtype == kDOUBLE) then
+                call check_ncdf( nf90_def_var_fill(this%active_nc_id, var_meta%file_var_id, 0, dble(kEMPT_BUFF)), &
+                        "Defining fill value for:"//trim(var_meta%name) )
+            endif
+
             ! setup attributes
             do i=1,size(var_meta%attributes)
                 call check_ncdf( nf90_put_att(this%active_nc_id,                &
