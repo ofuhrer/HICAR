@@ -50,6 +50,8 @@ set(
   geo
   time
   utilities
+  water_simple
+  lsm_state
 )
 set(
   SOURCE_FILES

@@ -22,11 +22,12 @@ module test_wind_iterative
     use, intrinsic :: ieee_arithmetic, only : ieee_is_finite
     use mpi
     use icar_constants
-    use testdrive,          only : new_unittest, unittest_type, error_type, test_failed
+    use testdrive,          only : new_unittest, unittest_type, error_type, test_failed, check
     use domain_interface,   only : domain_t
     use options_interface,  only : options_t
     use wind,               only : wind_var_request, init_winds, calc_divergence, &
-                                   projection_constraint_norm2
+                                   projection_constraint_norm2, constrain_dynamic_alpha
+    use namelist_utils,     only : set_nml_var, get_nml_var_minmax, alpha_const_is_valid
     use wind_iterative,     only : calc_iter_winds, finalize_iter_winds, probe_finalize, &
                                    multilevel_preconditioner_smoke, small_harmonic_ritz
     use wind_iterative,     only : adjoint_projection_is_enabled, get_last_wind_solve_diagnostics
@@ -56,6 +57,8 @@ contains
         type(unittest_type), allocatable, intent(out) :: testsuite(:)
 
         testsuite = [ &
+            new_unittest("alpha_const_namelist", test_alpha_const_namelist), &
+            new_unittest("dynamic_alpha_bounds", test_dynamic_alpha_bounds), &
             new_unittest("multilevel_transfer", test_multilevel_transfer), &
             new_unittest("multilevel_device", test_multilevel_device), &
             new_unittest("multilevel_device_offset", test_multilevel_device_offset), &
@@ -66,6 +69,62 @@ contains
             new_unittest("iter_wind_solve_decomp", test_iter_wind_solve) &
             ]
     end subroutine collect_wind_iterative_suite
+
+
+    !> The dynamic sentinel and positive constant interval form a disjoint set.
+    subroutine test_alpha_const_namelist(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        real :: alpha
+        real :: minmax(2)
+
+        call check(error, alpha_const_is_valid(-1.0), "-1 selects dynamic alpha")
+        if (allocated(error)) return
+        call check(error, alpha_const_is_valid(0.01), "0.01 is the smallest valid constant alpha")
+        if (allocated(error)) return
+        call check(error, alpha_const_is_valid(1.0), "1.0 is the largest valid constant alpha")
+        if (allocated(error)) return
+        call check(error, .not. alpha_const_is_valid(-0.5), "other negative values are invalid")
+        if (allocated(error)) return
+        call check(error, .not. alpha_const_is_valid(0.0), "zero alpha is invalid")
+        if (allocated(error)) return
+        call check(error, .not. alpha_const_is_valid(0.009), "constants below 0.01 are invalid")
+        if (allocated(error)) return
+        call check(error, .not. alpha_const_is_valid(1.001), "constants above 1.0 are invalid")
+        if (allocated(error)) return
+
+        alpha = 0.0
+        call set_nml_var(alpha, -1.0, "alpha_const")
+        call check(error, alpha == -1.0, "namelist accepts the dynamic-alpha sentinel")
+        if (allocated(error)) return
+
+        call set_nml_var(alpha, 0.01, "alpha_const")
+        call check(error, alpha == 0.01, "namelist accepts the smallest constant alpha")
+        if (allocated(error)) return
+        call set_nml_var(alpha, 1.0, "alpha_const")
+        call check(error, alpha == 1.0, "namelist accepts the largest constant alpha")
+        if (allocated(error)) return
+
+        minmax = get_nml_var_minmax("alpha_const")
+        call check(error, all(minmax == [-1.0, 1.0]), "alpha_const metadata exposes the full valid envelope")
+    end subroutine test_alpha_const_namelist
+
+
+    !> Dynamic alpha retains interior values and is bounded to [0.1, 1.0].
+    subroutine test_dynamic_alpha_bounds(error)
+        type(error_type), allocatable, intent(out) :: error
+
+        real, parameter :: tol = 10.0 * epsilon(1.0)
+
+        call check(error, abs(constrain_dynamic_alpha(-1.0) - 0.1) < tol, &
+                   "dynamic alpha is clamped at the lower bound")
+        if (allocated(error)) return
+        call check(error, abs(constrain_dynamic_alpha(0.4) - 0.4) < tol, &
+                   "dynamic alpha retains an interior value")
+        if (allocated(error)) return
+        call check(error, abs(constrain_dynamic_alpha(2.0) - 1.0) < tol, &
+                   "dynamic alpha is clamped at the upper bound")
+    end subroutine test_dynamic_alpha_bounds
 
 
     !> Build the iterative wind solver on the flat test domain, drive one solve of a

@@ -43,6 +43,8 @@ module land_surface
     use mod_wrf_constants,   only : gravity, KARMAN, cp, R_d, XLV, rcp, STBOLT, epsilon
     use NoahmpHICARmainMod
     use NoahmpHICARinitMod
+    use NoahmpDriverMainMod, only : noahmp
+    use EnergyVarInitMod, only : EnergyVarInitDefault, EnergyVarExitDevice
     use NoahmpIOVarType, only : NoahmpIO_type
     use snow_model_driver, only : sm_var_request, sm_init, snow_model
     use time_object, only : canonical_time_seconds
@@ -52,7 +54,7 @@ module land_surface
 
     private
     public :: lsm_init, lsm, lsm_var_request, lsm_apply_fluxes, &
-              lsm_sync_cadence_checkpoint, NoahmpIO
+              lsm_sync_cadence_checkpoint, initialize_surface_specific_humidity, NoahmpIO
 
     ! Noah LSM required variables.  Some of these should be stored in domain, but tested here for now
     integer :: ids,ide,jds,jde,kds,kde ! Domain dimensions
@@ -64,7 +66,7 @@ module land_surface
     ! also avoids adding LOTS of LSM variables to the main domain datastrucurt
     real,allocatable, dimension(:,:)    :: SMSTAV,SFCRUNOFF,UDRUNOFF,                           &
                                            SNOWC, ACSNOW, ACSNOM,           &
-                                           QSFC, SR, VEGFRAC, windspd,  nmp_albedo, &
+                                           SR, VEGFRAC, windspd,  nmp_albedo, &
                                            nmp_snow, nmp_snowh, nmp_tskin, land_mask, land_mask_noahmp
     real, allocatable, dimension(:,:,:)  :: nmp_snow_t, nmp_soil_t
     real, allocatable, dimension(:,:,:)  :: nmp_snicexy, nmp_snliqxy, nmp_zsnsoxy
@@ -103,6 +105,24 @@ module land_surface
 
 contains
 
+    subroutine initialize_surface_specific_humidity(surface_specific_humidity, water_vapor, restart, &
+                                                    ims, ime, kms, jms, jme)
+        integer, intent(in) :: ims, ime, kms, jms, jme
+        real, intent(inout) :: surface_specific_humidity(ims:,jms:)
+        real, intent(in) :: water_vapor(ims:,kms:,jms:)
+        logical, intent(in) :: restart
+        integer :: i, j
+
+        if (.not. restart) then
+            !$acc parallel loop gang vector collapse(2) present(surface_specific_humidity, water_vapor)
+            do j = jms, jme
+                do i = ims, ime
+                    surface_specific_humidity(i,j) = water_vapor(i,kms,j)
+                enddo
+            enddo
+        endif
+    end subroutine initialize_surface_specific_humidity
+
 
     subroutine lsm_var_request(options)
         implicit none
@@ -115,7 +135,8 @@ contains
                          kVARS%longwave, kVARS%vegetation_fraction, kVARS%canopy_water, kVARS%snow_water_equivalent,    &
                          kVARS%skin_temperature, kVARS%soil_water_content, kVARS%soil_temperature, kVARS%terrain,       &
                          kVARS%sensible_heat, kVARS%latent_heat, kVARS%u_10m, kVARS%v_10m, kVARS%temperature_2m,        &
-                         kVARS%humidity_2m, kVARS%surface_pressure, kVARS%longwave_up, kVARS%ground_heat_flux,          &
+                         kVARS%humidity_2m, kVARS%surface_specific_humidity, kVARS%surface_pressure,                   &
+                         kVARS%longwave_up, kVARS%ground_heat_flux,                                                   &
                          kVARS%soil_totalmoisture, kVARS%soil_deep_temperature, kVARS%roughness_z0, kVARS%ustar,        &
                          kVARS%QFX, kVARS%chs, kVARS%soil_water_content_liq,                    &
                          kVARS%snow_height, kVARS%lai, kVARS%temperature_2m_veg, kVARS%albedo, kVARS%lsm_last_snow,     &
@@ -128,7 +149,8 @@ contains
                          kVARS%skin_temperature, kVARS%soil_water_content, kVARS%soil_temperature, kVARS%terrain,       &
                          kVARS%sensible_heat, kVARS%latent_heat, kVARS%u_10m, kVARS%v_10m, kVARS%temperature_2m,        &
                          kVARS%snow_height, kVARS%QFX,  kVARS%land_emissivity, kVARS%soil_water_content_liq,            &  ! BK 2020/10/26
-                         kVARS%humidity_2m, kVARS%surface_pressure, kVARS%longwave_up, kVARS%ground_heat_flux,          &
+                         kVARS%humidity_2m, kVARS%surface_specific_humidity, kVARS%surface_pressure,                   &
+                         kVARS%longwave_up, kVARS%ground_heat_flux,                                                   &
                          kVARS%soil_totalmoisture, kVARS%roughness_z0])!, kVARS%veg_type])    ! BK uncommented 2021/03/20
                          ! kVARS%soil_type, kVARS%land_mask, kVARS%vegetation_fraction]
         endif
@@ -245,13 +267,13 @@ contains
             call options%alloc_vars( &
                          [kVARS%sst, kVARS%ustar, kVARS%surface_pressure, kVARS%water_vapor,            &
                          kVARS%temperature, kVARS%lakemask, kVARS%sensible_heat, kVARS%latent_heat, kVARS%land_mask,    &
-                         kVARS%QFX, kVARS%chs, kVARS%veg_type,                  &
+                         kVARS%QFX, kVARS%chs, kVARS%veg_type, kVARS%surface_specific_humidity, &
                          kVARS%humidity_2m, kVARS%temperature_2m, kVARS%skin_temperature, kVARS%u_10m, kVARS%v_10m])
 
              call options%restart_vars( &
                          [kVARS%sst, kVARS%potential_temperature, kVARS%water_vapor, kVARS%skin_temperature,        &
                          kVARS%surface_pressure, kVARS%lakemask, kVARS%sensible_heat, kVARS%latent_heat, kVARS%u_10m, kVARS%v_10m,  &
-                         kVARS%QFX,                                                                                 &
+                         kVARS%QFX, kVARS%surface_specific_humidity,                                                &
                          kVARS%humidity_2m, kVARS%temperature_2m])
         endif
 
@@ -362,8 +384,8 @@ contains
         kts = domain%grid%kts
         kte = domain%grid%kte
 
-        if (allocated(QSFC)) then
-            !$acc exit data delete(QSFC, current_precipitation, windspd, land_mask, land_mask_noahmp)
+        if (allocated(current_precipitation)) then
+            !$acc exit data delete(current_precipitation, windspd, land_mask, land_mask_noahmp)
             !$acc exit data delete(landuse_name, &
             !$acc                                    IDVEG, IOPT_CRS,  IOPT_BTR, IOPT_RUNSUB,     &
             !$acc                                    IOPT_SFC, IOPT_FRZ, IOPT_INF, IOPT_RAD,   &
@@ -379,19 +401,24 @@ contains
             !$acc                                    SF_URBAN_PHYSICS, NMP_SOILTSTEP, lsm_dt, julian_day, &
             !$acc                                    num_soil_layers,num_snow_layers,ISURBAN,ISICE,ISWATER, ISLAKE)
 
-            deallocate(QSFC)
         end if
         if (allocated(current_precipitation)) deallocate(current_precipitation)
         if (allocated(windspd)) deallocate(windspd)
         if (allocated(land_mask)) deallocate(land_mask)
         if (allocated(land_mask_noahmp)) deallocate(land_mask_noahmp)
 
-        allocate(QSFC(ims:ime,jms:jme), source=water_vapor(:,kms,:))
         allocate(current_precipitation(ims:ime,jms:jme), source=0.0)
         allocate(windspd(ims:ime,jms:jme), source=0.1)
         allocate(land_mask(ims:ime,jms:jme), source=real(domain%vars_2d(domain%var_indx(kVARS%land_mask)%v)%data_2di))
         allocate(land_mask_noahmp(ims:ime,jms:jme), source=land_mask)
-        !$acc enter data copyin(QSFC, current_precipitation, windspd, land_mask, land_mask_noahmp)
+        !$acc enter data copyin(current_precipitation, windspd, land_mask, land_mask_noahmp)
+
+        ! Noah-MP consumes the previous bulk surface specific humidity as
+        ! trajectory state. Cold starts seed it from the lowest model level;
+        ! restarts retain the value read from the checkpoint.
+        call initialize_surface_specific_humidity( &
+            domain%vars_2d(domain%var_indx(kVARS%surface_specific_humidity)%v)%data_2d, &
+            water_vapor, restart, ims, ime, kms, jms, jme)
 
         if (options%physics%landsurface > kLSM_BASIC) then
             if (options%physics%microphysics == 0) then
@@ -727,14 +754,15 @@ contains
             associate(snow_temperature => domain%vars_3d(domain%var_indx(kVARS%snow_temperature)%v)%data_3d, &
                       Sice => domain%vars_3d(domain%var_indx(kVARS%Sice)%v)%data_3d, &
                       Sliq => domain%vars_3d(domain%var_indx(kVARS%Sliq)%v)%data_3d, &
+                      snow_nlayers => domain%vars_2d(domain%var_indx(kVARS%snow_nlayers)%v)%data_2di, &
                       snow_layer_depth => domain%vars_3d(domain%var_indx(kVARS%snow_layer_depth)%v)%data_3d)
-            !$acc parallel loop gang vector collapse(2) present(snow_temperature, Sice, Sliq, snow_layer_depth, nmp_snow_t, nmp_snicexy, nmp_snliqxy, nmp_zsnsoxy) firstprivate(use_input_snow_temperature)
+            !$acc parallel loop gang vector collapse(2) present(snow_temperature, Sice, Sliq, snow_nlayers, snow_layer_depth, nmp_snow_t, nmp_snicexy, nmp_snliqxy, nmp_zsnsoxy) firstprivate(use_input_snow_temperature)
             do j = jms, jme
                 do i = ims, ime
                     !$acc loop seq
                     do k = 1, num_snow_layers
                         if (use_input_snow_temperature .and. &
-                            k > num_snow_layers + nmp_snow_nlayers(i,j)) then
+                            k > num_snow_layers + snow_nlayers(i,j)) then
                             ! Noah-MP normally initializes active layers from
                             ! ground temperature. Preserve the remapped bulk
                             ! snow temperature instead; inactive slots retain
@@ -994,14 +1022,14 @@ contains
                     call water_simple(options,                              &
                                       domain%vars_2d(domain%var_indx(kVARS%sst)%v)%data_2d,                   &
                                       domain%vars_2d(domain%var_indx(kVARS%surface_pressure)%v)%data_2d,      &
-                                      windspd,                              &
                                       domain%vars_3d(domain%var_indx(kVARS%water_vapor)%v)%data_3d,       &
                                       domain%vars_3d(domain%var_indx(kVARS%temperature)%v)%data_3d,       &
+                                      domain%vars_3d(domain%var_indx(kVARS%density)%v)%data_3d,           &
                                       domain%vars_2d(domain%var_indx(kVARS%sensible_heat)%v)%data_2d,         &
                                       domain%vars_2d(domain%var_indx(kVARS%latent_heat)%v)%data_2d,           &
                                       land_mask,                     &
                                       domain%vars_2d(domain%var_indx(kVARS%lakemask)%v)%data_2d,                      &
-                                      QSFC,                                 &
+                                      domain%vars_2d(domain%var_indx(kVARS%surface_specific_humidity)%v)%data_2d, &
                                       domain%vars_2d(domain%var_indx(kVARS%qfx)%v)%data_2d,                   &
                                       domain%vars_2d(domain%var_indx(kVARS%skin_temperature)%v)%data_2d,      &
                                       domain%vars_2d(domain%var_indx(kVARS%chs)%v)%data_2d,   &
@@ -1229,6 +1257,14 @@ contains
 
                 !$acc update device(lsm_dt, landuse_name, julian_day)
 
+                ! Noah-MP used to initialize its column workspace on every call.
+                ! Its persistent-object optimization retained the energy workspace
+                ! across calls, while a restarted process still begins with fresh
+                ! values. Recreate only that workspace before the input transfer so
+                ! uninterrupted and restarted trajectories use the same state.
+                call EnergyVarExitDevice(noahmp)
+                call EnergyVarInitDefault(noahmp)
+
                 ! Call the Noah-MP Land Surface Model
                 call NoahmpHICARmain(NoahmpIO(domain%nest_indx), ITIMESTEP,                              &
                             domain%sim_time%year,                   &
@@ -1288,7 +1324,7 @@ contains
                             domain%vars_2d(domain%var_indx(kVARS%canopy_water)%v)%data_2d,              &
                             ACSNOM, ACSNOW,                           &
                             domain%vars_2d(domain%var_indx(kVARS%land_emissivity)%v)%data_2d,           &
-                            QSFC, &
+                            domain%vars_2d(domain%var_indx(kVARS%surface_specific_humidity)%v)%data_2d, &
                             domain%vars_2d(domain%var_indx(kVARS%roughness_z0)%v)%data_2d,              &
                             domain%vars_2d(domain%var_indx(kVARS%irr_eventno_sprinkler)%v)%data_2di,    &  ! only used if iopt_irr > 0
                             domain%vars_2d(domain%var_indx(kVARS%irr_eventno_micro)%v)%data_2di,        &  ! only used if iopt_irr > 0

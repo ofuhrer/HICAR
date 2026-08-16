@@ -35,6 +35,7 @@ module wind
     public:: balance_uvw, update_winds, init_winds, calc_w_real, wind_var_request
     public:: update_wind_dqdt, calc_divergence, projection_constraint_norm2
     public:: get_last_projection_diagnostics
+    public:: constrain_dynamic_alpha
 
     integer :: ids, ide, jds, jde, kds, kde,  &
                ims, ime, jms, jme, kms, kme,  &
@@ -46,11 +47,22 @@ module wind
     real, parameter::deg2rad=0.017453293 !2*pi/360
     real, parameter :: rad2deg=57.2957779371
     real, parameter :: DEFAULT_FR_L = 1000.0
+    real, parameter :: DYNAMIC_ALPHA_MIN = 0.1
+    real, parameter :: DYNAMIC_ALPHA_MAX = 1.0
     real(c_double), parameter :: ADJOINT_CONSERVATION_TOL = 2.0e-5_c_double
     real(c_double) :: last_constraint_initial_norm2 = -1.0_c_double
     real(c_double) :: last_constraint_final_norm2 = -1.0_c_double
     real(c_double) :: last_constraint_relative = -1.0_c_double
 contains
+
+    !> Apply the published bounds for Froude-number-diagnosed alpha.
+    pure elemental real function constrain_dynamic_alpha(value)
+        !$acc routine seq
+        implicit none
+        real, intent(in) :: value
+
+        constrain_dynamic_alpha = min(max(value, DYNAMIC_ALPHA_MIN), DYNAMIC_ALPHA_MAX)
+    end function constrain_dynamic_alpha
 
 
     subroutine get_last_projection_diagnostics(initial_norm2, final_norm2, relative_residual)
@@ -1288,11 +1300,7 @@ contains
         real,    intent(in)    :: froude(ims:ime,kms:kme,jms:jme)
         real,    intent(inout) :: alpha(ims:ime,kms:kme,jms:jme)
 
-        real :: alpha_min, alpha_max
         integer :: i, j, k
-
-        alpha_min = 0.2
-        alpha_max = 2.0
         
         !$acc data present(alpha, froude)
 
@@ -1301,10 +1309,11 @@ contains
         !$acc kernels
         alpha = 1.0 - 0.5*max((1.0/froude)**4,0.00001)*(sqrt(1.0+4.0/max((1.0/froude)**4,0.00001)) - 1.0) 
         alpha = sqrt(max(alpha,0.00001))
-        alpha = min(max(alpha,alpha_min),alpha_max)
+        alpha = constrain_dynamic_alpha(alpha)
 
-        !set alpha at top of domain to 0.2 to limit flux accross upper boundary
-        alpha(:,kme,:) = alpha_min
+        ! Set alpha at the top of the domain to its minimum to limit flux
+        ! across the upper boundary.
+        alpha(:,kme,:) = DYNAMIC_ALPHA_MIN
 
         !$acc end kernels
 

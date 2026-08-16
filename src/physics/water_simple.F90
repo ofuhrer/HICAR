@@ -8,21 +8,40 @@
 module module_water_simple
     use data_structures
     use options_interface,   only : options_t
-    use mod_wrf_constants,   only : XLV, gravity, KARMAN
+    use mod_wrf_constants,   only : XLV, gravity, KARMAN, cp
     use mod_atm_utilities,   only : sat_mr
     implicit none
 
 contains
 
-    subroutine water_simple(options, sst, psfc, wind, qv, temperature,  &
-                            sensible_heat, latent_heat, landmask, lakemask, &
+    !> Convert the MM5 surface-layer exchange velocity into kinematic and
+    !! energetic open-water fluxes.  CHS is already an exchange velocity
+    !! [m s-1] (u* kappa / stability denominator), not a dimensionless bulk
+    !! coefficient, so wind speed must not be applied a second time.
+    pure elemental subroutine simple_water_flux(exchange_velocity, air_density, &
+                                                 sst, air_temperature, qv_surf, qv_air, &
+                                                 sensible_heat, evap_flux, latent_heat)
+        !$acc routine seq
+        implicit none
+        real, intent(in)  :: exchange_velocity, air_density
+        real, intent(in)  :: sst, air_temperature, qv_surf, qv_air
+        real, intent(out) :: sensible_heat, evap_flux, latent_heat
+
+        sensible_heat = air_density * cp * (1.0+0.8*qv_air) * exchange_velocity * &
+                        (sst-air_temperature)
+        evap_flux      = air_density * exchange_velocity * (qv_surf-qv_air)
+        latent_heat    = evap_flux * XLV
+    end subroutine simple_water_flux
+
+    subroutine water_simple(options, sst, psfc, qv, temperature,  &
+                            density, sensible_heat, latent_heat, landmask, lakemask, &
                             qv_surf, evap_flux, tskin, coef_heat_exch, vegtype, ims, ime, kms, kme, jms, jme, its, ite, jts, jte)
         implicit none
         type(options_t),intent(in)    :: options        
         real,    dimension(ims:ime,jms:jme),  intent(inout) :: sensible_heat, latent_heat, qv_surf, evap_flux, tskin
-        real,    dimension(ims:ime,jms:jme),  intent(in)    :: sst, psfc, wind, coef_heat_exch, lakemask
+        real,    dimension(ims:ime,jms:jme),  intent(in)    :: sst, psfc, coef_heat_exch, lakemask
         real,    dimension(ims:ime,jms:jme),  intent(in)    :: landmask
-        real,    dimension(ims:ime,kms:kme,jms:jme),  intent(in)    :: qv, temperature
+        real,    dimension(ims:ime,kms:kme,jms:jme),  intent(in)    :: qv, temperature, density
         integer, dimension(ims:ime,jms:jme), intent(in)    :: vegtype
         integer, intent(in)                     :: ims, ime, kms, kme, jms, jme, its, ite, jts, jte
 
@@ -32,7 +51,7 @@ contains
         options_water_cat = options%lsm%water_category
         options_lake_cat  = options%lsm%lake_category
 
-        !$acc data present(sst,psfc,wind,qv,temperature,sensible_heat,latent_heat,landmask,lakemask,qv_surf,evap_flux,tskin,coef_heat_exch,vegtype) copyin(ims,ime,jms,jme)
+        !$acc data present(sst,psfc,qv,temperature,density,sensible_heat,latent_heat,landmask,lakemask,qv_surf,evap_flux,tskin,coef_heat_exch,vegtype) copyin(ims,ime,jms,jme)
         !$acc parallel loop gang vector collapse(2)
         do j=jts,jte
             do i=its,ite
@@ -62,10 +81,9 @@ contains
                     ! silently zeroed latent heat over open water in the normal regime.
                     qv_surf(i,j) = max(qv_surf(i,j), 1.0e-6)
 
-                    sensible_heat(i,j) = coef_heat_exch(i,j) * wind(i,j) * (sst(i,j)-temperature(i,1,j))
-                    evap_flux(i,j)     = coef_heat_exch(i,j) * wind(i,j) * (qv_surf(i,j)-qv(i,1,j))
-                    
-                    latent_heat(i,j)   = evap_flux(i,j) * XLV
+                    call simple_water_flux(coef_heat_exch(i,j), density(i,1,j), &
+                                           sst(i,j), temperature(i,1,j), qv_surf(i,j), qv(i,1,j), &
+                                           sensible_heat(i,j), evap_flux(i,j), latent_heat(i,j))
                     tskin(i,j)   = sst(i,j)
 
                 endif

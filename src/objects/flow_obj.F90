@@ -100,8 +100,6 @@ contains
 
         call this%sim_time%set(this%sim_time%mjd() + dt%days())
 
-        call this%check_ended()
-
     end subroutine increment_sim_time
 
     module subroutine set_sim_time(this, time)
@@ -127,7 +125,7 @@ contains
         type(Time_type) :: time_tmp
 
         if (this%ended) return
-        
+
         call time_tmp%set(this%sim_time%mjd() + this%small_time_delta%days())
 
         if (time_tmp > this%end_time) then
