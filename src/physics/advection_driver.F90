@@ -175,14 +175,11 @@ contains
         allocate(theta_min_k(kms:kme), theta_max_k(kms:kme))
         allocate(theta_bound_min_k(kms:kme), theta_bound_max_k(kms:kme))
         associate(th => domain%vars_3d(domain%var_indx(kVARS%potential_temperature)%v)%data_3d)
-        ! Keep the level loop on device so this is one kernel, not one launch
-        ! and scalar round trip per vertical level.
-        !$acc parallel loop gang default(present) copyout(theta_min_k, theta_max_k) &
-        !$acc          private(theta_min, theta_max)
         do k = kms, kme
             theta_min =  huge(1.0)
             theta_max = -huge(1.0)
-            !$acc loop vector collapse(2) reduction(min:theta_min) reduction(max:theta_max)
+            !$acc parallel loop gang vector collapse(2) default(present) &
+            !$acc          reduction(min:theta_min) reduction(max:theta_max)
             do j = jts, jte
                 do i = its, ite
                     theta_min = min(theta_min, th(i,k,j))
